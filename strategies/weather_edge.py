@@ -64,7 +64,10 @@ class WeatherEdgeStrategy(BaseStrategy):
             if sig:
                 signals.append(sig)
 
-        logger.info(f"WeatherEdge: {len(signals)} signals from {len(temp_markets)} candidates")
+        # Cap to best 5 signals to leave room for other strategies
+        signals.sort(key=lambda s: s.get('edge', 0), reverse=True)
+        signals = signals[:5]
+        logger.info(f"WeatherEdge: {len(signals)} signals (top 5 by edge) from {len(temp_markets)} candidates")
         return signals
 
     def _is_weather(self, m):

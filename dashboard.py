@@ -40,13 +40,25 @@ def api_status():
             logger.error(f"Trades fetch failed: {e}")
 
     latest = status_rows[0] if status_rows else {}
-    total = len(trades)
-    wins = sum(1 for t in trades if (t.get('price') or 0) > 0)
-    win_rate = (wins / total * 100) if total > 0 else 0
+
+    # Separate entries from settlements
+    entries = [t for t in trades if t.get('action') != 'settle']
+    settlements = [t for t in trades if t.get('action') == 'settle']
+    wins = sum(1 for t in settlements if t.get('confidence', 0) == 100)  # We log conf=100 for wins
+    total_settled = len(settlements)
+    win_rate = (wins / total_settled * 100) if total_settled > 0 else 0
+
+    # Calculate realized P&L from settlements
+    realized_pnl = 0.0
+    for t in settlements:
+        if t.get('confidence', 0) == 100:  # WIN
+            realized_pnl += (t.get('count') or 1) * (1.0 - (t.get('price') or 0))
+        else:  # LOSS
+            realized_pnl -= (t.get('count') or 1) * (t.get('price') or 0)
 
     # Per-strategy breakdown
     strat_stats = {}
-    for t in trades:
+    for t in entries:
         s = t.get('strategy', 'unknown')
         if s not in strat_stats:
             strat_stats[s] = {'trades': 0, 'total_conf': 0}
@@ -68,8 +80,11 @@ def api_status():
             'active_positions': latest.get('active_positions', 0),
         },
         'stats': {
-            'total_trades': total,
+            'total_trades': len(entries),
+            'settled': total_settled,
+            'wins': wins,
             'win_rate': round(win_rate, 1),
+            'realized_pnl': round(realized_pnl, 2),
         },
         'strategies': strategy_breakdown,
         'trades': trades[:50],
@@ -131,7 +146,9 @@ async function load() {
         <div class="card"><div class="label">Daily P&L</div><div class="value ${pnlC}">${b.daily_pnl>=0?'+':''}$${(b.daily_pnl||0).toFixed(2)}</div></div>
         <div class="card"><div class="label">Trades Today</div><div class="value">${b.trades_today||0}</div></div>
         <div class="card"><div class="label">Total Trades</div><div class="value">${s.total_trades}</div></div>
+        <div class="card"><div class="label">Settled</div><div class="value">${s.settled||0} (${s.wins||0}W)</div></div>
         <div class="card"><div class="label">Win Rate</div><div class="value ${s.win_rate>=50?'green':'yellow'}">${s.win_rate}%</div></div>
+        <div class="card"><div class="label">Realized P&L</div><div class="value ${(s.realized_pnl||0)>=0?'green':'red'}">$${(s.realized_pnl||0).toFixed(2)}</div></div>
         <div class="card"><div class="label">Open Positions</div><div class="value">${b.active_positions||0}</div></div>
         <div class="card"><div class="label">Last Check</div><div class="value" style="font-size:13px">${b.last_check==='never'?'Never':new Date(b.last_check).toLocaleString()}</div></div>
       </div>`;
