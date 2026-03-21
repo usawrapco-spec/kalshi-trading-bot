@@ -98,40 +98,52 @@ class KalshiBot:
             self._log_status()
             return
 
-        # Fetch markets - paginate to get past the KXMVE parlays
-        logger.info("Fetching markets...")
-        data = self.client.get_markets(status='open', limit=3000)
-        raw_markets = data.get('markets', [])
+        # Fetch markets from multiple sources to get real binary markets
+        # The default /markets endpoint is flooded with KXMVE parlays,
+        # so we also use /events and series-specific fetches.
+        logger.info("Fetching markets from multiple sources...")
+        seen_tickers = set()
+        markets = []
 
-        # Filter out KXMVE multivariate combo/parlay markets
-        before = len(raw_markets)
-        markets = [
-            m for m in raw_markets
-            if not (m.get('ticker') or '').startswith('KXMVE')
-        ]
-        filtered = before - len(markets)
-        logger.info(f"Filtered {filtered} KXMVE combos from {before} raw ({len(markets)} binary remaining)")
+        def _add_markets(batch, source):
+            added = 0
+            for m in batch:
+                ticker = m.get('ticker')
+                if not ticker or ticker in seen_tickers:
+                    continue
+                if ticker.startswith('KXMVE'):
+                    continue  # Skip multivariate parlays
+                m.setdefault('status', 'open')
+                markets.append(m)
+                seen_tickers.add(ticker)
+                added += 1
+            if added:
+                logger.info(f"  +{added} from {source}")
 
-        # Fetch specific series that may not appear in general listing
-        seen_tickers = {m.get('ticker') for m in markets}
-        series_list = [
-            # Weather
-            'KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN',
-        ]
-        for series in series_list:
+        # 1. Events endpoint - returns categorized binary markets
+        try:
+            events = self.client.get_events(status='open', limit=200)
+            event_markets = []
+            for evt in events:
+                for m in (evt.get('markets') or []):
+                    event_markets.append(m)
+            _add_markets(event_markets, f"events ({len(events)} events)")
+        except Exception as e:
+            logger.error(f"Events fetch failed: {e}")
+
+        # 2. Direct markets fetch (will get some non-KXMVE binary markets)
+        try:
+            data = self.client.get_markets(status='open', limit=1000)
+            _add_markets(data.get('markets', []), "markets endpoint")
+        except Exception as e:
+            logger.error(f"Markets fetch failed: {e}")
+
+        # 3. Weather series
+        for series in ('KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN'):
             try:
-                extra = self.client.get_markets_by_series(series)
-                added = 0
-                for em in extra:
-                    if em.get('ticker') not in seen_tickers:
-                        em.setdefault('status', 'open')
-                        markets.append(em)
-                        seen_tickers.add(em.get('ticker'))
-                        added += 1
-                if added:
-                    logger.info(f"  +{added} from {series}")
+                _add_markets(self.client.get_markets_by_series(series), series)
             except Exception as e:
-                logger.debug(f"  {series} fetch failed: {e}")
+                logger.debug(f"  {series} failed: {e}")
 
         if not markets:
             logger.warning("No markets returned")
