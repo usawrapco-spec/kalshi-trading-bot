@@ -107,18 +107,22 @@ class KalshiBot:
 
         def _add_markets(batch, source):
             added = 0
+            statuses = {}
             for m in batch:
                 ticker = m.get('ticker')
                 if not ticker or ticker in seen_tickers:
                     continue
                 if ticker.startswith('KXMVE'):
                     continue  # Skip multivariate parlays
-                m.setdefault('status', 'open')
+                # Force status to 'open' - we only fetch from open endpoints
+                raw_status = m.get('status', 'missing')
+                statuses[raw_status] = statuses.get(raw_status, 0) + 1
+                m['status'] = 'open'
                 markets.append(m)
                 seen_tickers.add(ticker)
                 added += 1
             if added:
-                logger.info(f"  +{added} from {source}")
+                logger.info(f"  +{added} from {source} (statuses: {statuses})")
 
         # 1. Events endpoint - returns categorized binary markets
         try:
