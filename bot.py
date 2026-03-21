@@ -98,9 +98,9 @@ class KalshiBot:
             self._log_status()
             return
 
-        # Fetch markets
-        logger.info("Fetching markets (limit=1000)...")
-        data = self.client.get_markets(status='open', limit=1000)
+        # Fetch markets - paginate to get past the KXMVE parlays
+        logger.info("Fetching markets...")
+        data = self.client.get_markets(status='open', limit=3000)
         raw_markets = data.get('markets', [])
 
         # Filter out KXMVE multivariate combo/parlay markets
@@ -110,19 +110,23 @@ class KalshiBot:
             if not (m.get('ticker') or '').startswith('KXMVE')
         ]
         filtered = before - len(markets)
-        logger.info(f"Filtered {filtered} KXMVE combo markets ({len(markets)} binary remaining)")
+        logger.info(f"Filtered {filtered} KXMVE combos from {before} raw ({len(markets)} binary remaining)")
 
-        # Fetch KXHIGH weather series separately (they don't appear in the default list)
+        # Fetch specific series that may not appear in general listing
         seen_tickers = {m.get('ticker') for m in markets}
-        for series in ('KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN'):
+        series_list = [
+            # Weather
+            'KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN',
+        ]
+        for series in series_list:
             try:
-                weather = self.client.get_markets_by_series(series)
+                extra = self.client.get_markets_by_series(series)
                 added = 0
-                for wm in weather:
-                    if wm.get('ticker') not in seen_tickers:
-                        wm.setdefault('status', 'open')  # series fetch implies open
-                        markets.append(wm)
-                        seen_tickers.add(wm.get('ticker'))
+                for em in extra:
+                    if em.get('ticker') not in seen_tickers:
+                        em.setdefault('status', 'open')
+                        markets.append(em)
+                        seen_tickers.add(em.get('ticker'))
                         added += 1
                 if added:
                     logger.info(f"  +{added} from {series}")

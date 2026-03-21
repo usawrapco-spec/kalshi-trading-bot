@@ -88,13 +88,14 @@ class KalshiAPIClient:
         response.raise_for_status()
         return response.json()
     
-    def get_markets(self, status='open', limit=1000, **kwargs):
+    def get_markets(self, status='open', limit=3000, **kwargs):
         """Get markets with cursor pagination to fetch all pages."""
         all_markets = []
         cursor = None
         pages = 0
+        max_pages = 10  # Safety limit
         try:
-            while True:
+            while pages < max_pages:
                 params = {'status': status, 'limit': min(limit, 1000), **kwargs}
                 if cursor:
                     params['cursor'] = cursor
@@ -103,13 +104,12 @@ class KalshiAPIClient:
                 all_markets.extend(batch)
                 pages += 1
                 cursor = data.get('cursor')
-                # Stop if no more pages or we have enough
                 if not cursor or not batch or len(all_markets) >= limit:
                     break
             logger.info(f"Fetched {len(all_markets)} markets across {pages} page(s)")
             return {'markets': all_markets[:limit]}
         except Exception as e:
-            logger.error(f"Error getting markets: {e}")
+            logger.error(f"Error getting markets (page {pages+1}): {e}")
             return {'markets': all_markets}
 
     def get_markets_by_series(self, series_ticker, status='open'):
