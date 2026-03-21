@@ -28,8 +28,8 @@ def get_db():
 # ============================================================
 
 @app.route('/')
-def health():
-    return "OK"
+def dashboard():
+    return DASHBOARD_HTML
 
 @app.route('/api/status')
 def api_status():
