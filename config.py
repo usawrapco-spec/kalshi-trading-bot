@@ -26,7 +26,7 @@ class Config:
     MAX_ORDER_SIZE = int(os.getenv('MAX_ORDER_SIZE', 50))
 
     # Paper Trading
-    PAPER_BALANCE = float(os.getenv('PAPER_BALANCE', 10.0))  # $10 starting balance
+    PAPER_BALANCE = float(os.getenv('PAPER_BALANCE', 25.0))  # $25 starting balance
     ENABLE_TRADING = os.getenv('ENABLE_TRADING', 'false').lower() == 'true'  # False = paper only
 
     # Strategy Toggles
