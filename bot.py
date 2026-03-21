@@ -35,6 +35,7 @@ from strategies.orderbook_edge import OrderBookEdgeStrategy
 from strategies.cross_platform import CrossPlatformEdgeStrategy
 from dashboard import start_dashboard
 from utils.market_helpers import get_yes_price as get_yes_price_dollars, get_volume
+from utils.ai_debate import run_debate
 
 logger = setup_logger('main')
 
@@ -222,6 +223,8 @@ class KalshiBot:
 
         trades_placed = 0
         cycle_spent = 0.0
+        debates_used = 0
+        MAX_DEBATES = 4  # Max 4 AI calls per cycle (2 per trade x 2 trades)
         for sig in all_signals:
             if trades_placed >= MAX_TRADES:
                 break
@@ -239,10 +242,9 @@ class KalshiBot:
 
             cost = sig['count'] * price_for_side
             if cycle_spent + cost > MAX_CYCLE_SPEND:
-                # Reduce count to fit within cycle budget
                 remaining = MAX_CYCLE_SPEND - cycle_spent
                 if remaining < price_for_side:
-                    continue  # Can't even afford 1 contract
+                    continue
                 sig['count'] = max(1, int(remaining / price_for_side))
                 cost = sig['count'] * price_for_side
 
@@ -250,8 +252,18 @@ class KalshiBot:
             logger.info(
                 f"TOP PICK: {sig['ticker']} BUY {sig['side'].upper()} x{sig['count']} "
                 f"conf={conf:.0f} edge={edge:+.2f} cost=${cost:.2f} "
-                f"[{sig.get('strategy_type', '?')}] - {sig.get('reason', '')}"
+                f"[{sig.get('strategy_type', '?')}]"
             )
+
+            # Run Grok vs Claude debate before trading
+            if debates_used < MAX_DEBATES:
+                should_trade, sig, debate_log = run_debate(sig, price)
+                debates_used += 2  # Each debate uses 2 API calls
+                if not should_trade:
+                    logger.info(f"  Trade vetoed by debate: {debate_log}")
+                    continue
+            else:
+                logger.info(f"  Debate limit reached, trading without debate")
 
             traded = self.risk.record_paper_trade(
                 ticker=sig['ticker'],
@@ -269,14 +281,17 @@ class KalshiBot:
             cycle_spent += cost
 
             if self.db:
+                reason = sig.get('reason', '')
+                if debates_used > 0:
+                    reason = f"[DEBATED] {reason}"
                 self.db.log_trade({
                     'ticker': sig['ticker'],
                     'action': 'buy',
                     'side': sig['side'],
                     'count': sig['count'],
                     'strategy': sig.get('strategy_type', 'unknown'),
-                    'reason': sig.get('reason', ''),
-                    'confidence': conf,
+                    'reason': reason,
+                    'confidence': sig.get('confidence', conf),
                     'order_id': 'paper',
                     'price': price_for_side,
                 })
