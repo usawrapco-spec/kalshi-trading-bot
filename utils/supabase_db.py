@@ -15,7 +15,7 @@ class SupabaseDB:
     def __init__(self):
         """Initialize Supabase client."""
         self.supabase_url = os.getenv('SUPABASE_URL')
-        self.supabase_key = os.getenv('SUPABASE_SERVICE_KEY')
+        self.supabase_key = os.getenv('SUPABASE_KEY') or os.getenv('SUPABASE_SERVICE_KEY')
         
         if not self.supabase_url or not self.supabase_key:
             logger.warning("⚠️  Supabase credentials not found - using local storage")

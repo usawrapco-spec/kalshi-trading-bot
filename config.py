@@ -15,7 +15,7 @@ class Config:
     
     # Supabase Configuration
     SUPABASE_URL = os.getenv('SUPABASE_URL')
-    SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY')
+    SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_KEY') or os.getenv('SUPABASE_SERVICE_KEY')
     
     # Risk Management
     MAX_POSITION_SIZE = int(os.getenv('MAX_POSITION_SIZE', 100))
