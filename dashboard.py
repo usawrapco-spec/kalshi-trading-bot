@@ -11,7 +11,6 @@ from collections import defaultdict
 from flask import Flask, render_template_string, request, jsonify
 from flask_cors import CORS
 
-from bot import KalshiBot
 from utils.supabase_db import SupabaseDB
 from utils.logger import setup_logger
 
