@@ -9,10 +9,12 @@ logger = setup_logger('risk_manager')
 
 MIN_CONFIDENCE = 30
 MAX_OPEN_POSITIONS = 50
-MAX_BALANCE_PCT = 0.20  # Max 20% of balance per trade
-DAILY_LOSS_STOP = -5.0  # 50% of $10 paper balance
-KELLY_FRACTION = 0.25   # Quarter-Kelly for conservative sizing
-MIN_VOLUME = 10         # Skip illiquid markets
+MAX_TRADE_PCT = 0.10       # Max 10% of starting balance per single trade ($1)
+MAX_STRATEGY_PCT = 0.20    # Max 20% of starting balance per strategy per cycle ($2)
+CASH_RESERVE_PCT = 0.30    # Never go below 30% of starting balance ($3)
+DAILY_LOSS_STOP = -5.0     # 50% of $10 paper balance
+KELLY_FRACTION = 0.25      # Quarter-Kelly for conservative sizing
+STARTING_BALANCE = 10.0    # Reference for percentage calculations
 
 
 class RiskManager:
@@ -116,12 +118,34 @@ class RiskManager:
         if len(self.positions) >= MAX_OPEN_POSITIONS:
             logger.info(f"SKIP {ticker}: max positions ({MAX_OPEN_POSITIONS}) reached")
             return False
-        if self.paper_balance <= 0:
-            logger.info(f"SKIP {ticker}: paper balance ${self.paper_balance:.2f} <= $0")
+
+        # Cash reserve: never go below 30% of starting balance
+        cash_floor = STARTING_BALANCE * CASH_RESERVE_PCT
+        if self.paper_balance <= cash_floor:
+            logger.info(f"SKIP {ticker}: balance ${self.paper_balance:.2f} <= cash reserve ${cash_floor:.2f}")
             return False
+
+        # Max 10% of starting balance per single trade
+        max_per_trade = STARTING_BALANCE * MAX_TRADE_PCT
         cost = count * entry_price
-        if cost > self.paper_balance:
-            logger.info(f"SKIP {ticker}: cost ${cost:.2f} > balance ${self.paper_balance:.2f}")
+        if cost > max_per_trade:
+            # Reduce count to fit within limit
+            count = max(1, int(max_per_trade / entry_price))
+            cost = count * entry_price
+
+        if cost > self.paper_balance - cash_floor:
+            logger.info(f"SKIP {ticker}: cost ${cost:.2f} would breach cash reserve")
+            return False
+
+        # Max 20% of starting balance per strategy per cycle
+        max_per_strategy = STARTING_BALANCE * MAX_STRATEGY_PCT
+        strategy_spent = sum(
+            p['count'] * p['entry_price']
+            for p in self.positions.values()
+            if p.get('strategy') == strategy
+        )
+        if strategy_spent + cost > max_per_strategy:
+            logger.info(f"SKIP {ticker}: strategy {strategy} at ${strategy_spent:.2f} + ${cost:.2f} > ${max_per_strategy:.2f} limit")
             return False
 
         self.positions[ticker] = {
