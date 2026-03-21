@@ -62,7 +62,10 @@ class HighProbLockStrategy(BaseStrategy):
 
             checked += 1
 
-        logger.info(f"HighProbLock: {in_range} markets in {LOCK_MIN:.0%}-{LOCK_MAX:.0%} range, {len(signals)} signals")
+        # Cap to top 3 - each costs ~$0.95 so 3 = ~$2.85 from $10 balance
+        signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
+        signals = signals[:3]
+        logger.info(f"HighProbLock: {in_range} markets in {LOCK_MIN:.0%}-{LOCK_MAX:.0%} range, {len(signals)} signals (top 3)")
         return signals
 
     def _evaluate(self, m, side, price, volume, now):
@@ -123,7 +126,7 @@ class HighProbLockStrategy(BaseStrategy):
 
         return {
             'ticker': ticker, 'title': m.get('title', ''), 'action': 'buy',
-            'side': side, 'count': 10, 'confidence': confidence,
+            'side': side, 'count': 1, 'confidence': confidence,
             'strategy_type': 'high_prob_lock',
             'edge': roi, 'model_prob': price,
             'reason': f"HighProbLock: {side.upper()} at {price:.0%}, ROI={roi:.1%}, {hours_left:.1f}h left",
