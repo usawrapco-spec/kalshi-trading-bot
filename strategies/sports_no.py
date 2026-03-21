@@ -37,7 +37,7 @@ class SportsNOStrategy(BaseStrategy):
         rejects = {}
 
         for m in markets:
-            if m.get('status') != 'open':
+            if m.get('status', 'open') != 'open':
                 continue
             if not self._is_sports(m):
                 continue

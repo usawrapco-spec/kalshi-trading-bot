@@ -91,18 +91,16 @@ class KalshiBot:
         data = self.client.get_markets(status='open', limit=1000)
         raw_markets = data.get('markets', [])
 
-        # Filter out KXMVE multivariate combo/parlay markets and non-binary types
+        # Filter out KXMVE multivariate combo/parlay markets
         before = len(raw_markets)
         markets = [
             m for m in raw_markets
             if not (m.get('ticker') or '').startswith('KXMVE')
-            and m.get('market_type', 'binary') == 'binary'
         ]
         filtered = before - len(markets)
-        if filtered:
-            logger.info(f"Filtered out {filtered} KXMVE/non-binary markets ({len(markets)} remaining)")
+        logger.info(f"Filtered {filtered} KXMVE combo markets ({len(markets)} binary remaining)")
 
-        # Also fetch KXHIGH weather series separately (they may not appear in the main list)
+        # Fetch KXHIGH weather series separately (they don't appear in the default list)
         seen_tickers = {m.get('ticker') for m in markets}
         for series in ('KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN'):
             try:
@@ -110,13 +108,14 @@ class KalshiBot:
                 added = 0
                 for wm in weather:
                     if wm.get('ticker') not in seen_tickers:
+                        wm.setdefault('status', 'open')  # series fetch implies open
                         markets.append(wm)
                         seen_tickers.add(wm.get('ticker'))
                         added += 1
                 if added:
-                    logger.info(f"  Added {added} markets from series {series}")
+                    logger.info(f"  +{added} from {series}")
             except Exception as e:
-                logger.debug(f"  Series {series} fetch failed: {e}")
+                logger.debug(f"  {series} fetch failed: {e}")
 
         if not markets:
             logger.warning("No markets returned")
@@ -172,6 +171,11 @@ class KalshiBot:
                     f"Signal: {sig['ticker']} BUY {sig['side'].upper()} x{sig['count']} "
                     f"conf={conf:.0f} edge={edge:+.2f} - {sig.get('reason', '')}"
                 )
+
+                # Check position limits before paper trading
+                if not self.risk.check_max_positions():
+                    logger.info(f"  Skipping {sig['ticker']} - max positions reached")
+                    break
 
                 # Paper trade
                 self.risk.record_paper_trade(

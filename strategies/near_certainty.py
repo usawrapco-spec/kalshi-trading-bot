@@ -33,7 +33,7 @@ class NearCertaintyStrategy(BaseStrategy):
         closing_soon = 0
 
         for m in markets:
-            if m.get('status') != 'open':
+            if m.get('status', 'open') != 'open':
                 continue
 
             yes_c = get_yes_cents(m)

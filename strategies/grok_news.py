@@ -37,7 +37,7 @@ class GrokNewsStrategy(BaseStrategy):
             return []
 
         # No pre-filtering. Sort by 24h volume, take top 20.
-        open_mkts = [m for m in markets if m.get('status') == 'open']
+        open_mkts = [m for m in markets if m.get('status', 'open') == 'open']
         open_mkts.sort(key=lambda m: get_volume(m), reverse=True)
         candidates = open_mkts[:MAX_PER_CYCLE]
 

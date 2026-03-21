@@ -35,7 +35,7 @@ class ProbabilityArbStrategy(BaseStrategy):
         arb_found = 0
 
         for m in markets:
-            if m.get('status') != 'open':
+            if m.get('status', 'open') != 'open':
                 continue
 
             yes_price = get_price(m, ['yes_bid', 'yes_bid_dollars', 'last_price', 'last_price_dollars'])

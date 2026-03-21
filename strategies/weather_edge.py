@@ -27,7 +27,7 @@ WEATHER_KEYWORDS = [
     'heat', 'cold', 'freeze', 'frost',
 ]
 
-OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast'
+OPEN_METEO_URL = 'https://ensemble-api.open-meteo.com/v1/ensemble'
 MIN_EDGE = 0.05
 
 
