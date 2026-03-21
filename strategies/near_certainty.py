@@ -142,14 +142,9 @@ class NearCertaintyStrategy(BaseStrategy):
         volume = get_volume(m)
 
         side, price = None, 0
-        if 3 <= yes_c <= 15:
+        if 1 <= yes_c <= 15:
             side, price = 'yes', yes_c
-        elif 3 <= no_c <= 15:
-            side, price = 'no', no_c
-        # Expanded: 1-2c too
-        elif 1 <= yes_c <= 2 and volume > 50:
-            side, price = 'yes', yes_c
-        elif 1 <= no_c <= 2 and volume > 50:
+        elif 1 <= no_c <= 15:
             side, price = 'no', no_c
         else:
             return None

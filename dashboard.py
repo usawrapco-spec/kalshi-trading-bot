@@ -1,1118 +1,35 @@
 """
-Kalshi Trading Bot Dashboard - BADASS EDITION
-Ultimate professional trading dashboard inspired by TradingView, Binance Pro, and Material Dashboard 3
+KALSHI ALPHA — Neural Cortex Dashboard
+Sci-fi terminal-style trading dashboard with real-time Supabase data.
 """
 
 import os
 import json
-import asyncio
-from datetime import datetime, timedelta
-from collections import defaultdict
-from flask import Flask, render_template_string, request, jsonify
-from flask_cors import CORS
-
-from utils.supabase_db import SupabaseDB
-from utils.logger import setup_logger
-
-logger = setup_logger('dashboard')
+import threading
+from flask import Flask, jsonify
 
 app = Flask(__name__)
-CORS(app)
 
-# Global bot instance
-bot_instance = None
-
-# ULTIMATE BADASS DASHBOARD TEMPLATE
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kalshi Trading Bot Dashboard</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
-    <style>
-        /* ─── Reset & Base ─────────────────────────────────────────────── */
-        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
-        :root {
-            --bg: #080a12;
-            --bg-card: rgba(22, 25, 38, 0.75);
-            --bg-panel: rgba(18, 21, 32, 0.8);
-            --bg-table-row: rgba(26, 29, 42, 0.6);
-            --bg-hover: rgba(40, 44, 64, 0.6);
-            --bg-input: rgba(26, 29, 42, 0.8);
-            --border: rgba(255, 255, 255, 0.06);
-            --border-focus: #4c8dff;
-            --text: #e8eaf4;
-            --text-dim: #9499b3;
-            --text-muted: #5a5f78;
-            --accent-blue: #4c8dff;
-            --accent-green: #00e68a;
-            --accent-red: #ff4d6a;
-            --accent-orange: #ff9f43;
-            --accent-purple: #a855f7;
-            --accent-teal: #14b8a6;
-            --accent-pink: #f472b6;
-            --accent-yellow: #fbbf24;
-            --glow-blue: rgba(76, 141, 255, 0.15);
-            --glow-green: rgba(0, 230, 138, 0.15);
-            --glow-purple: rgba(168, 85, 247, 0.15);
-            --glass: rgba(255, 255, 255, 0.03);
-            --glass-border: rgba(255, 255, 255, 0.08);
-            --font: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', 'Consolas', monospace;
-            --radius: 16px;
-            --radius-sm: 10px;
-            --shadow-sm: 0 2px 8px rgba(0,0,0,0.2);
-            --shadow-md: 0 8px 32px rgba(0,0,0,0.3);
-            --shadow-lg: 0 16px 48px rgba(0,0,0,0.4);
-            --shadow-glow-blue: 0 0 20px rgba(76,141,255,0.2);
-            --shadow-glow-green: 0 0 20px rgba(0,230,138,0.2);
-        }
-
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
-
-        body {
-            font-family: var(--font);
-            background: var(--bg);
-            background-image:
-                radial-gradient(ellipse 80% 50% at 50% -20%, rgba(76,141,255,0.08), transparent),
-                radial-gradient(ellipse 60% 40% at 80% 100%, rgba(168,85,247,0.05), transparent);
-            color: var(--text);
-            line-height: 1.6;
-            min-height: 100vh;
-            padding: 0 24px 40px;
-            max-width: 1600px;
-            margin: 0 auto;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
-        }
-
-        /* ─── Scrollbar ────────────────────────────────────────────────── */
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
-        ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
-
-        /* ─── Header ───────────────────────────────────────────────────── */
-        header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            padding: 16px 0;
-            border-bottom: 1px solid var(--border);
-            margin-bottom: 24px;
-            position: sticky;
-            top: 0;
-            background: rgba(8, 10, 18, 0.85);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            z-index: 100;
-        }
-        header h1 { font-size: 1.4rem; font-weight: 800; letter-spacing: -0.03em; background: linear-gradient(135deg, #fff 0%, #94a3d0 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-        .subtitle { color: var(--text-muted); font-size: 0.8rem; margin-left: 12px; font-weight: 500; letter-spacing: 0.02em; }
-        .header-right { display: flex; align-items: center; gap: 10px; }
-        .last-updated { font-size: 0.72rem; color: var(--text-muted); font-weight: 500; }
-
-        /* ─── Tab Navigation ───────────────────────────────────────────── */
-        .tab-nav {
-            display: flex;
-            gap: 3px;
-            padding: 3px;
-            background: var(--bg-card);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border-radius: var(--radius);
-            margin-bottom: 24px;
-            border: 1px solid var(--glass-border);
-            position: sticky;
-            top: 62px;
-            z-index: 99;
-            overflow-x: auto;
-            -webkit-overflow-scrolling: touch;
-            box-shadow: var(--shadow-sm);
-        }
-
-        .tab-btn {
-            display: flex;
-            align-items: center;
-            gap: 7px;
-            padding: 10px 18px;
-            border: none;
-            border-radius: var(--radius-sm);
-            background: transparent;
-            color: var(--text-muted);
-            font-family: var(--font);
-            font-size: 0.82rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-            white-space: nowrap;
-            flex: 1;
-            justify-content: center;
-            position: relative;
-        }
-
-        .tab-btn:hover {
-            background: var(--bg-hover);
-            color: var(--text);
-        }
-
-        .tab-btn.active {
-            background: linear-gradient(135deg, var(--accent-blue), #3b6fdf);
-            color: #fff;
-            box-shadow: 0 2px 12px rgba(76, 141, 255, 0.35), inset 0 1px 0 rgba(255,255,255,0.1);
-            text-shadow: 0 1px 2px rgba(0,0,0,0.2);
-        }
-
-        .tab-icon { font-size: 0.95rem; }
-        .tab-label { letter-spacing: -0.01em; }
-
-        /* Tab content visibility */
-        .tab-content {
-            display: none;
-            animation: tabFadeIn 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-
-        .tab-content.active {
-            display: block;
-        }
-
-        @keyframes tabFadeIn {
-            from { opacity: 0; transform: translateY(8px) scale(0.998); }
-            to { opacity: 1; transform: translateY(0) scale(1); }
-        }
-
-        .badge {
-            font-size: 0.65rem;
-            font-weight: 700;
-            letter-spacing: 0.06em;
-            padding: 4px 10px;
-            border-radius: 6px;
-            text-transform: uppercase;
-            backdrop-filter: blur(4px);
-        }
-        .badge-paper { background: linear-gradient(135deg, var(--accent-orange), #e68a30); color: #000; }
-        .badge-live { background: linear-gradient(135deg, var(--accent-red), #cc3050); color: #fff; animation: pulse-live 2s infinite; box-shadow: 0 0 12px rgba(255,77,106,0.4); }
-        .badge-ok { background: linear-gradient(135deg, var(--accent-green), #00b875); color: #000; }
-        .badge-danger { background: linear-gradient(135deg, var(--accent-red), #cc3050); color: #fff; }
-
-        @keyframes pulse-live {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.6; }
-        }
-
-        /* ─── Card Grid ────────────────────────────────────────────────── */
-        .card-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 16px;
-            margin-bottom: 24px;
-        }
-
-        .card {
-            background: var(--glass);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border-radius: var(--radius);
-            padding: 20px;
-            border: 1px solid var(--glass-border);
-            border-left: 4px solid var(--border);
-            transition: var(--transition-normal);
-            position: relative;
-            overflow: hidden;
-        }
-        .card::before {
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 1px;
-            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
-        }
-        .card:hover {
-            transform: translateY(-3px);
-            box-shadow: var(--shadow-lg);
-            border-color: rgba(255,255,255,0.1);
-        }
-
-        .card.accent-blue   { border-left-color: var(--accent-blue); }
-        .card.accent-green  { border-left-color: var(--accent-green); }
-        .card.accent-purple { border-left-color: var(--accent-purple); }
-        .card.accent-orange { border-left-color: var(--accent-orange); }
-        .card.accent-teal   { border-left-color: var(--accent-teal); }
-        .card.accent-pink   { border-left-color: var(--accent-pink); }
-
-        .card.accent-blue:hover   { box-shadow: 0 8px 32px rgba(76,141,255,0.15); }
-        .card.accent-green:hover  { box-shadow: 0 8px 32px rgba(0,214,143,0.15); }
-        .card.accent-purple:hover { box-shadow: 0 8px 32px rgba(168,85,247,0.15); }
-        .card.accent-orange:hover { box-shadow: 0 4px 20px rgba(255,159,67,0.15); }
-
-        .card-label { font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
-        .card-value { font-size: 1.8rem; font-weight: 700; margin: 6px 0; font-family: var(--font-mono); letter-spacing: -0.02em; background: linear-gradient(135deg, var(--text), var(--text-dim)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
-        .card-sub { font-size: 0.78rem; color: var(--text-muted); }
-
-        /* ─── Panel ────────────────────────────────────────────────────── */
-        .panel {
-            background: var(--glass);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-            border-radius: var(--radius);
-            padding: 24px;
-            margin-bottom: 20px;
-            border: 1px solid var(--glass-border);
-            transition: var(--transition-normal);
-        }
-        .panel:hover {
-            border-color: rgba(255,255,255,0.08);
-        }
-        .panel h2 { font-size: 1.1rem; font-weight: 700; margin-bottom: 16px; }
-
-        .panel-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 16px;
-            flex-wrap: wrap;
-            gap: 12px;
-        }
-        .panel-header h2 { margin-bottom: 0; }
-        .panel-tools {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }
-
-        /* ─── Tables ───────────────────────────────────────────────────── */
-        .table-wrap { overflow-x: auto; border-radius: var(--radius-sm); }
-
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.82rem;
-        }
-        thead th {
-            text-align: left;
-            font-size: 0.7rem;
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            color: var(--text-dim);
-            padding: 12px 14px;
-            border-bottom: 1px solid var(--glass-border);
-            font-weight: 700;
-            white-space: nowrap;
-            background: rgba(15,17,23,0.3);
-        }
-        tbody td {
-            padding: 11px 14px;
-            border-bottom: 1px solid rgba(255,255,255,0.03);
-            vertical-align: middle;
-        }
-        tbody tr {
-            transition: var(--transition-fast);
-        }
-        tbody tr:hover {
-            background: rgba(76,141,255,0.04);
-        }
-
-        .empty-state {
-            text-align: center;
-            color: var(--text-muted);
-            padding: 40px 12px !important;
-            font-style: italic;
-            font-size: 0.85rem;
-        }
-
-        /* ─── Decision/Status Pills ────────────────────────────────────── */
-        .pill {
-            display: inline-block;
-            font-size: 0.68rem;
-            font-weight: 700;
-            padding: 3px 8px;
-            border-radius: 4px;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-        }
-        .pill-trade  { background: rgba(0,214,143,0.15); color: var(--accent-green); }
-        .pill-no-trade { background: rgba(255,77,106,0.12); color: var(--accent-red); }
-        .pill-filled { background: rgba(76,141,255,0.15); color: var(--accent-blue); }
-        .pill-dry    { background: rgba(255,159,67,0.15); color: var(--accent-orange); }
-        .pill-buy    { background: rgba(0,214,143,0.15); color: var(--accent-green); }
-        .pill-sell   { background: rgba(255,77,106,0.12); color: var(--accent-red); }
-
-        .pnl-positive { color: var(--accent-green); }
-        .pnl-negative { color: var(--accent-red); }
-        .pnl-zero    { color: var(--text-muted); }
-
-        /* ─── Buttons ──────────────────────────────────────────────────── */
-        .btn {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            font-size: 0.72rem;
-            font-weight: 700;
-            padding: 8px 16px;
-            border-radius: 8px;
-            border: none;
-            cursor: pointer;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            transition: var(--transition-normal);
-            position: relative;
-            overflow: hidden;
-        }
-        .btn::after {
-            content: '';
-            position: absolute;
-            inset: 0;
-            background: linear-gradient(135deg, rgba(255,255,255,0.1), transparent);
-            opacity: 0;
-            transition: opacity 0.2s;
-        }
-        .btn:hover::after { opacity: 1; }
-        .btn:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
-        .btn:active { transform: translateY(0); box-shadow: none; }
-        .btn-danger { background: linear-gradient(135deg, var(--accent-red), #cc3050); color: #fff; }
-        .btn-danger:hover { box-shadow: 0 4px 20px rgba(255,77,106,0.3); }
-        .btn-ok     { background: linear-gradient(135deg, var(--accent-green), #00b875); color: #000; }
-        .btn-ok:hover { box-shadow: 0 4px 20px rgba(0,214,143,0.3); }
-        .btn-save   { background: linear-gradient(135deg, var(--accent-blue), #3570d9); color: #fff; }
-        .btn-save:hover { box-shadow: 0 4px 20px rgba(76,141,255,0.3); }
-        .btn-muted  { background: var(--glass); color: var(--text-dim); border: 1px solid var(--glass-border); backdrop-filter: blur(8px); }
-        .btn-muted:hover { border-color: rgba(255,255,255,0.15); color: var(--text); }
-        .btn-export { background: var(--glass); color: var(--accent-teal); border: 1px solid var(--glass-border); font-size: 0.7rem; padding: 6px 12px; backdrop-filter: blur(8px); }
-        .btn-export:hover { border-color: var(--accent-teal); box-shadow: 0 4px 16px rgba(0,210,211,0.15); }
-        .btn-sm { font-size: 0.68rem; padding: 5px 12px; }
-
-        /* ─── Toast Notifications ──────────────────────────────────────── */
-        #toast-container {
-            position: fixed;
-            top: 20px;
-            right: 20px;
-            z-index: 10000;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            pointer-events: none;
-        }
-
-        .toast {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 14px 22px;
-            border-radius: var(--radius);
-            font-size: 0.82rem;
-            font-weight: 600;
-            color: var(--text);
-            background: var(--glass);
-            backdrop-filter: blur(20px);
-            -webkit-backdrop-filter: blur(20px);
-            border: 1px solid var(--glass-border);
-            box-shadow: var(--shadow-lg);
-            pointer-events: auto;
-            opacity: 0;
-            transform: translateX(100%) scale(0.95);
-            transition: opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1), transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-            max-width: 400px;
-        }
-        .toast-show {
-            opacity: 1;
-            transform: translateX(0) scale(1);
-        }
-        .toast-hide {
-            opacity: 0;
-            transform: translateX(100%) scale(0.95);
-        }
-        .toast-icon { font-size: 1.2rem; }
-        .toast-msg { flex: 1; }
-
-        .toast-success { border-left: 4px solid var(--accent-green); box-shadow: var(--shadow-lg), inset 0 0 20px rgba(0,214,143,0.03); }
-        .toast-error   { border-left: 4px solid var(--accent-red); box-shadow: var(--shadow-lg), inset 0 0 20px rgba(255,51,51,0.03); }
-        .toast-info    { border-left: 4px solid var(--accent-blue); box-shadow: var(--shadow-lg), inset 0 0 20px rgba(76,141,255,0.03); }
-        .toast-warning { border-left: 4px solid var(--accent-orange); box-shadow: var(--shadow-lg), inset 0 0 20px rgba(255,159,67,0.03); }
-
-        /* ─── Confirmation Modal ──────────────────────────────────────── */
-        .modal-overlay {
-            position: fixed;
-            inset: 0;
-            background: rgba(0,0,0,0.7);
-            z-index: 9999;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            backdrop-filter: blur(8px);
-            -webkit-backdrop-filter: blur(8px);
-            animation: modalOverlayIn 0.25s ease-out;
-        }
-        @keyframes modalOverlayIn {
-            from { opacity: 0; }
-            to { opacity: 1; }
-        }
-        .modal-box {
-            background: var(--glass);
-            backdrop-filter: blur(24px);
-            -webkit-backdrop-filter: blur(24px);
-            border: 1px solid var(--glass-border);
-            border-radius: 16px;
-            padding: 32px;
-            max-width: 440px;
-            width: 90%;
-            box-shadow: 0 24px 64px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05);
-            animation: modalBoxIn 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-        }
-        @keyframes modalBoxIn {
-            from { opacity: 0; transform: scale(0.9) translateY(20px); }
-            to { opacity: 1; transform: scale(1) translateY(0); }
-        }
-        .modal-box h3 {
-            font-size: 1.1rem;
-            font-weight: 700;
-            margin-bottom: 12px;
-        }
-        .modal-box p {
-            color: var(--text-dim);
-            font-size: 0.88rem;
-            margin-bottom: 24px;
-            line-height: 1.5;
-        }
-        .modal-actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 10px;
-        }
-
-        /* ─── Footer ───────────────────────────────────────────────────── */
-        footer {
-            display: flex;
-            justify-content: space-between;
-            padding: 20px 0;
-            border-top: 1px solid var(--glass-border);
-            margin-top: 20px;
-            font-size: 0.75rem;
-            color: var(--text-muted);
-        }
-
-        /* ─── Responsive ── */
-        @media (max-width: 768px) {
-            body { padding: 0 12px 24px; }
-            .card-grid { grid-template-columns: repeat(2, 1fr); }
-            .panel-header { flex-direction: column; align-items: flex-start; }
-            .panel-tools { width: 100%; }
-            .tab-nav { top: 0; }
-            .tab-btn { padding: 8px 12px; font-size: 0.75rem; }
-        }
-    </style>
-</head>
-<body>
-    <header>
-        <div>
-            <h1>Kalshi Trading Bot</h1>
-            <span class="subtitle">AI-Powered Market Prediction</span>
-        </div>
-        <div class="header-right">
-            <span class="badge" id="mode-badge">LOADING</span>
-            <span class="last-updated" id="last-updated">Loading...</span>
-        </div>
-    </header>
-
-    <nav class="tab-nav">
-        <button class="tab-btn active" data-tab="overview" onclick="switchTab('overview')">
-            <span class="tab-icon">📊</span>
-            <span class="tab-label">Overview</span>
-        </button>
-        <button class="tab-btn" data-tab="trading" onclick="switchTab('trading')">
-            <span class="tab-icon">📈</span>
-            <span class="tab-label">Trading</span>
-        </button>
-        <button class="tab-btn" data-tab="learning" onclick="switchTab('learning')">
-            <span class="tab-icon">🧠</span>
-            <span class="tab-label">Learning Lab</span>
-        </button>
-        <button class="tab-btn" data-tab="admin" onclick="switchTab('admin')">
-            <span class="tab-icon">⚙️</span>
-            <span class="tab-label">Admin</span>
-        </button>
-    </nav>
-
-    <!-- Overview Tab -->
-    <div class="tab-content active" data-tab="overview">
-        <div class="card-grid">
-            <div class="card accent-blue">
-                <div class="card-label">Bankroll</div>
-                <div class="card-value" id="bankroll">$0.00</div>
-                <div class="card-sub" id="available-capital">Available: $0.00</div>
-            </div>
-            <div class="card accent-green">
-                <div class="card-label">Total P&L</div>
-                <div class="card-value" id="total-pnl">$0.00</div>
-                <div class="card-sub" id="unrealized-pnl">Realized: $0.00 | Unrealized: $0.00</div>
-            </div>
-            <div class="card accent-purple">
-                <div class="card-label">Open Positions</div>
-                <div class="card-value" id="open-positions">0</div>
-                <div class="card-sub" id="total-invested">Invested: $0.00</div>
-            </div>
-            <div class="card accent-teal">
-                <div class="card-label">Total Trades</div>
-                <div class="card-value" id="total-trades">0</div>
-                <div class="card-sub" id="trade-breakdown">Live: 0 | Paper: 0</div>
-            </div>
-        </div>
-
-        <div class="card-grid">
-            <div class="card accent-orange">
-                <div class="card-label">Avg Edge</div>
-                <div class="card-value" id="avg-edge">0.0%</div>
-                <div class="card-sub" id="avg-evidence-quality">Avg EQ: 0.000</div>
-            </div>
-            <div class="card accent-pink">
-                <div class="card-label">Today</div>
-                <div class="card-value" id="today-trades">0 trades</div>
-                <div class="card-sub" id="daily-volume">Volume: $0.00</div>
-            </div>
-            <div class="card accent-yellow">
-                <div class="card-label">Engine Status</div>
-                <div class="card-value" id="engine-status">UNKNOWN</div>
-                <div class="card-sub" id="engine-cycles">Cycles: 0</div>
-            </div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">
-                <h2>Recent Activity</h2>
-                <div class="panel-tools">
-                    <button class="btn btn-muted btn-sm" onclick="refreshData()">🔄 Refresh</button>
-                </div>
-            </div>
-            <div class="table-wrap">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Time</th>
-                            <th>Action</th>
-                            <th>Market</th>
-                            <th>Details</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody id="activity-body">
-                        <tr><td colspan="5" class="empty-state">Loading activity...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-    <!-- Trading Tab -->
-    <div class="tab-content" data-tab="trading">
-        <div class="panel">
-            <div class="panel-header">
-                <h2>Open Positions</h2>
-                <div class="panel-tools">
-                    <button class="btn btn-export btn-sm" onclick="exportData('positions')">📊 Export</button>
-                </div>
-            </div>
-            <div class="table-wrap">
-                <table id="positions-table">
-                    <thead>
-                        <tr>
-                            <th>Market</th>
-                            <th>Direction</th>
-                            <th>Entry Price</th>
-                            <th>Current Price</th>
-                            <th>Size</th>
-                            <th>P&L</th>
-                            <th>P&L %</th>
-                            <th>Status</th>
-                            <th>Held</th>
-                        </tr>
-                    </thead>
-                    <tbody id="positions-body">
-                        <tr><td colspan="9" class="empty-state">No active positions</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">
-                <h2>Recent Trades</h2>
-                <div class="panel-tools">
-                    <button class="btn btn-export btn-sm" onclick="exportData('trades')">📊 Export</button>
-                </div>
-            </div>
-            <div class="table-wrap">
-                <table id="trades-table">
-                    <thead>
-                        <tr>
-                            <th>Market</th>
-                            <th>Direction</th>
-                            <th>Entry</th>
-                            <th>Exit</th>
-                            <th>P&L</th>
-                            <th>P&L %</th>
-                            <th>Status</th>
-                            <th>Held</th>
-                            <th>Mode</th>
-                        </tr>
-                    </thead>
-                    <tbody id="trades-body">
-                        <tr><td colspan="9" class="empty-state">No trades yet</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-    <!-- Learning Lab Tab -->
-    <div class="tab-content" data-tab="learning">
-        <div class="panel">
-            <div class="panel-header">
-                <h2>🤖 Self-Improvement Analysis</h2>
-                <div class="panel-tools">
-                    <button class="btn btn-save btn-sm" onclick="runSelfAnalysis()">🔬 Run Analysis</button>
-                    <button class="btn btn-muted btn-sm" onclick="loadLatestAnalysis()">📊 Load Latest</button>
-                </div>
-            </div>
-            <div id="analysis-results">
-                <div class="empty-state">Click "Run Analysis" to start self-improvement analysis</div>
-            </div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">
-                <h2>📈 Learning Progress</h2>
-            </div>
-            <div id="learning-progress">
-                <div class="empty-state">No learning data available yet</div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Admin Tab -->
-    <div class="tab-content" data-tab="admin">
-        <div class="card-grid">
-            <div class="card accent-blue">
-                <div class="card-label">Engine Control</div>
-                <div class="card-value" id="admin-engine-status">STOPPED</div>
-                <div class="card-sub" id="admin-engine-mode">Mode: Unknown</div>
-            </div>
-            <div class="card accent-green">
-                <div class="card-label">Kill Switch</div>
-                <div class="card-value" id="kill-switch-status">OFF</div>
-                <div class="card-sub">Emergency stop</div>
-            </div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">
-                <h2>Bot Controls</h2>
-            </div>
-            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-                <button class="btn btn-ok" id="btn-start" onclick="startBot()">▶ Start Bot</button>
-                <button class="btn btn-danger" id="btn-stop" onclick="stopBot()">⏹ Stop Bot</button>
-                <button class="btn btn-danger" onclick="killSwitch()">🚨 Kill Switch</button>
-                <button class="btn btn-muted" onclick="refreshData()">🔄 Refresh</button>
-            </div>
-        </div>
-
-        <div class="panel">
-            <div class="panel-header">
-                <h2>System Status</h2>
-            </div>
-            <div class="table-wrap">
-                <table>
-                    <tbody id="system-status-body">
-                        <tr><td colspan="2" class="empty-state">Loading system status...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </div>
-
-    <!-- Toast Container -->
-    <div id="toast-container"></div>
-
-    <!-- Modal Overlays -->
-    <div id="modal-overlay" class="modal-overlay" style="display: none;">
-        <div class="modal-box">
-            <h3 id="modal-title">Confirm Action</h3>
-            <p id="modal-message">Are you sure?</p>
-            <div class="modal-actions">
-                <button class="btn btn-muted" onclick="closeModal()">Cancel</button>
-                <button class="btn btn-danger" id="modal-confirm">Confirm</button>
-            </div>
-        </div>
-    </div>
-
-    <footer>
-        <div>Kalshi Trading Bot v1.0</div>
-        <div id="footer-status">Status: Loading...</div>
-    </footer>
-
-    <script>
-        // ─── State ──────────────────────────────────────────────────────
-        let _activeTab = 'overview';
-        let _modalConfirmCb = null;
-
-        // ─── Tab Navigation ─────────────────────────────────────────────
-        function switchTab(tabName) {
-            _activeTab = tabName;
-            document.querySelectorAll('.tab-btn').forEach(btn => {
-                btn.classList.toggle('active', btn.dataset.tab === tabName);
-            });
-            document.querySelectorAll('.tab-content').forEach(content => {
-                content.classList.toggle('active', content.dataset.tab === tabName);
-            });
-            window.scrollTo({ top: 0, behavior: 'smooth' });
-        }
-
-        // ─── Helpers ────────────────────────────────────────────────────
-        const fmt = (v, d=2) => Number(v||0).toFixed(d);
-        const fmtD = (v) => `$${fmt(v)}`;
-        const fmtP = (v) => `${fmt(v)}%`;
-        const pnlClass = (v) => v > 0.001 ? 'pnl-positive' : v < -0.001 ? 'pnl-negative' : 'pnl-zero';
-        const shortDate = (iso) => {
-            if (!iso) return '—';
-            const d = new Date(iso);
-            return d.toLocaleString('en-US', {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
-        };
-
-        // ─── Toast Notifications ────────────────────────────────────────
-        function showToast(message, type='info') {
-            const container = document.getElementById('toast-container');
-            if (!container) return;
-            const toast = document.createElement('div');
-            toast.className = `toast toast-${type}`;
-            const icons = {success:'✅',error:'❌',info:'ℹ️',warning:'⚠️'};
-            toast.innerHTML = `<span class="toast-icon">${icons[type]||'ℹ️'}</span><span class="toast-msg">${message}</span>`;
-            container.appendChild(toast);
-            requestAnimationFrame(() => toast.classList.add('toast-show'));
-            setTimeout(() => {
-                toast.classList.remove('toast-show');
-                toast.classList.add('toast-hide');
-                setTimeout(() => toast.remove(), 400);
-            }, 3500);
-        }
-
-        // ─── Modal Functions ────────────────────────────────────────────
-        function showConfirmModal(title, message, onConfirm) {
-            document.getElementById('modal-title').textContent = title;
-            document.getElementById('modal-message').textContent = message;
-            _modalConfirmCb = onConfirm;
-            document.getElementById('modal-overlay').style.display = 'flex';
-        }
-
-        function closeModal() {
-            document.getElementById('modal-overlay').style.display = 'none';
-            _modalConfirmCb = null;
-        }
-
-        // ─── API Functions ──────────────────────────────────────────────
-        async function apiFetch(url, opts = {}) {
-            try {
-                const res = await fetch(url, opts);
-                if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-                return await res.json();
-            } catch (e) {
-                console.error(`API ${url}:`, e);
-                return null;
-            }
-        }
-
-        // ─── Data Export ────────────────────────────────────────────────
-        async function exportData(table) {
-            showToast(`Exporting ${table}…`, 'info');
-            const data = await apiFetch(`/api/export/${table}`);
-            if (!data || !data.rows) { showToast('Export failed', 'error'); return; }
-            if (data.rows.length === 0) { showToast('No data to export', 'warning'); return; }
-
-            const keys = Object.keys(data.rows[0]);
-            const csvRows = [keys.join(',')];
-            for (const row of data.rows) {
-                csvRows.push(keys.map(k => {
-                    let v = row[k] ?? '';
-                    if (typeof v === 'string' && (v.includes(',') || v.includes('"') || v.includes('\\n'))) {
-                        v = `"${v.replace(/"/g, '""')}"`;
-                    }
-                    return v;
-                }).join(','));
-            }
-            const blob = new Blob([csvRows.join('\\n')], {type:'text/csv'});
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; a.download = `${table}_export.csv`; a.click();
-            URL.revokeObjectURL(url);
-            showToast(`Exported ${data.rows.length} rows`, 'success');
-        }
-
-        // ─── Bot Controls ───────────────────────────────────────────────
-        async function startBot() {
-            const response = await fetch('/api/start', { method: 'POST' });
-            const result = await response.json();
-            if (result.message) {
-                showToast(result.message, 'success');
-            } else {
-                showToast('Failed to start bot', 'error');
-            }
-            refreshData();
-        }
-
-        async function stopBot() {
-            const response = await fetch('/api/stop', { method: 'POST' });
-            const result = await response.json();
-            if (result.message) {
-                showToast(result.message, 'success');
-            } else {
-                showToast('Failed to stop bot', 'error');
-            }
-            refreshData();
-        }
-
-        async function killSwitch() {
-            showConfirmModal('Activate Kill Switch',
-                'This will immediately halt all trading. Are you sure?',
-                async () => {
-                    const response = await fetch('/api/kill-switch', { method: 'POST' });
-                    const result = await response.json();
-                    if (result.message) {
-                        showToast(result.message, 'warning');
-                    } else {
-                        showToast('Kill switch failed', 'error');
-                    }
-                    refreshData();
-                });
-        }
-
-        // ─── Learning Lab Functions ─────────────────────────────────────
-        async function runSelfAnalysis() {
-            showToast('Running self-improvement analysis...', 'info');
-            const result = await apiFetch('/api/learning/run-analysis', { method: 'POST' });
-            if (result && result.success) {
-                showToast('Analysis complete!', 'success');
-                loadLatestAnalysis();
-            } else {
-                showToast('Analysis failed: ' + (result?.error || 'Unknown error'), 'error');
-            }
-        }
-
-        async function loadLatestAnalysis() {
-            const data = await apiFetch('/api/learning/latest-analysis');
-            const container = document.getElementById('analysis-results');
-            if (!data) {
-                container.innerHTML = '<div class="empty-state">No analysis data available</div>';
-                return;
-            }
-
-            let html = '<div style="font-family: monospace; font-size: 0.8rem; white-space: pre-wrap;">';
-            if (data.strategy_performance) {
-                html += '🎯 STRATEGY PERFORMANCE SUMMARY:\\n';
-                for (const [strategy, stats] of Object.entries(data.strategy_performance)) {
-                    const exp = stats.expectancy || 0;
-                    const wr = stats.win_rate || 0;
-                    const trades = stats.trades || 0;
-                    html += `  ${strategy}: Exp: ${exp.toFixed(2)}, WR: ${(wr*100).toFixed(1)}%, Trades: ${trades}\\n`;
-                }
-                html += '\\n';
-            }
-
-            if (data.new_parameters) {
-                html += '🔧 NEW PARAMETERS GENERATED:\\n';
-                html += JSON.stringify(data.new_parameters, null, 2);
-            }
-
-            html += '</div>';
-            container.innerHTML = html;
-        }
-
-        // ─── Main Data Refresh ──────────────────────────────────────────
-        async function refreshData() {
-            try {
-                // Update portfolio
-                const portfolio = await apiFetch('/api/portfolio');
-                if (portfolio) {
-                    document.getElementById('bankroll').textContent = fmtD(portfolio.bankroll);
-                    document.getElementById('available-capital').textContent = `Available: ${fmtD(portfolio.available_capital)}`;
-                    document.getElementById('total-pnl').textContent = fmtD(portfolio.total_pnl);
-                    document.getElementById('total-pnl').className = `card-value ${pnlClass(portfolio.total_pnl)}`;
-                    document.getElementById('unrealized-pnl').textContent = portfolio.open_positions > 0
-                        ? `Realized: ${fmtD(portfolio.realized_pnl || 0)} | Unrealized: ${fmtD(portfolio.unrealized_pnl)}`
-                        : `Realized: ${fmtD(portfolio.realized_pnl || 0)}`;
-                    document.getElementById('open-positions').textContent = portfolio.open_positions;
-                    document.getElementById('total-invested').textContent = `Invested: ${fmtD(portfolio.total_invested)}`;
-                    document.getElementById('total-trades').textContent = portfolio.total_trades;
-                    document.getElementById('trade-breakdown').textContent = `Live: ${portfolio.live_trades} | Paper: ${portfolio.paper_trades}`;
-                    document.getElementById('avg-edge').textContent = fmtP(portfolio.avg_edge * 100);
-                    document.getElementById('avg-evidence-quality').textContent = `Avg EQ: ${fmt(portfolio.avg_evidence_quality, 3)}`;
-                    document.getElementById('today-trades').textContent = `${portfolio.today_trades} trades`;
-                    document.getElementById('daily-volume').textContent = `Volume: ${fmtD(portfolio.daily_volume)}`;
-
-                    // Mode badge
-                    const modeBadge = document.getElementById('mode-badge');
-                    if (portfolio.live_trading_enabled && !portfolio.dry_run) {
-                        modeBadge.textContent = 'LIVE';
-                        modeBadge.className = 'badge badge-live';
-                    } else {
-                        modeBadge.textContent = 'PAPER MODE';
-                        modeBadge.className = 'badge badge-paper';
-                    }
-                }
-
-                // Update engine status
-                const status = await apiFetch('/api/engine-status');
-                if (status) {
-                    document.getElementById('engine-status').textContent = status.running ? 'RUNNING' : 'STOPPED';
-                    document.getElementById('engine-status').className = status.running ? 'card-value pnl-positive' : 'card-value pnl-zero';
-                    document.getElementById('engine-cycles').textContent = `Cycles: ${status.cycles || 0}`;
-                    document.getElementById('admin-engine-status').textContent = status.running ? 'RUNNING' : 'STOPPED';
-                    document.getElementById('admin-engine-mode').textContent = status.live_trading ? '🔴 LIVE' : (status.paper_mode ? '📝 Paper' : '⚠️ Dry Run');
-                }
-
-                // Update kill switch
-                const killStatus = await apiFetch('/api/kill-switch-status');
-                if (killStatus) {
-                    document.getElementById('kill-switch-status').textContent = killStatus.active ? '🛑 ACTIVE' : 'OFF';
-                    document.getElementById('kill-switch-status').className = `card-value ${killStatus.active ? 'pnl-negative' : 'pnl-zero'}`;
-                }
-
-                // Update positions
-                const positions = await apiFetch('/api/positions');
-                if (positions && positions.positions) {
-                    const tbody = document.getElementById('positions-body');
-                    if (positions.positions.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No active positions</td></tr>';
-                    } else {
-                        tbody.innerHTML = positions.positions.map(p => {
-                            const pnl = p.pnl || 0;
-                            const pnlPct = p.pnl_pct || 0;
-                            const priceChange = p.price_change || 0;
-                            const priceChangePct = p.price_change_pct || 0;
-                            const arrow = priceChange > 0.001 ? '▲' : priceChange < -0.001 ? '▼' : '─';
-                            const arrowClass = priceChange > 0.001 ? 'pnl-positive' : priceChange < -0.001 ? 'pnl-negative' : 'pnl-zero';
-                            const hoursHeld = p.hours_held || 0;
-                            const timeLabel = hoursHeld >= 24 ? `${(hoursHeld/24).toFixed(1)}d` : `${hoursHeld.toFixed(1)}h`;
-
-                            return `<tr>
-                                <td title="${p.market_id}">${(p.question||p.market_id||'').substring(0,50)}</td>
-                                <td><span class="pill ${p.direction==='BUY_YES'||p.direction==='BUY'?'pill-buy':'pill-sell'}">${p.direction||'—'}</span></td>
-                                <td>${fmt(p.entry_price,3)}</td>
-                                <td>
-                                    <span class="live-price">${fmt(p.current_price,3)}</span>
-                                    <span class="price-arrow ${arrowClass}">${arrow}</span>
-                                </td>
-                                <td>${fmt(p.size,1)}</td>
-                                <td class="${pnlClass(pnl)}">${fmtD(pnl)}</td>
-                                <td class="${pnlClass(pnlPct)}">${fmtP(pnlPct)}</td>
-                                <td>${p.status || 'Active'}</td>
-                                <td title="${p.opened_at||''}">${timeLabel}</td>
-                            </tr>`;
-                        }).join('');
-                    }
-                }
-
-                // Update trades
-                const trades = await apiFetch('/api/trades?limit=20');
-                if (trades && trades.trades) {
-                    const tbody = document.getElementById('trades-body');
-                    if (trades.trades.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="9" class="empty-state">No trades yet</td></tr>';
-                    } else {
-                        tbody.innerHTML = trades.trades.map(t => {
-                            const pnl = t.pnl != null ? t.pnl : null;
-                            const pnlCls = pnl > 0 ? 'pnl-positive' : pnl < 0 ? 'pnl-negative' : 'pnl-zero';
-                            const pnlStr = pnl != null ? (pnl >= 0 ? '+' : '') + fmtD(pnl) : '—';
-                            const pnlPctStr = t.pnl_pct != null ? (t.pnl_pct >= 0 ? '+' : '') + t.pnl_pct.toFixed(2) + '%' : '—';
-                            const entry = t.entry_price != null ? fmt(t.entry_price, 3) : '—';
-                            const exitVal = t.trade_status === 'ACTIVE'
-                                ? `<span style="color:var(--accent-blue)">${fmt(t.current_price||0,3)}</span>`
-                                : (t.exit_price != null ? fmt(t.exit_price, 3) : '—');
-                            const dirCls = (t.direction||'').toUpperCase() === 'YES' ? 'pill-buy' : 'pill-sell';
-                            const reasonLabel = t.close_reason_label || (t.trade_status === 'ACTIVE' ? '—' : '—');
-                            const isActive = t.trade_status === 'ACTIVE';
-                            const hoursHeld = t.hours_held || 0;
-                            const timeLabel = hoursHeld >= 24 ? `${(hoursHeld/24).toFixed(1)}d` : `${hoursHeld.toFixed(1)}h`;
-
-                            return `<tr>
-                                <td title="${t.question||''}">${(t.question||t.market_id||'').substring(0,55)}${(t.question||'').length>55?'…':''}</td>
-                                <td><span class="pill ${dirCls}">${t.direction||'—'}</span></td>
-                                <td style="font-family:var(--font-mono)">${entry}</td>
-                                <td style="font-family:var(--font-mono)">${exitVal}</td>
-                                <td style="font-family:var(--font-mono)" class="${pnlCls}">${pnlStr}</td>
-                                <td class="${pnlCls}">${pnlPctStr}</td>
-                                <td><span class="pill ${isActive ? 'pill-filled' : 'pill-dry'}">${t.trade_status}</span></td>
-                                <td>${reasonLabel}</td>
-                                <td>${timeLabel}</td>
-                                <td>${t.is_paper ? '🧪 Paper' : '💰 Live'}</td>
-                            </tr>`;
-                        }).join('');
-                    }
-                }
-
-                // Update activity feed
-                const activity = await apiFetch('/api/activity?limit=10');
-                if (activity && activity.entries) {
-                    const tbody = document.getElementById('activity-body');
-                    if (activity.entries.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No recent activity</td></tr>';
-                    } else {
-                        tbody.innerHTML = activity.entries.map(e => `
-                            <tr>
-                                <td>${shortDate(e.timestamp)}</td>
-                                <td>${e.action}</td>
-                                <td>${(e.market_id || '').substring(0, 30)}</td>
-                                <td>${e.details || ''}</td>
-                                <td><span class="pill pill-${e.status === 'success' ? 'trade' : 'no-trade'}">${e.status}</span></td>
-                            </tr>
-                        }).join('');
-                    }
-                }
-
-                // Update system status
-                const sysStatus = await apiFetch('/api/system-status');
-                if (sysStatus) {
-                    const tbody = document.getElementById('system-status-body');
-                    tbody.innerHTML = Object.entries(sysStatus).map(([key, value]) => `
-                        <tr>
-                            <td>${key.replace(/_/g, ' ').replace(/\\b\\w/g, c => c.toUpperCase())}</td>
-                            <td>${value}</td>
-                        </tr>
-                    `).join('');
-                }
-
-                document.getElementById('last-updated').textContent = 'Last updated: ' + new Date().toLocaleString();
-                document.getElementById('footer-status').textContent = 'Status: Connected';
-            } catch (error) {
-                console.error('Refresh error:', error);
-                document.getElementById('footer-status').textContent = 'Status: Error';
-                showToast('Failed to refresh data', 'error');
-            }
-        }
-
-        // Auto-refresh every 15 seconds
-        setInterval(refreshData, 15000);
-
-        // Initial load
-        refreshData();
-    </script>
-</body>
-</html>
-"""
-
-
+# --- Supabase connection ---
+_db = None
 def get_db():
-    """Helper to get a SupabaseDB instance."""
-    return SupabaseDB()
+    global _db
+    if _db is None:
+        try:
+            from utils.supabase_db import SupabaseDB
+            _db = SupabaseDB()
+        except Exception as e:
+            print(f"Dashboard DB init failed: {e}")
+    return _db
 
+
+# ============================================================
+#  API ENDPOINTS — Real Supabase data
+# ============================================================
 
 @app.route('/')
-def dashboard():
-    return render_template_string(HTML_TEMPLATE)
-
+def health():
+    return "OK"
 
 @app.route('/api/status')
 def api_status():
@@ -1120,311 +37,557 @@ def api_status():
         db = get_db()
         result = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
         if result.data:
-            row = result.data[0]
-            bal = row.get('balance', 100)
+            r = result.data[0]
+            bal = r.get('balance', 100)
             return jsonify({
-                'is_running': row.get('is_running', False),
+                'is_running': r.get('is_running', False),
                 'balance': bal,
-                'daily_pnl': row.get('daily_pnl', 0),
-                'trades_today': row.get('trades_today', 0),
-                'active_positions': row.get('active_positions', 0),
-                'last_check': row.get('last_check'),
-                'roi_percent': ((bal - 100) / 100 * 100),
+                'daily_pnl': r.get('daily_pnl', 0),
+                'trades_today': r.get('trades_today', 0),
+                'active_positions': r.get('active_positions', 0),
+                'last_check': r.get('last_check'),
+                'roi_percent': round(((bal - 100) / 100) * 100, 2),
             })
         return jsonify({'is_running': False, 'balance': 100, 'daily_pnl': 0, 'trades_today': 0, 'active_positions': 0, 'roi_percent': 0})
     except Exception as e:
-        return jsonify({'is_running': False, 'balance': 100, 'daily_pnl': 0, 'error': str(e)})
-
+        return jsonify({'is_running': False, 'balance': 100, 'daily_pnl': 0, 'trades_today': 0, 'active_positions': 0, 'error': str(e)})
 
 @app.route('/api/trades')
-def get_trades():
+def api_trades():
     try:
-        limit = int(request.args.get('limit', 50))
         db = get_db()
-        result = db.client.table('kalshi_trades').select('*').order('id', desc=True).limit(limit).execute()
+        result = db.client.table('kalshi_trades').select('*').order('id', desc=True).limit(50).execute()
         return jsonify(result.data or [])
-    except Exception as e:
-        logger.error(f"Failed to get trades: {e}")
+    except:
         return jsonify([])
 
-
 @app.route('/api/strategies')
-def get_strategies():
+def api_strategies():
     try:
         db = get_db()
         result = db.client.table('kalshi_trades').select('*').execute()
-        trades = result.data or []
-        by_strat = defaultdict(lambda: {'trades': 0, 'wins': 0, 'losses': 0})
-        for t in trades:
+        strats = {}
+        for t in (result.data or []):
             s = t.get('strategy', 'unknown')
-            by_strat[s]['trades'] += 1
+            if s not in strats:
+                strats[s] = {'strategy': s, 'trades': 0, 'wins': 0, 'losses': 0, 'total_pnl': 0.0}
+            strats[s]['trades'] += 1
             reason = (t.get('reason') or '').upper()
-            if 'WIN' in reason:
-                by_strat[s]['wins'] += 1
-            elif 'LOSS' in reason:
-                by_strat[s]['losses'] += 1
-        out = []
-        for name, stats in by_strat.items():
-            total = stats['wins'] + stats['losses']
-            out.append({
-                'strategy': name,
-                'trades': stats['trades'],
-                'wins': stats['wins'],
-                'losses': stats['losses'],
-                'win_rate': (stats['wins'] / total * 100) if total > 0 else 0,
-            })
-        return jsonify(out)
-    except Exception as e:
-        logger.error(f"Failed to get strategies: {e}")
+            if 'WIN' in reason: strats[s]['wins'] += 1
+            elif 'LOSS' in reason: strats[s]['losses'] += 1
+        return jsonify(list(strats.values()))
+    except:
         return jsonify([])
-
 
 @app.route('/api/equity')
-def get_equity():
+def api_equity():
     try:
         db = get_db()
-        result = db.client.table('equity_snapshots').select('*').order('id', desc=True).limit(200).execute()
-        if result.data:
+        result = db.client.table('equity_snapshots').select('timestamp,balance').order('timestamp', desc=False).limit(500).execute()
+        if result.data and len(result.data) > 2:
             return jsonify(result.data)
-        # Fallback to bot status balance
-        result = db.client.table('kalshi_bot_status').select('balance, last_check').order('id', desc=True).limit(100).execute()
-        return jsonify(result.data or [])
-    except Exception as e:
-        logger.error(f"Failed to get equity: {e}")
+        result = db.client.table('kalshi_bot_status').select('last_check,balance').order('id', desc=False).execute()
+        data = result.data or []
+        thinned = data[::20]
+        if data and (not thinned or thinned[-1] != data[-1]):
+            thinned.append(data[-1])
+        return jsonify([{'timestamp': r['last_check'], 'balance': r['balance']} for r in thinned])
+    except:
         return jsonify([])
-
 
 @app.route('/api/signals')
-def get_signals():
+def api_signals():
     try:
         db = get_db()
-        result = db.client.table('signal_evaluations').select('*').order('id', desc=True).limit(100).execute()
+        result = db.client.table('signal_evaluations').select('timestamp,strategy,ticker,side,edge,confidence,action,skip_reason').order('timestamp', desc=True).limit(100).execute()
         return jsonify(result.data or [])
-    except Exception as e:
-        logger.error(f"Failed to get signals: {e}")
+    except:
         return jsonify([])
-
 
 @app.route('/api/debates')
-def get_debates():
+def api_debates():
     try:
         db = get_db()
-        result = db.client.table('debate_log').select('*').order('id', desc=True).limit(20).execute()
+        result = db.client.table('debate_log').select('*').order('timestamp', desc=True).limit(20).execute()
         return jsonify(result.data or [])
-    except Exception as e:
-        logger.error(f"Failed to get debates: {e}")
+    except:
+        return jsonify([])
+
+@app.route('/api/improvements')
+def api_improvements():
+    try:
+        db = get_db()
+        result = db.client.table('improvement_logs').select('*').order('timestamp', desc=True).limit(5).execute()
+        return jsonify(result.data or [])
+    except:
         return jsonify([])
 
 
-@app.route('/api/start', methods=['POST'])
-def start_bot():
-    global bot_instance
-    try:
-        if not bot_instance:
-            bot_instance = KalshiBot()
-        asyncio.create_task(bot_instance.start())
-        return jsonify({'message': 'Bot started successfully'})
-    except Exception as e:
-        logger.error(f"Failed to start bot: {e}")
-        return jsonify({'error': str(e)}), 500
+# ============================================================
+#  NEURAL CORTEX DASHBOARD — Full HTML/CSS/JS inline
+# ============================================================
+
+DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KALSHI ALPHA | Neural Cortex</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Space+Grotesk:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#050508;color:#c0c8d4;font-family:'JetBrains Mono',monospace;min-height:100vh;overflow-x:hidden}
+body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0px,rgba(0,0,0,0) 2px,rgba(0,0,0,0.04) 2px,rgba(0,0,0,0.04) 4px);pointer-events:none;z-index:9999}
+
+/* Canvas behind everything */
+#bgCanvas{position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none}
+.page{position:relative;z-index:1}
+
+/* Header */
+.hdr{display:flex;justify-content:space-between;align-items:center;padding:12px 20px;border-bottom:1px solid rgba(0,240,255,0.08);background:rgba(5,5,8,0.9);backdrop-filter:blur(10px);position:sticky;top:0;z-index:100}
+.hdr-left{display:flex;align-items:center;gap:10px}
+.hdr-title{font-size:1rem;font-weight:700;letter-spacing:0.2em;color:#00f0ff;text-shadow:0 0 12px rgba(0,240,255,0.4)}
+.dot{width:7px;height:7px;background:#39ff14;border-radius:50%;animation:pulse 2s infinite;display:inline-block}
+@keyframes pulse{0%,100%{opacity:1;box-shadow:0 0 6px #39ff14}50%{opacity:.4;box-shadow:0 0 16px #39ff14}}
+.hdr-bal{font-size:1.4rem;font-weight:700;color:#00f0ff;text-shadow:0 0 10px rgba(0,240,255,0.3)}
+.mode-badge{font-size:.65rem;padding:2px 8px;border:1px solid rgba(0,240,255,0.2);border-radius:2px;color:rgba(0,240,255,0.6);letter-spacing:0.1em}
+.hdr-meta{font-size:.7rem;color:rgba(255,255,255,0.25)}
+
+/* Panels */
+.panel{border:1px solid rgba(0,240,255,0.1);background:rgba(0,240,255,0.015);margin:0;padding:14px 16px;position:relative}
+.panel-title{font-size:.65rem;font-weight:600;letter-spacing:0.15em;text-transform:uppercase;color:rgba(0,240,255,0.5);margin-bottom:10px}
+.panel-title::before{content:'◆ ';color:rgba(0,240,255,0.3)}
+
+/* Grid */
+.grid-top{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;border-bottom:1px solid rgba(0,240,255,0.06)}
+.grid-main{display:grid;grid-template-columns:220px 1fr 320px;min-height:420px}
+.grid-bottom{border-top:1px solid rgba(0,240,255,0.06)}
+@media(max-width:1000px){.grid-top{grid-template-columns:1fr 1fr}.grid-main{grid-template-columns:1fr}}
+
+/* Metric cards */
+.metric{text-align:center;padding:16px 12px;border-right:1px solid rgba(0,240,255,0.06)}
+.metric:last-child{border-right:none}
+.metric-label{font-size:.6rem;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.25);margin-bottom:6px}
+.metric-value{font-size:1.6rem;font-weight:700;color:#00f0ff;text-shadow:0 0 8px rgba(0,240,255,0.25)}
+.metric-sub{font-size:.7rem;color:rgba(255,255,255,0.3);margin-top:4px}
+.profit{color:#39ff14!important;text-shadow:0 0 8px rgba(57,255,20,0.3)!important}
+.loss{color:#ff3333!important;text-shadow:0 0 8px rgba(255,51,51,0.3)!important}
+
+/* Left sidebar */
+.sidebar{border-right:1px solid rgba(0,240,255,0.06);padding:0;overflow-y:auto}
+.strat-row{display:flex;justify-content:space-between;padding:8px 14px;border-bottom:1px solid rgba(0,240,255,0.03);font-size:.75rem}
+.strat-row:hover{background:rgba(0,240,255,0.03)}
+.strat-name{color:rgba(0,240,255,0.7);font-size:.65rem}
+.strat-count{color:rgba(255,255,255,0.3)}
+
+/* Center */
+.center{padding:0;display:flex;flex-direction:column}
+.chart-box{flex:1;padding:14px 16px;min-height:200px;position:relative}
+.chart-box canvas{width:100%!important}
+
+/* Right sidebar - log */
+.logpanel{border-left:1px solid rgba(0,240,255,0.06);overflow-y:auto;font-size:.7rem;max-height:420px}
+.log-entry{padding:5px 12px;border-bottom:1px solid rgba(255,255,255,0.02);line-height:1.5}
+.log-time{color:rgba(255,255,255,0.15)}
+.log-tag{padding:1px 4px;border-radius:1px;font-size:.6rem;margin:0 4px}
+.log-tag-fwd{background:rgba(0,240,255,0.1);color:#00f0ff}
+.log-tag-bwd{background:rgba(57,255,20,0.1);color:#39ff14}
+.log-tag-skip{background:rgba(255,255,255,0.04);color:rgba(255,255,255,0.2)}
+.log-tag-reward{background:rgba(255,215,0,0.15);color:#ffd700}
+.log-tag-penalty{background:rgba(255,51,51,0.1);color:#ff3333}
+
+/* Bottom tabs */
+.tabs{display:flex;border-bottom:1px solid rgba(0,240,255,0.06)}
+.tab{padding:8px 18px;font-size:.7rem;letter-spacing:0.08em;cursor:pointer;color:rgba(255,255,255,0.3);border-bottom:2px solid transparent;transition:all .2s}
+.tab:hover{color:rgba(255,255,255,0.5)}
+.tab.active{color:#00f0ff;border-bottom-color:#00f0ff}
+.tab-body{padding:14px 16px;max-height:260px;overflow-y:auto;font-size:.75rem}
+.tab-content{display:none}
+.tab-content.active{display:block}
+
+/* Trade table */
+.ttable{width:100%;font-size:.72rem;border-collapse:collapse}
+.ttable th{text-align:left;padding:6px 10px;color:rgba(255,255,255,0.2);font-weight:500;font-size:.6rem;text-transform:uppercase;letter-spacing:.05em;border-bottom:1px solid rgba(0,240,255,0.06)}
+.ttable td{padding:6px 10px;border-bottom:1px solid rgba(255,255,255,0.02)}
+.ttable tr:hover{background:rgba(0,240,255,0.02)}
+
+/* Floating text animation */
+@keyframes floatUp{0%{opacity:1;transform:translate(-50%,-50%) scale(.5)}20%{opacity:1;transform:translate(-50%,-50%) scale(1.2)}40%{opacity:1;transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-150%) scale(1)}}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:rgba(0,240,255,0.15);border-radius:2px}
+</style>
+</head>
+<body>
+<canvas id="bgCanvas"></canvas>
+<div class="page">
+
+<!-- HEADER -->
+<div class="hdr">
+  <div class="hdr-left">
+    <span class="dot" id="statusDot"></span>
+    <span class="hdr-title">KALSHI ALPHA</span>
+    <span class="mode-badge">PAPER TRADING</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:16px">
+    <span class="hdr-meta">scan: <span data-field="last_scan">—</span></span>
+    <span class="hdr-bal" data-field="balance">$—</span>
+  </div>
+</div>
+
+<!-- METRICS ROW -->
+<div class="grid-top">
+  <div class="metric">
+    <div class="metric-label">Balance</div>
+    <div class="metric-value" data-field="balance">$—</div>
+    <div class="metric-sub" data-field="roi">—% ROI</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">Daily P&L</div>
+    <div class="metric-value" data-field="daily_pnl">$—</div>
+    <div class="metric-sub" data-field="trades_today">— trades today</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">Positions</div>
+    <div class="metric-value" data-field="positions">—</div>
+    <div class="metric-sub">open contracts</div>
+  </div>
+  <div class="metric">
+    <div class="metric-label">Win Rate</div>
+    <div class="metric-value" data-field="win_rate">—%</div>
+    <div class="metric-sub" data-field="wl_record">—W / —L</div>
+  </div>
+</div>
+
+<!-- MAIN 3-COLUMN -->
+<div class="grid-main">
+
+  <!-- LEFT: Strategy Layers -->
+  <div class="sidebar">
+    <div class="panel-title" style="padding:14px 14px 8px">Layer Architecture</div>
+    <div id="stratLayers">
+      <div class="strat-row"><span class="strat-name">Loading...</span></div>
+    </div>
+    <div class="panel-title" style="padding:14px 14px 8px;margin-top:8px">Risk Status</div>
+    <div style="padding:4px 14px;font-size:.72rem">
+      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Kelly Fraction</span><span>0.10</span></div>
+      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Max Entry</span><span>$0.15</span></div>
+      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Min Confidence</span><span>85%</span></div>
+      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Daily Stop</span><span>-$30</span></div>
+      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Cycle Speed</span><span>10s</span></div>
+    </div>
+  </div>
+
+  <!-- CENTER: Equity Chart -->
+  <div class="center">
+    <div class="panel-title" style="padding:14px 16px 0">Equity Curve — Balance Over Time</div>
+    <div class="chart-box"><canvas id="equityChart"></canvas></div>
+  </div>
+
+  <!-- RIGHT: Training Log -->
+  <div class="logpanel" id="trainingLog">
+    <div class="panel-title" style="padding:12px 12px 8px">Training Log</div>
+    <div class="log-entry"><span class="log-time">--:--:--</span> <span class="log-tag log-tag-fwd">INIT</span> Neural Cortex online...</div>
+  </div>
+
+</div>
+
+<!-- BOTTOM TABS -->
+<div class="grid-bottom">
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('trades',this)">RECENT TRADES</div>
+    <div class="tab" onclick="switchTab('signals',this)">SIGNAL FEED</div>
+    <div class="tab" onclick="switchTab('debates',this)">AI DEBATES</div>
+    <div class="tab" onclick="switchTab('learn',this)">LEARNING LAB</div>
+  </div>
+
+  <div class="tab-content active" id="tab-trades">
+    <div class="tab-body">
+      <table class="ttable">
+        <thead><tr><th>Time</th><th>Strategy</th><th>Market</th><th>Side</th><th>Price</th><th>Status</th></tr></thead>
+        <tbody id="tradesBody"><tr><td colspan="6" style="color:rgba(255,255,255,0.15)">Waiting for trades...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-signals">
+    <div class="tab-body" id="signalFeed" style="font-size:.7rem">
+      <div style="color:rgba(255,255,255,0.15)">Waiting for signals...</div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-debates">
+    <div class="tab-body" id="debatesFeed">
+      <div style="color:rgba(255,255,255,0.15)">No debates yet...</div>
+    </div>
+  </div>
+
+  <div class="tab-content" id="tab-learn">
+    <div class="tab-body" id="learnFeed">
+      <div style="color:rgba(255,255,255,0.15)">Self-improvement runs every 6 hours. Waiting for data...</div>
+    </div>
+  </div>
+</div>
+
+</div><!-- /page -->
+
+<script>
+// === BACKGROUND PARTICLE SYSTEM ===
+const C=document.getElementById('bgCanvas'),X=C.getContext('2d');
+let W,H,particles=[];
+function resize(){W=C.width=innerWidth;H=C.height=innerHeight}
+resize();addEventListener('resize',resize);
+
+class P{
+  constructor(x,y,o){
+    this.x=x||Math.random()*W;this.y=y||Math.random()*H;
+    o=o||{};
+    this.vx=o.vx||(Math.random()*.3+.05);
+    this.vy=o.vy||((Math.random()-.5)*.15);
+    this.s=o.s||(Math.random()*1.5+.3);
+    this.a=o.a||(Math.random()*.1+.03);
+    this.ma=this.a;
+    this.c=o.c||'0,240,255';
+    this.life=o.life||Infinity;
+    this.age=0;this.d=o.d||0;
+  }
+  update(){
+    this.x+=this.vx;this.y+=this.vy;this.age++;
+    if(this.d)this.a-=this.d;
+    if(this.x>W+5)this.x=-5;if(this.x<-5)this.x=W+5;
+    if(this.y>H+5)this.y=-5;if(this.y<-5)this.y=H+5;
+  }
+  draw(){
+    if(this.a<=0)return;
+    X.beginPath();X.arc(this.x,this.y,this.s,0,Math.PI*2);
+    X.fillStyle=`rgba(${this.c},${Math.max(0,this.a)})`;X.fill();
+  }
+  dead(){return this.a<=0||this.age>this.life}
+}
+
+// Init ambient particles
+for(let i=0;i<50;i++)particles.push(new P());
+
+// Neural mesh lines
+function drawMesh(){
+  const amb=particles.filter(p=>p.life===Infinity).slice(0,50);
+  for(let i=0;i<amb.length;i++){
+    for(let j=i+1;j<amb.length;j++){
+      const dx=amb[i].x-amb[j].x,dy=amb[i].y-amb[j].y,d=Math.sqrt(dx*dx+dy*dy);
+      if(d<120){
+        X.beginPath();X.moveTo(amb[i].x,amb[i].y);X.lineTo(amb[j].x,amb[j].y);
+        X.strokeStyle=`rgba(0,240,255,${(1-d/120)*.04})`;X.lineWidth=.5;X.stroke();
+      }
+    }
+  }
+}
+
+function animBg(){
+  X.fillStyle='rgba(5,5,8,.12)';X.fillRect(0,0,W,H);
+  particles.forEach(p=>{p.update();p.draw()});
+  particles=particles.filter(p=>!p.dead());
+  drawMesh();
+  while(particles.filter(p=>p.life===Infinity).length<50)
+    particles.push(new P(-5,Math.random()*H));
+  requestAnimationFrame(animBg);
+}
+animBg();
+
+// Event triggers
+function scanPulse(){
+  particles.filter(p=>p.life===Infinity).forEach(p=>{
+    p.vx*=2.5;setTimeout(()=>{p.vx/=2.5},400);p.a=Math.min(p.ma*2.5,.3);
+  });
+  for(let i=0;i<10;i++)
+    particles.push(new P(-5,Math.random()*H,{vx:Math.random()*1.5+.8,a:.25,d:.003,life:150,s:Math.random()*2+.5}));
+}
+
+function burstTrade(side){
+  const cx=W/2,cy=H/2;
+  for(let i=0;i<30;i++){
+    const a=Math.PI*2*i/30,sp=Math.random()*2+.8;
+    particles.push(new P(cx,cy,{vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,a:.5,d:.007,life:100,s:Math.random()*2.5+1,c:side==='yes'?'0,240,255':'255,160,0'}));
+  }
+}
+
+function burstWin(pnl){
+  const cx=W/2,cy=H/2;
+  for(let i=0;i<60;i++){
+    const a=Math.random()*Math.PI*2,sp=Math.random()*3+1;
+    particles.push(new P(cx+(Math.random()-.5)*80,cy+(Math.random()-.5)*80,{
+      vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,a:.7,d:.004,life:180,s:Math.random()*3+1.5,
+      c:Math.random()>.5?'255,215,0':'57,255,20'
+    }));
+  }
+  showFloat('+$'+Math.abs(pnl).toFixed(2),'#39ff14');
+}
+
+function burstLoss(pnl){
+  const cx=W/2,cy=H/2;
+  for(let i=0;i<25;i++){
+    const a=Math.random()*Math.PI*2,sp=Math.random()*2+.5;
+    particles.push(new P(cx,cy,{vx:Math.cos(a)*sp,vy:Math.sin(a)*sp+.8,a:.4,d:.008,life:100,s:Math.random()*2+1,c:Math.random()>.5?'255,51,51':'255,106,0'}));
+  }
+  showFloat('-$'+Math.abs(pnl).toFixed(2),'#ff3333');
+}
+
+function showFloat(txt,col){
+  const el=document.createElement('div');
+  el.textContent=txt;
+  el.style.cssText=`position:fixed;top:35%;left:50%;transform:translate(-50%,-50%);font-family:'JetBrains Mono',monospace;font-size:2.5rem;font-weight:700;color:${col};text-shadow:0 0 20px ${col}40;z-index:9998;pointer-events:none;animation:floatUp 2s ease-out forwards`;
+  document.body.appendChild(el);setTimeout(()=>el.remove(),2500);
+}
+
+// === TAB SWITCHING ===
+function switchTab(name,el){
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('tab-'+name).classList.add('active');
+}
+
+// === HELPERS ===
+function fmt(ts){
+  if(!ts)return'—';const d=new Date(ts),n=new Date(),s=(n-d)/1e3;
+  if(s<60)return Math.floor(s)+'s ago';if(s<3600)return Math.floor(s/60)+'m ago';
+  if(s<86400)return Math.floor(s/3600)+'h ago';return d.toLocaleDateString();
+}
+function fmtTime(ts){
+  if(!ts)return'--:--:--';return new Date(ts).toLocaleTimeString('en-US',{hour12:false});
+}
+
+// === CHARTS ===
+let eqChart=null;
+function updateEquity(data){
+  if(!data||!data.length)return;
+  const labels=data.map(d=>fmtTime(d.timestamp));
+  const vals=data.map(d=>d.balance);
+  const ctx=document.getElementById('equityChart').getContext('2d');
+  if(eqChart){
+    eqChart.data.labels=labels;eqChart.data.datasets[0].data=vals;eqChart.update('none');
+  }else{
+    eqChart=new Chart(ctx,{type:'line',data:{labels,datasets:[{data:vals,borderColor:'#00f0ff',borderWidth:1.5,fill:false,tension:.3,pointRadius:0,pointHoverRadius:3,pointHoverBackgroundColor:'#00f0ff'}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{grid:{color:'rgba(0,240,255,0.03)'},ticks:{color:'rgba(0,240,255,0.2)',font:{size:9,family:'JetBrains Mono'},maxTicksLimit:6}},y:{grid:{color:'rgba(0,240,255,0.03)'},ticks:{color:'rgba(0,240,255,0.2)',font:{size:9,family:'JetBrains Mono'},callback:v=>'$'+v}}},interaction:{intersect:false,mode:'index'}}});
+  }
+}
+
+// === DATA REFRESH ===
+let prevTradeIds=new Set(),prevBal=null;
+
+async function fetchJ(url){try{const r=await fetch(url);return r.ok?await r.json():null}catch(e){return null}}
+
+async function refreshAll(){
+  scanPulse();
+  const[status,trades,strats,equity,signals]=await Promise.all([
+    fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals')
+  ]);
+
+  // STATUS
+  if(status){
+    const b=status.balance||0,pnl=status.daily_pnl||0,roi=status.roi_percent||0;
+    document.querySelectorAll('[data-field="balance"]').forEach(el=>{el.textContent='$'+b.toFixed(2);el.style.color='#00f0ff'});
+    document.querySelectorAll('[data-field="daily_pnl"]').forEach(el=>{el.textContent=(pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(2);el.className='metric-value '+(pnl>=0?'profit':'loss')});
+    document.querySelectorAll('[data-field="roi"]').forEach(el=>{el.textContent=(roi>=0?'+':'')+roi.toFixed(1)+'%';el.className='metric-sub '+(roi>=0?'profit':'loss')});
+    document.querySelectorAll('[data-field="trades_today"]').forEach(el=>{el.textContent=(status.trades_today||0)+' trades today'});
+    document.querySelectorAll('[data-field="positions"]').forEach(el=>{el.textContent=status.active_positions||0});
+    document.querySelectorAll('[data-field="last_scan"]').forEach(el=>{el.textContent=fmt(status.last_check)});
+    document.title='$'+(b).toFixed(0)+' | KALSHI ALPHA';
+
+    if(prevBal!==null&&Math.abs(b-prevBal)>.01){
+      if(b>prevBal)burstWin(b-prevBal);else burstLoss(prevBal-b);
+    }
+    prevBal=b;
+  }
+
+  // TRADES
+  if(trades&&trades.length){
+    const tbody=document.getElementById('tradesBody');
+    // Detect new trades
+    trades.forEach(t=>{
+      const id=t.id||t.timestamp;
+      if(id&&!prevTradeIds.has(id)){prevTradeIds.add(id);if(prevTradeIds.size>1)burstTrade(t.side)}
+    });
+    // Win rate
+    const settled=trades.filter(t=>(t.reason||'').toUpperCase().match(/WIN|LOSS/));
+    const wins=settled.filter(t=>(t.reason||'').toUpperCase().includes('WIN')).length;
+    const losses=settled.filter(t=>(t.reason||'').toUpperCase().includes('LOSS')).length;
+    const wr=(wins+losses)>0?((wins/(wins+losses))*100).toFixed(0):'—';
+    document.querySelectorAll('[data-field="win_rate"]').forEach(el=>{el.textContent=wr+'%'});
+    document.querySelectorAll('[data-field="wl_record"]').forEach(el=>{el.textContent=wins+'W / '+losses+'L'});
+
+    tbody.innerHTML=trades.slice(0,15).map(t=>{
+      const s=(t.strategy||'?').replace(/_/g,' ');
+      const side=(t.side||'').toUpperCase();
+      const reason=(t.reason||'').toUpperCase();
+      const isW=reason.includes('WIN'),isL=reason.includes('LOSS');
+      return`<tr><td style="color:rgba(255,255,255,0.2)">${fmt(t.timestamp||t.created_at)}</td><td style="color:#00f0ff">${s}</td><td>${(t.ticker||'').substring(0,28)}</td><td style="color:${side==='YES'?'#39ff14':'#ff6d00'}">${side}</td><td>$${(t.price||0).toFixed(2)}</td><td style="color:${isW?'#39ff14':isL?'#ff3333':'rgba(255,255,255,0.2)'}">${isW?'WIN':isL?'LOSS':'OPEN'}</td></tr>`;
+    }).join('');
+  }
+
+  // STRATEGIES
+  if(strats&&strats.length){
+    const el=document.getElementById('stratLayers');
+    el.innerHTML=strats.map(s=>{
+      const name=(s.strategy||'?').replace(/_/g,' ');
+      return`<div class="strat-row"><span class="strat-name">${name}</span><span class="strat-count">${s.trades||0} trades</span></div>`;
+    }).join('');
+  }
+
+  // EQUITY
+  if(equity)updateEquity(equity);
+
+  // SIGNALS → Training Log
+  if(signals&&signals.length){
+    const log=document.getElementById('trainingLog');
+    let html='<div class="panel-title" style="padding:12px 12px 8px">Training Log</div>';
+    signals.slice(0,30).forEach(s=>{
+      const time=fmtTime(s.timestamp);
+      const edge=((s.edge||0)*100).toFixed(1);
+      const conf=(s.confidence||0).toFixed(0);
+      if(s.action==='TRADE'||s.action==='VIRTUAL_TRADE'){
+        html+=`<div class="log-entry"><span class="log-time">${time}</span> <span class="log-tag log-tag-bwd">FORWARD</span> ${s.strategy||'?'} → ${s.ticker||'?'} edge=${edge}%</div>`;
+      }else{
+        html+=`<div class="log-entry"><span class="log-time">${time}</span> <span class="log-tag log-tag-skip">CLIP</span> ${s.ticker||'?'} ${s.skip_reason||'filtered'}</div>`;
+      }
+    });
+    log.innerHTML=html;
+  }
+
+  // SIGNALS TAB
+  if(signals&&signals.length){
+    const el=document.getElementById('signalFeed');
+    el.innerHTML=signals.slice(0,40).map(s=>{
+      const isSkip=s.action==='SKIP';
+      const edge=((s.edge||0)*100).toFixed(1);
+      return`<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.02);${isSkip?'opacity:.35':''}"><span style="color:rgba(255,255,255,0.15)">${fmtTime(s.timestamp)}</span> <span style="color:#00f0ff">${s.strategy||'?'}</span> ${s.ticker||''} — edge:${edge}% → <span style="color:${isSkip?'rgba(255,255,255,0.2)':'#39ff14'}">${s.action||'?'}</span> ${s.skip_reason?'<span style="color:rgba(255,255,255,0.15)">('+s.skip_reason+')</span>':''}</div>`;
+    }).join('');
+  }
+}
+
+// Initial + auto-refresh
+refreshAll();
+setInterval(refreshAll,12000);
+</script>
+</body>
+</html>"""
 
 
-@app.route('/api/stop', methods=['POST'])
-def stop_bot():
-    global bot_instance
-    try:
-        if bot_instance:
-            asyncio.create_task(bot_instance.stop())
-        return jsonify({'message': 'Bot stop signal sent'})
-    except Exception as e:
-        logger.error(f"Failed to stop bot: {e}")
-        return jsonify({'error': str(e)}), 500
+@app.route('/dashboard')
+def dashboard():
+    return DASHBOARD_HTML
 
 
-@app.route('/api/kill-switch', methods=['POST'])
-def kill_switch():
-    try:
-        db = get_db()
-        db.client.table('kill_switch').insert({'active': True, 'timestamp': datetime.utcnow().isoformat()}).execute()
-        return jsonify({'message': 'Kill switch activated'})
-    except Exception as e:
-        logger.error(f"Failed to activate kill switch: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/kill-switch-status')
-def kill_switch_status():
-    try:
-        db = get_db()
-        result = db.client.table('kill_switch').select('*').eq('active', True).order('timestamp', desc=True).limit(1).execute()
-        active = len(result.data) > 0
-        return jsonify({'active': active})
-    except Exception as e:
-        logger.error(f"Failed to get kill switch status: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/portfolio')
-def get_portfolio():
-    try:
-        db = get_db()
-        status = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
-        bal = 100.0
-        daily_pnl = 0
-        trades_today = 0
-        active_positions = 0
-        if status.data:
-            row = status.data[0]
-            bal = row.get('balance', 100)
-            daily_pnl = row.get('daily_pnl', 0)
-            trades_today = row.get('trades_today', 0)
-            active_positions = row.get('active_positions', 0)
-
-        trades = db.client.table('kalshi_trades').select('id').execute()
-        total_trades = len(trades.data) if trades.data else 0
-
-        return jsonify({
-            'bankroll': bal,
-            'available_capital': bal,
-            'total_pnl': daily_pnl,
-            'realized_pnl': daily_pnl,
-            'unrealized_pnl': 0,
-            'open_positions': active_positions,
-            'total_invested': 0,
-            'total_trades': total_trades,
-            'live_trades': 0,
-            'paper_trades': total_trades,
-            'avg_edge': 0,
-            'avg_evidence_quality': 0,
-            'today_trades': trades_today,
-            'daily_volume': 0,
-            'live_trading_enabled': False,
-            'dry_run': True,
-            'roi_percent': ((bal - 100) / 100 * 100),
-        })
-    except Exception as e:
-        logger.error(f"Failed to get portfolio: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/engine-status')
-def get_engine_status():
-    try:
-        db = get_db()
-        status = db.client.table('kalshi_bot_status').select('is_running').order('id', desc=True).limit(1).execute()
-        running = status.data[0].get('is_running', False) if status.data else False
-        return jsonify({
-            'running': running,
-            'live_trading': False,
-            'paper_mode': True,
-            'cycles': 0,
-        })
-    except Exception as e:
-        logger.error(f"Failed to get engine status: {e}")
-        return jsonify({'running': False, 'live_trading': False, 'paper_mode': True, 'cycles': 0})
-
-
-@app.route('/api/positions')
-def get_positions():
-    try:
-        db = get_db()
-        positions = db.client.table('kalshi_positions').select('*').execute()
-        return jsonify({'positions': positions.data or []})
-    except Exception as e:
-        logger.error(f"Failed to get positions: {e}")
-        return jsonify({'positions': []})
-
-
-@app.route('/api/activity')
-def get_activity():
-    try:
-        limit = int(request.args.get('limit', 20))
-        db = get_db()
-        trades = db.client.table('kalshi_trades').select('*').order('id', desc=True).limit(limit).execute()
-
-        entries = []
-        for trade in trades.data or []:
-            entries.append({
-                'timestamp': trade.get('timestamp'),
-                'action': trade.get('action', 'trade'),
-                'market_id': trade.get('ticker', ''),
-                'details': f"{trade.get('side', '')} x{trade.get('count', 0)} @ ${trade.get('price', 0):.2f} [{trade.get('strategy', '')}]",
-                'status': 'success',
-            })
-
-        return jsonify({'entries': entries})
-    except Exception as e:
-        logger.error(f"Failed to get activity: {e}")
-        return jsonify({'entries': []})
-
-
-@app.route('/api/system-status')
-def get_system_status():
-    try:
-        db = get_db()
-        status = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
-        if status.data:
-            row = status.data[0]
-            return jsonify({
-                'bot_running': row.get('is_running', False),
-                'last_check': row.get('last_check', 'Never'),
-                'balance': f"${row.get('balance', 0):.2f}",
-                'daily_pnl': f"${row.get('daily_pnl', 0):.2f}",
-                'trades_today': row.get('trades_today', 0),
-                'active_positions': row.get('active_positions', 0),
-            })
-        return jsonify({'bot_running': False, 'last_check': 'Never'})
-    except Exception as e:
-        logger.error(f"Failed to get system status: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/export/<table>')
-def export_data(table):
-    allowed = ['kalshi_trades', 'signal_evaluations', 'kalshi_bot_status', 'equity_snapshots', 'debate_log']
-    if table not in allowed:
-        return jsonify({'error': 'Table not allowed'}), 400
-
-    try:
-        db = get_db()
-        data = db.client.table(table).select('*').order('id', desc=True).limit(1000).execute()
-        return jsonify({'rows': data.data or []})
-    except Exception as e:
-        logger.error(f"Failed to export {table}: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/learning/run-analysis', methods=['POST'])
-def run_self_analysis():
-    try:
-        from self_improver import SelfImprover
-        improver = SelfImprover()
-        results = improver.run_full_analysis(lookback_days=7)
-        return jsonify({'success': True, 'results': results})
-    except Exception as e:
-        logger.error(f"Failed to run analysis: {e}")
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/learning/latest-analysis')
-def get_latest_analysis():
-    try:
-        db = get_db()
-        result = db.client.table('improvement_logs').select('*').order('timestamp', desc=True).limit(1).execute()
-        if result.data and len(result.data) > 0:
-            return jsonify(result.data[0].get('analysis_json', {}))
-        return jsonify({})
-    except Exception as e:
-        logger.error(f"Failed to get latest analysis: {e}")
-        return jsonify({'error': str(e)}), 500
-
+# ============================================================
+#  Start dashboard in background thread
+# ============================================================
 
 def start_dashboard():
-    """Start the dashboard web server (blocks — run bot in background first)."""
-    port = int(os.environ.get('PORT', 5000))
-    logger.info(f"Dashboard starting on port {port}")
-    app.run(host='0.0.0.0', port=port)
-
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 8080))
+    t = threading.Thread(
+        target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False),
+        daemon=True
+    )
+    t.start()
+    print(f"Dashboard starting on port {port}")

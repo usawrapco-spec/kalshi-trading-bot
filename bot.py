@@ -307,7 +307,7 @@ class KalshiBot:
             # MARKET TRIMMING: Take top 50 most liquid markets only
             # Sort by volume descending, then take top 50 for focused trading
             all_markets.sort(key=lambda m: get_volume(m), reverse=True)
-            markets = all_markets[:50]  # Top 50 most liquid markets
+            markets = all_markets[:200]  # Top 200 most liquid markets
 
             logger.info(f"Market trimming: {len(all_markets)} total -> {len(markets)} top volume markets")
 
@@ -457,14 +457,14 @@ class KalshiBot:
             logger.info("📈 LIVE TRADING: Processing signals with risk management...")
 
             # LEARNING ALLOCATION SYSTEM
-            LEARNING_ALLOCATION = 0.05  # 5% of balance for learning
-            PRODUCTION_ALLOCATION = 0.95  # 95% for production
+            LEARNING_ALLOCATION = 0.15  # 15% of balance for learning
+            PRODUCTION_ALLOCATION = 0.85  # 85% for production
 
             learning_budget = self.risk.paper_balance * LEARNING_ALLOCATION
             production_budget = self.risk.paper_balance * PRODUCTION_ALLOCATION
 
-            MAX_TRADES = 2
-            MAX_CYCLE_SPEND = min(5.00, production_budget)  # Cap at production budget
+            MAX_TRADES = 5
+            MAX_CYCLE_SPEND = min(10.00, production_budget)  # Cap at production budget
             all_signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
             logger.info(f"Total signals across all strategies: {len(all_signals)}")
             logger.info(f"Learning budget: ${learning_budget:.2f}, Production budget: ${production_budget:.2f}")
