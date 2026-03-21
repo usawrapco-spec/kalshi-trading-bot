@@ -17,37 +17,60 @@ logger = setup_logger('cross_platform')
 
 POLYMARKET_URL = 'https://gamma-api.polymarket.com/markets'
 MIN_EDGE = 0.05  # 5% minimum price difference to trade
-MIN_SIMILARITY = 0.40  # Title similarity threshold for matching
-MAX_MATCHES = 20  # Max markets to compare per cycle
+MIN_SIMILARITY = 0.70  # 70% title similarity required
+MIN_SHARED_WORDS = 3   # At least 3 meaningful words in common
+MAX_MATCHES = 20
+
+# Words to exclude from keyword matching (not meaningful for matching events)
+STOP_WORDS = {
+    'will', 'the', 'be', 'a', 'an', 'in', 'on', 'of', 'to', 'by',
+    'before', 'after', 'for', 'is', 'it', 'this', 'that', 'or', 'and',
+    'at', 'not', 'no', 'yes', 'any', 'has', 'have', 'been', 'was',
+    'are', 'do', 'does', 'did', 'than', 'more', 'most', 'next',
+}
+
+# Category keywords for same-category matching
+CATEGORY_MAP = {
+    'politics': ['president', 'election', 'senate', 'congress', 'trump', 'biden', 'democrat', 'republican', 'party', 'governor', 'vote', 'poll', 'pardon', 'impeach'],
+    'weather': ['temperature', 'temp', 'weather', 'high', 'low', 'degrees', 'fahrenheit', 'rain', 'snow'],
+    'sports': ['nba', 'nfl', 'ncaa', 'mlb', 'nhl', 'game', 'score', 'championship', 'playoff', 'match', 'win', 'beat'],
+    'crypto': ['bitcoin', 'btc', 'ethereum', 'eth', 'crypto', 'solana'],
+    'finance': ['s&p', 'sp500', 'nasdaq', 'dow', 'stock', 'market', 'fed', 'rate', 'gdp', 'inflation', 'cpi'],
+    'world': ['ukraine', 'russia', 'china', 'taiwan', 'nato', 'war', 'sanctions', 'treaty'],
+}
 
 
-def normalize_title(title):
-    """Normalize a market title for comparison."""
+def get_meaningful_words(title):
+    """Extract meaningful words from a title, excluding stop words."""
     if not title:
-        return ''
-    t = title.lower()
-    # Remove common filler words and punctuation
-    t = re.sub(r'[^a-z0-9\s]', ' ', t)
-    t = re.sub(r'\b(will|the|be|a|an|in|on|of|to|by|before|after|for|is|it|this|that)\b', ' ', t)
-    t = re.sub(r'\s+', ' ', t).strip()
-    return t
+        return set()
+    t = re.sub(r'[^a-z0-9\s]', ' ', title.lower())
+    return {w for w in t.split() if w not in STOP_WORDS and len(w) > 1}
+
+
+def detect_category(title):
+    """Detect the category of a market by keyword matching."""
+    words = get_meaningful_words(title)
+    for cat, keywords in CATEGORY_MAP.items():
+        if any(kw in words or kw in title.lower() for kw in keywords):
+            return cat
+    return 'other'
 
 
 def title_similarity(a, b):
-    """Calculate similarity between two market titles."""
-    na, nb = normalize_title(a), normalize_title(b)
-    if not na or not nb:
-        return 0.0
-    # Check for key phrase overlap first
-    words_a = set(na.split())
-    words_b = set(nb.split())
+    """Calculate similarity requiring 3+ shared meaningful words and 70%+ match."""
+    words_a = get_meaningful_words(a)
+    words_b = get_meaningful_words(b)
     if len(words_a) < 2 or len(words_b) < 2:
-        return 0.0
+        return 0.0, set()
     overlap = words_a & words_b
-    # Need at least 2 meaningful words in common
-    if len(overlap) < 2:
-        return 0.0
-    return SequenceMatcher(None, na, nb).ratio()
+    if len(overlap) < MIN_SHARED_WORDS:
+        return 0.0, overlap
+    # SequenceMatcher on the full normalized strings
+    na = ' '.join(sorted(words_a))
+    nb = ' '.join(sorted(words_b))
+    sim = SequenceMatcher(None, na, nb).ratio()
+    return sim, overlap
 
 
 class CrossPlatformEdgeStrategy(BaseStrategy):
@@ -70,48 +93,56 @@ class CrossPlatformEdgeStrategy(BaseStrategy):
 
         logger.info(f"CrossPlatform: {len(poly_markets)} Polymarket markets, matching against {len(markets)} Kalshi markets")
 
-        # Build Polymarket lookup: normalized title -> {title, price, volume}
+        # Build Polymarket lookup with category detection
         poly_lookup = []
         for pm in poly_markets:
             question = pm.get('question') or pm.get('title') or ''
-            # Polymarket prices: outcomePrices is a JSON string like "[\"0.65\",\"0.35\"]"
             price = self._extract_poly_price(pm)
             if price is None or price <= 0:
                 continue
             poly_lookup.append({
                 'title': question,
-                'normalized': normalize_title(question),
                 'price': price,
                 'volume': float(pm.get('volume', 0) or 0),
-                'slug': pm.get('slug', ''),
+                'category': detect_category(question),
             })
 
         if not poly_lookup:
             logger.info("CrossPlatform: 0 Polymarket markets with valid prices")
             return signals
 
-        # Match Kalshi markets to Polymarket
+        # Match Kalshi markets to Polymarket (same category + 70% similarity + 3 shared words)
         matches = 0
+        rejected_cat = 0
+        rejected_sim = 0
         for m in markets:
             kalshi_title = m.get('title') or ''
             kalshi_price = get_yes_price(m)
             if kalshi_price <= 0.02 or kalshi_price >= 0.98:
-                continue  # Skip near-resolved
+                continue
+
+            kalshi_cat = detect_category(kalshi_title)
 
             best_match = None
             best_sim = 0
+            best_overlap = set()
             for pm in poly_lookup:
-                sim = title_similarity(kalshi_title, pm['title'])
+                # Must be same category (or both 'other')
+                if kalshi_cat != pm['category']:
+                    continue
+
+                sim, overlap = title_similarity(kalshi_title, pm['title'])
                 if sim > best_sim and sim >= MIN_SIMILARITY:
                     best_sim = sim
                     best_match = pm
+                    best_overlap = overlap
 
             if not best_match:
                 continue
 
             matches += 1
             poly_price = best_match['price']
-            edge = poly_price - kalshi_price  # Positive = Kalshi underpriced vs Polymarket
+            edge = poly_price - kalshi_price
 
             if abs(edge) < MIN_EDGE:
                 continue
@@ -130,10 +161,12 @@ class CrossPlatformEdgeStrategy(BaseStrategy):
 
             confidence = min(45 + edge * 150 + best_sim * 20, 100)
 
+            shared = ', '.join(sorted(best_overlap)[:5])
             logger.info(
-                f"CrossPlatform: {ticker} Kalshi={kalshi_price:.2f} Polymarket={poly_price:.2f} "
-                f"edge={edge:+.2f} sim={best_sim:.2f} -> BUY {side.upper()} "
-                f"(\"{kalshi_title[:50]}\" ~ \"{best_match['title'][:50]}\")"
+                f"CrossPlatform MATCH [{kalshi_cat}]: sim={best_sim:.0%} shared=[{shared}]\n"
+                f"  Kalshi:     \"{kalshi_title}\" @ ${kalshi_price:.2f}\n"
+                f"  Polymarket: \"{best_match['title']}\" @ ${poly_price:.2f}\n"
+                f"  -> BUY {side.upper()} edge={edge:+.0%}"
             )
 
             signals.append({
