@@ -17,7 +17,7 @@ class ArbitrageStrategy(BaseStrategy):
     Requires edge to persist across multiple checks to filter glitches.
     """
 
-    def __init__(self, client, risk_manager, db, min_edge=0.03):
+    def __init__(self, client, risk_manager, db, min_edge=0.005):
         super().__init__(client, risk_manager)
         self.db = db
         self.min_edge = min_edge

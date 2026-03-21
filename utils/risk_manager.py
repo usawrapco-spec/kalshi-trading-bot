@@ -6,8 +6,8 @@ from utils.logger import setup_logger
 
 logger = setup_logger('risk_manager')
 
-# Confidence threshold: only execute trades with confidence >= 70
-MIN_CONFIDENCE = 70
+# Confidence threshold: only execute trades with confidence >= 40
+MIN_CONFIDENCE = 40
 # Never more than 3 open positions
 MAX_OPEN_POSITIONS = 3
 # Max 20% of balance in a single trade

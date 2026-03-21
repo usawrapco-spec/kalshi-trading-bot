@@ -66,16 +66,16 @@ class KalshiBot:
         logger.info("Loading strategies...")
 
         if Config.ENABLE_ARBITRAGE:
-            self.strategies.append(ArbitrageStrategy(self.client, self.risk_manager, self.db, min_edge=0.03))
-            logger.info("Arbitrage strategy enabled (3% min edge, 2 confirmations)")
+            self.strategies.append(ArbitrageStrategy(self.client, self.risk_manager, self.db, min_edge=0.005))
+            logger.info("Arbitrage strategy enabled (0.5% min edge, 2 confirmations)")
 
         if Config.ENABLE_MOMENTUM:
-            self.strategies.append(MomentumStrategy(self.client, self.risk_manager, self.db, price_change_threshold=0.05))
-            logger.info("Momentum strategy enabled (5% threshold, 3 confirming points)")
+            self.strategies.append(MomentumStrategy(self.client, self.risk_manager, self.db, price_change_threshold=0.01))
+            logger.info("Momentum strategy enabled (1% threshold, 3 confirming points)")
 
-        # Value betting is always enabled - conservative high win-rate strategy
+        # Value betting is always enabled - targets 90+c and <10c markets
         self.strategies.append(ValueBettingStrategy(self.client, self.risk_manager, self.db))
-        logger.info("Value betting strategy enabled (90-97c range)")
+        logger.info("Value betting strategy enabled (90-99c and <10c range)")
 
         if not self.strategies:
             logger.warning("No strategies enabled!")
@@ -148,11 +148,66 @@ class KalshiBot:
                             executed += 1
 
         if total_signals == 0:
-            logger.info("No trading opportunities found this cycle")
+            logger.info("No trading opportunities found this cycle - attempting forced test trade")
+            self._force_test_trade(markets)
         else:
             logger.info(f"Cycle complete: {total_signals} signals, {executed} executed")
 
         self._log_status(balance)
+
+    def _force_test_trade(self, markets):
+        """Force a paper trade on the best available market when no signals are found."""
+        best = None
+        best_score = -1
+
+        for m in markets:
+            if m.get('status') != 'open':
+                continue
+            ticker = m.get('ticker', '')
+            yes_bid = m.get('yes_bid', 0)
+            no_bid = m.get('no_bid', 0)
+            volume = m.get('volume', 0)
+
+            # Score by volume and price extremity (prefer liquid + extreme prices)
+            for side, price in [('yes', yes_bid), ('no', no_bid)]:
+                if price <= 0:
+                    continue
+                extremity = max(price, 100 - price)  # how far from 50c
+                score = volume * 0.01 + extremity
+                if score > best_score:
+                    best_score = score
+                    best = {'ticker': ticker, 'side': side, 'price': price, 'volume': volume}
+
+        if not best:
+            logger.warning("forced-test-trade: no viable markets found")
+            return
+
+        signal = {
+            'ticker': best['ticker'],
+            'action': 'buy',
+            'side': best['side'],
+            'count': 1,
+            'reason': (
+                f'forced-test-trade: best available {best["side"].upper()} '
+                f'at {best["price"]}c, vol={best["volume"]}'
+            ),
+            'confidence': 0,
+            'strategy_type': 'forced_test',
+        }
+
+        logger.info(
+            f"forced-test-trade: {signal['ticker']} {signal['side']} "
+            f"at {best['price']}c vol={best['volume']}"
+        )
+
+        if self.dry_run:
+            logger.info(f"[DRY RUN] forced-test-trade: would buy 1 {signal['side']} {signal['ticker']}")
+        else:
+            for strategy in self.strategies:
+                result = strategy.execute(signal, dry_run=False)
+                if result:
+                    logger.info(f"forced-test-trade executed: {result}")
+                    break
 
     def _log_near_misses(self, markets):
         """Log top 5 closest-to-tradeable opportunities for debugging."""

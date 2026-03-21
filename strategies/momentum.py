@@ -13,7 +13,7 @@ class MomentumStrategy(BaseStrategy):
     multiple data points before entering a position.
     """
 
-    def __init__(self, client, risk_manager, db, price_change_threshold=0.05):
+    def __init__(self, client, risk_manager, db, price_change_threshold=0.01):
         super().__init__(client, risk_manager)
         self.db = db
         self.price_change_threshold = price_change_threshold

@@ -9,16 +9,17 @@ logger = setup_logger('value_betting_strategy')
 class ValueBettingStrategy(BaseStrategy):
     """
     Value betting strategy targeting markets where one side is priced
-    at 90-97 cents (very likely outcome). Takes small positions on the
-    likely side for consistent, high win-rate returns.
+    at 90+ cents (very likely outcome) or under 10 cents (very unlikely,
+    cheap NO side). Takes small positions for consistent returns.
     """
 
-    def __init__(self, client, risk_manager, db, min_price=90, max_price=97):
+    def __init__(self, client, risk_manager, db, min_price=90, max_price=99, low_price_max=10):
         super().__init__(client, risk_manager)
         self.db = db
-        self.min_price = min_price  # Minimum price in cents (90 = 90%)
-        self.max_price = max_price  # Maximum price in cents (97 = 97%)
-        logger.info(f"Value betting strategy initialized (range: {min_price}-{max_price}c)")
+        self.min_price = min_price  # Minimum price in cents for high-side bets
+        self.max_price = max_price  # Maximum price in cents for high-side bets
+        self.low_price_max = low_price_max  # Max price for cheap contrarian bets
+        logger.info(f"Value betting strategy initialized (high: {min_price}-{max_price}c, low: <{low_price_max}c)")
 
     def analyze(self, markets):
         signals = []
@@ -38,27 +39,37 @@ class ValueBettingStrategy(BaseStrategy):
         yes_bid = market.get('yes_bid', 0)
         no_bid = market.get('no_bid', 0)
         volume = market.get('volume', 0)
-        close_time = market.get('close_time', '')
 
-        # Check YES side: priced 90-97c means market thinks YES is very likely
+        # Check YES side: priced 90+c means market thinks YES is very likely
         if self.min_price <= yes_bid <= self.max_price:
             return self._build_signal(ticker, 'yes', yes_bid, volume)
 
-        # Check NO side: priced 90-97c means market thinks NO is very likely
+        # Check NO side: priced 90+c means market thinks NO is very likely
         if self.min_price <= no_bid <= self.max_price:
             return self._build_signal(ticker, 'no', no_bid, volume)
 
+        # Check cheap YES side: under 10c = cheap contrarian bet
+        if 1 <= yes_bid <= self.low_price_max:
+            return self._build_signal(ticker, 'yes', yes_bid, volume, low_price=True)
+
+        # Check cheap NO side: under 10c = cheap contrarian bet
+        if 1 <= no_bid <= self.low_price_max:
+            return self._build_signal(ticker, 'no', no_bid, volume, low_price=True)
+
         return None
 
-    def _build_signal(self, ticker, side, price, volume):
-        # Higher price = more likely = higher confidence
-        # But also smaller profit margin
+    def _build_signal(self, ticker, side, price, volume, low_price=False):
         implied_prob = price / 100.0
 
         # Confidence based on implied probability and volume
         confidence = 0.0
-        # Base: implied probability gives 40-55 points (for 90-97c range)
-        confidence += implied_prob * 55
+        if low_price:
+            # Cheap bets: low price = high potential payout, moderate confidence
+            confidence += (1 - implied_prob) * 40  # up to 40 points for cheapness
+        else:
+            # High-price bets: implied probability gives 40-55 points
+            confidence += implied_prob * 55
+
         # Volume: liquid markets are more reliable
         if volume > 1000:
             confidence += 25
@@ -66,16 +77,16 @@ class ValueBettingStrategy(BaseStrategy):
             confidence += 18
         elif volume > 100:
             confidence += 10
-        else:
-            # Low volume = unreliable pricing, skip
-            return None
+        elif volume > 0:
+            confidence += 5
 
         confidence = min(confidence, 100)
 
         profit_per_contract = 100 - price  # cents profit if correct
+        bet_type = 'cheap contrarian' if low_price else 'value'
 
         logger.info(
-            f"Value bet: {ticker} {side.upper()} at {price}c, "
+            f"{bet_type.title()} bet: {ticker} {side.upper()} at {price}c, "
             f"profit/contract={profit_per_contract}c, vol={volume}, "
             f"confidence={confidence:.0f}"
         )
@@ -86,7 +97,7 @@ class ValueBettingStrategy(BaseStrategy):
             'side': side,
             'count': 5,  # Small position sizes for value bets
             'reason': (
-                f'Value bet: {side.upper()} at {price}c '
+                f'{bet_type.title()} bet: {side.upper()} at {price}c '
                 f'(implied {implied_prob:.0%}), '
                 f'profit/contract={profit_per_contract}c, vol={volume}'
             ),
