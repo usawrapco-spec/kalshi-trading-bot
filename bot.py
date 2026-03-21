@@ -198,10 +198,8 @@ class KalshiBot:
         if markets:
             logger.info(f"  Keys: {list(markets[0].keys())}")
 
-        # Run strategies - max 5 trades per cycle total
-        total_signals = 0
-        trades_this_cycle = 0
-        MAX_TRADES_PER_CYCLE = 5
+        # Phase 1: Collect signals from ALL strategies
+        all_signals = []
         for strategy in self.strategies:
             logger.info(f"--- Running {strategy.name} ---")
             try:
@@ -210,68 +208,80 @@ class KalshiBot:
                 logger.error(f"{strategy.name} crashed: {e}", exc_info=True)
                 signals = []
 
-            if not signals:
+            if signals:
+                logger.info(f"{strategy.name}: {len(signals)} signals")
+                all_signals.extend(signals)
+            else:
                 logger.info(f"{strategy.name}: 0 signals")
+
+        # Phase 2: Pick top 2 signals by confidence, max $5 total spend
+        MAX_TRADES = 2
+        MAX_CYCLE_SPEND = 5.00
+        all_signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
+        logger.info(f"Total signals across all strategies: {len(all_signals)}")
+
+        trades_placed = 0
+        cycle_spent = 0.0
+        for sig in all_signals:
+            if trades_placed >= MAX_TRADES:
+                break
+
+            # Calculate price and Kelly sizing
+            edge = sig.get('edge', 0)
+            prob = sig.get('model_prob', 0.5)
+            price = get_yes_price_dollars(
+                next((m for m in markets if m.get('ticker') == sig['ticker']), {})
+            ) or 0.50
+            price_for_side = price if sig['side'] == 'yes' else (1 - price)
+
+            if edge > 0 and prob > 0:
+                sig['count'] = self.risk.kelly_size(edge, prob, int(price_for_side * 100))
+
+            cost = sig['count'] * price_for_side
+            if cycle_spent + cost > MAX_CYCLE_SPEND:
+                # Reduce count to fit within cycle budget
+                remaining = MAX_CYCLE_SPEND - cycle_spent
+                if remaining < price_for_side:
+                    continue  # Can't even afford 1 contract
+                sig['count'] = max(1, int(remaining / price_for_side))
+                cost = sig['count'] * price_for_side
+
+            conf = sig.get('confidence', 0)
+            logger.info(
+                f"TOP PICK: {sig['ticker']} BUY {sig['side'].upper()} x{sig['count']} "
+                f"conf={conf:.0f} edge={edge:+.2f} cost=${cost:.2f} "
+                f"[{sig.get('strategy_type', '?')}] - {sig.get('reason', '')}"
+            )
+
+            traded = self.risk.record_paper_trade(
+                ticker=sig['ticker'],
+                side=sig['side'],
+                count=sig['count'],
+                entry_price=price_for_side,
+                strategy=sig.get('strategy_type', 'unknown'),
+                title=sig.get('title', ''),
+            )
+
+            if not traded:
                 continue
 
-            if trades_this_cycle >= MAX_TRADES_PER_CYCLE:
-                logger.info(f"{strategy.name}: {len(signals)} signals but cycle limit ({MAX_TRADES_PER_CYCLE}) reached")
-                continue
+            trades_placed += 1
+            cycle_spent += cost
 
-            signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
-            signals = signals[:10]
-            total_signals += len(signals)
-            logger.info(f"{strategy.name}: {len(signals)} signals")
+            if self.db:
+                self.db.log_trade({
+                    'ticker': sig['ticker'],
+                    'action': 'buy',
+                    'side': sig['side'],
+                    'count': sig['count'],
+                    'strategy': sig.get('strategy_type', 'unknown'),
+                    'reason': sig.get('reason', ''),
+                    'confidence': conf,
+                    'order_id': 'paper',
+                    'price': price_for_side,
+                })
 
-            for sig in signals:
-                # Kelly sizing
-                edge = sig.get('edge', 0)
-                prob = sig.get('model_prob', 0.5)
-                price = get_yes_price_dollars(
-                    next((m for m in markets if m.get('ticker') == sig['ticker']), {})
-                ) or 0.50
-                price_for_side = price if sig['side'] == 'yes' else (1 - price)
-
-                if edge > 0 and prob > 0:
-                    sig['count'] = self.risk.kelly_size(edge, prob, int(price_for_side * 100))
-
-                conf = sig.get('confidence', 0)
-                logger.info(
-                    f"Signal: {sig['ticker']} BUY {sig['side'].upper()} x{sig['count']} "
-                    f"conf={conf:.0f} edge={edge:+.2f} - {sig.get('reason', '')}"
-                )
-
-                # Paper trade (record_paper_trade has all guards built in)
-                traded = self.risk.record_paper_trade(
-                    ticker=sig['ticker'],
-                    side=sig['side'],
-                    count=sig['count'],
-                    entry_price=price_for_side,
-                    strategy=sig.get('strategy_type', 'unknown'),
-                    title=sig.get('title', ''),
-                )
-
-                if not traded:
-                    continue  # blocked by position/balance/duplicate check
-
-                trades_this_cycle += 1
-                if trades_this_cycle >= MAX_TRADES_PER_CYCLE:
-                    logger.info(f"Cycle trade limit ({MAX_TRADES_PER_CYCLE}) reached")
-                    break
-
-                # Log to Supabase
-                if self.db:
-                    self.db.log_trade({
-                        'ticker': sig['ticker'],
-                        'action': 'buy',
-                        'side': sig['side'],
-                        'count': sig['count'],
-                        'strategy': sig.get('strategy_type', 'unknown'),
-                        'reason': sig.get('reason', ''),
-                        'confidence': conf,
-                        'order_id': 'paper',
-                        'price': price_for_side,
-                    })
+        logger.info(f"Cycle done: {trades_placed} trades, ${cycle_spent:.2f} spent")
 
         # Forced paper trade if nothing fired
         if total_signals == 0:
