@@ -692,6 +692,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     padding: 8px;
     border: 1px solid rgba(0, 240, 255, 0.1);
     background: rgba(0, 240, 255, 0.01);
+    position: relative;
+  }
+
+  .metric:hover::after {
+    content: attr(data-tooltip);
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.9);
+    color: #00f0ff;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    white-space: nowrap;
+    z-index: 1000;
+    border: 1px solid rgba(0, 240, 255, 0.3);
+    opacity: 0;
+    animation: fadeIn 0.2s ease forwards;
   }
 
   .metric-label {
@@ -711,6 +730,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .metric-sub {
     font-size: 0.6rem;
     color: rgba(57, 255, 20, 0.5);
+  }
+
+  @keyframes fadeIn {
+    to { opacity: 1; }
   }
 
   /* CHART CONTAINER */
@@ -918,25 +941,25 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="panel">
         <div class="panel-title">NETWORK STATUS</div>
         <div class="metrics-panel">
-          <div class="metric">
+          <div class="metric" data-tooltip="Number of trading signals currently being evaluated by the bot. Higher numbers mean more market opportunities being analyzed.">
             <div class="metric-label">ACTIVE SIGNALS</div>
             <div class="metric-value" data-field="active_signals">—</div>
-            <div class="metric-sub">NETWORK LOAD 72%</div>
+            <div class="metric-sub">MARKET SCANS</div>
           </div>
-          <div class="metric">
-            <div class="metric-label">COMPUTE REVENUE</div>
+          <div class="metric" data-tooltip="Current paper trading balance. Started with $100, shows profit/loss from all settled trades.">
+            <div class="metric-label">BANK BALANCE</div>
             <div class="metric-value" data-field="balance">$—</div>
-            <div class="metric-sub">TODAY: <span data-field="daily_pnl">$—</span></div>
+            <div class="metric-sub">STARTED: $100</div>
           </div>
-          <div class="metric">
-            <div class="metric-label">TOTAL REVENUE</div>
-            <div class="metric-value" data-field="balance">$—</div>
-            <div class="metric-sub">ROI: <span data-field="roi">—%</span></div>
+          <div class="metric" data-tooltip="Profit/Loss for today's trading session. Positive = winning day, negative = losing day.">
+            <div class="metric-label">TODAY'S P&L</div>
+            <div class="metric-value" data-field="daily_pnl">$—</div>
+            <div class="metric-sub">TRADES: <span data-field="trades_today">—</span></div>
           </div>
-          <div class="metric">
-            <div class="metric-label">NET MARGIN</div>
+          <div class="metric" data-tooltip="Overall win rate across all settled trades. Higher percentage = better strategy performance.">
+            <div class="metric-label">WIN RATE</div>
             <div class="metric-value" data-field="win_rate">—%</div>
-            <div class="metric-sub">STRATEGIES: <span data-field="strategies_active">—</span></div>
+            <div class="metric-sub">OVERALL SUCCESS</div>
           </div>
         </div>
         <div class="layer-arch">
@@ -952,7 +975,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- SIGNAL TOPOLOGY -->
-      <div class="panel" style="flex: 2;">
+      <div class="panel" style="flex: 2;" data-tooltip="Real-time visualization of trading signals. Each particle represents a strategy, connections show signal relationships. Brighter particles = more active strategies.">
         <div class="panel-title">SIGNAL TOPOLOGY</div>
         <div class="chart-container">
           <canvas id="topologyCanvas"></canvas>
@@ -960,8 +983,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- WEIGHT DISTRIBUTION -->
-      <div class="panel">
-        <div class="panel-title">WEIGHT DISTRIBUTION</div>
+      <div class="panel" data-tooltip="Strategy performance bars showing profit/loss by trading strategy. Green bars = profitable strategies, red bars = losing strategies.">
+        <div class="panel-title">STRATEGY PERFORMANCE</div>
         <div class="strategy-bars" id="strategyBars">
           <!-- Strategy bars will be populated by JS -->
         </div>
@@ -971,7 +994,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <!-- RIGHT COLUMN -->
     <div style="display: grid; grid-template-rows: 1fr 1fr 1fr; gap: 8px;">
       <!-- TRAINING METRICS -->
-      <div class="panel">
+      <div class="panel" data-tooltip="Real-time neural network training log showing bot learning activity. Each line represents a training step, weight update, or gradient computation.">
         <div class="panel-title">TRAINING METRICS</div>
         <div class="training-log" id="trainingLog">
           <div class="log-line"><span class="log-time">22:43:11</span> <span class="log-action">[BACKWARD]</span> weights updated at L1: <span class="log-value">1.174345</span></div>
@@ -986,7 +1009,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- LAYER ARCHITECTURE -->
-      <div class="panel">
+      <div class="panel" data-tooltip="Neural network layer activity showing how many signals each strategy has processed. Higher numbers = more active strategies.">
         <div class="panel-title">LAYER ARCHITECTURE</div>
         <div class="layer-arch">
           <div class="layer-row">
@@ -1037,7 +1060,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       </div>
 
       <!-- CORTICAL ACTIVITY -->
-      <div class="panel">
+      <div class="panel" data-tooltip="24-hour trading activity heatmap. Each cell represents one hour of the week. Brighter cells = more trading activity during that hour.">
         <div class="panel-title">CORTICAL ACTIVITY</div>
         <div class="cortical-heatmap" id="corticalHeatmap">
           <!-- 24x7 grid will be populated by JS -->
@@ -1047,7 +1070,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   </div>
 
   <!-- BOTTOM SIGNAL FEED -->
-  <div class="signal-feed" id="signalFeed">
+  <div class="signal-feed" id="signalFeed" data-tooltip="Live feed of all trading signals. Shows which strategy analyzed which market, the edge/confidence score, and whether the bot decided to trade or skip. Edge = how much better the bot thinks the odds are than the market price.">
     <div class="signal-item">
       <span class="signal-time">22:43:11</span>
       <span class="signal-strategy">[WEATHER]</span>
