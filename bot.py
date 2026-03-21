@@ -89,7 +89,18 @@ class KalshiBot:
         # Fetch markets
         logger.info("Fetching markets (limit=1000)...")
         data = self.client.get_markets(status='open', limit=1000)
-        markets = data.get('markets', [])
+        raw_markets = data.get('markets', [])
+
+        # Filter out KXMVE multivariate combo/parlay markets and non-binary types
+        before = len(raw_markets)
+        markets = [
+            m for m in raw_markets
+            if not (m.get('ticker') or '').startswith('KXMVE')
+            and m.get('market_type', 'binary') == 'binary'
+        ]
+        filtered = before - len(markets)
+        if filtered:
+            logger.info(f"Filtered out {filtered} KXMVE/non-binary markets ({len(markets)} remaining)")
 
         # Also fetch KXHIGH weather series separately (they may not appear in the main list)
         seen_tickers = {m.get('ticker') for m in markets}
