@@ -10,6 +10,7 @@ import json
 import requests
 from strategies.base import BaseStrategy
 from utils.logger import setup_logger
+from utils.market_helpers import get_yes_price, get_volume
 
 logger = setup_logger('grok_news')
 
@@ -18,15 +19,6 @@ MODEL = 'grok-3'
 MAX_PER_CYCLE = 20
 MIN_EDGE = 0.10
 MIN_CONFIDENCE = 0.70
-
-
-def get_yes_price(m):
-    for f in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
-        v = m.get(f)
-        if v is not None and float(v) > 0:
-            v = float(v)
-            return v / 100.0 if v > 1 else v
-    return 0.0
 
 
 class GrokNewsStrategy(BaseStrategy):
@@ -44,15 +36,19 @@ class GrokNewsStrategy(BaseStrategy):
         if not self.api_key:
             return []
 
-        # No pre-filtering. Sort by 24h volume, then total volume, take top 20.
+        # No pre-filtering. Sort by 24h volume, take top 20.
         open_mkts = [m for m in markets if m.get('status') == 'open']
-        open_mkts.sort(key=lambda m: (m.get('volume_24h') or m.get('volume_24h_fp') or m.get('volume') or 0), reverse=True)
+        open_mkts.sort(key=lambda m: get_volume(m), reverse=True)
         candidates = open_mkts[:MAX_PER_CYCLE]
 
-        logger.info(
-            f"GrokNews: {len(open_mkts)} open markets, sending top {len(candidates)} to Grok. "
-            f"Top: {candidates[0].get('ticker', '?')} vol={candidates[0].get('volume', 0) if candidates else 0}"
-        )
+        if candidates:
+            top = candidates[0]
+            logger.info(
+                f"GrokNews: {len(open_mkts)} open markets, sending top {len(candidates)} to Grok. "
+                f"Top: {top.get('ticker', '?')} vol={get_volume(top):.0f}"
+            )
+        else:
+            logger.info("GrokNews: 0 open markets, nothing to analyze")
 
         signals = []
         for m in candidates:
@@ -68,7 +64,7 @@ class GrokNewsStrategy(BaseStrategy):
         title = m.get('title', 'Unknown')
         subtitle = m.get('subtitle', '')
         yes_price = get_yes_price(m)
-        volume = m.get('volume_24h') or m.get('volume_24h_fp') or m.get('volume') or 0
+        volume = get_volume(m)
         close_time = m.get('close_time') or m.get('expiration_time') or ''
 
         desc = title

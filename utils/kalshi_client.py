@@ -99,6 +99,16 @@ class KalshiAPIClient:
             logger.error(f"Error getting markets: {e}")
             return {'markets': []}
 
+    def get_markets_by_series(self, series_ticker, status='open'):
+        """Get markets for a specific series (e.g. KXHIGHNY)."""
+        try:
+            params = {'series_ticker': series_ticker, 'status': status, 'limit': 100}
+            data = self._request('GET', '/trade-api/v2/markets', params=params)
+            return data.get('markets', [])
+        except Exception as e:
+            logger.error(f"Error getting series {series_ticker}: {e}")
+            return []
+
     def get_market(self, ticker):
         """Get specific market."""
         try:

@@ -9,27 +9,9 @@ import requests
 from datetime import datetime, timezone, timedelta
 from strategies.base import BaseStrategy
 from utils.logger import setup_logger
+from utils.market_helpers import get_yes_cents, get_no_cents, get_volume
 
 logger = setup_logger('near_certainty')
-
-
-def get_yes_cents(m):
-    for f in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
-        v = m.get(f)
-        if v is not None and float(v) > 0:
-            v = float(v)
-            return int(v * 100) if v <= 1 else int(v)
-    return 0
-
-
-def get_no_cents(m):
-    for f in ('no_bid', 'no_bid_dollars', 'no_ask', 'no_ask_dollars'):
-        v = m.get(f)
-        if v is not None and float(v) > 0:
-            v = float(v)
-            return int(v * 100) if v <= 1 else int(v)
-    yes = get_yes_cents(m)
-    return 100 - yes if yes > 0 else 0
 
 
 class NearCertaintyStrategy(BaseStrategy):
@@ -93,7 +75,7 @@ class NearCertaintyStrategy(BaseStrategy):
 
     def _check_near_certain(self, m, yes_c, no_c, hours_left):
         ticker = m.get('ticker', '')
-        volume = m.get('volume_24h') or m.get('volume_24h_fp') or m.get('volume') or 0
+        volume = get_volume(m)
 
         side, price = None, 0
         if 85 <= yes_c <= 97:
@@ -146,7 +128,7 @@ class NearCertaintyStrategy(BaseStrategy):
 
     def _check_cheap(self, m, yes_c, no_c):
         ticker = m.get('ticker', '')
-        volume = m.get('volume_24h') or m.get('volume_24h_fp') or m.get('volume') or 0
+        volume = get_volume(m)
 
         side, price = None, 0
         if 3 <= yes_c <= 15:

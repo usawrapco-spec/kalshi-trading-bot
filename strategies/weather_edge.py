@@ -9,6 +9,7 @@ import requests
 from datetime import datetime, timedelta
 from strategies.base import BaseStrategy
 from utils.logger import setup_logger
+from utils.market_helpers import get_yes_price, get_volume
 
 logger = setup_logger('weather_edge')
 
@@ -28,16 +29,6 @@ WEATHER_KEYWORDS = [
 
 OPEN_METEO_URL = 'https://api.open-meteo.com/v1/forecast'
 MIN_EDGE = 0.05
-
-
-def get_yes_price(m):
-    """Extract YES price in dollars (0-1) from a market dict, trying all known fields."""
-    for field in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
-        v = m.get(field)
-        if v is not None and float(v) > 0:
-            v = float(v)
-            return v / 100.0 if v > 1 else v  # normalize cents to dollars
-    return 0.0
 
 
 class WeatherEdgeStrategy(BaseStrategy):

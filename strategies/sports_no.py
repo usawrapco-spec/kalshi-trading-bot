@@ -6,10 +6,11 @@ had 74% win rate. Public betting bias systematically overprices favorites.
 
 from strategies.base import BaseStrategy
 from utils.logger import setup_logger
+from utils.market_helpers import get_yes_cents, get_volume
 
 logger = setup_logger('sports_no')
 
-FADE_MIN = 60  # YES price range to fade: 60-85c means favorite
+FADE_MIN = 60
 FADE_MAX = 85
 
 SPORTS_KEYWORDS = [
@@ -20,16 +21,6 @@ SPORTS_KEYWORDS = [
     'win', 'beat', 'defeat', 'score', 'game', 'match', 'playoff',
     'champion', 'tournament', 'series', 'super bowl', 'world series',
 ]
-
-
-def get_yes_price_cents(m):
-    """Get YES price in cents (0-100)."""
-    for f in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
-        v = m.get(f)
-        if v is not None and float(v) > 0:
-            v = float(v)
-            return int(v * 100) if v <= 1 else int(v)
-    return 0
 
 
 class SportsNOStrategy(BaseStrategy):
@@ -53,7 +44,7 @@ class SportsNOStrategy(BaseStrategy):
 
             sports_count += 1
             ticker = m.get('ticker', '')
-            yes_cents = get_yes_price_cents(m)
+            yes_cents = get_yes_cents(m)
 
             if not (FADE_MIN <= yes_cents <= FADE_MAX):
                 if yes_cents > 0:
@@ -62,7 +53,7 @@ class SportsNOStrategy(BaseStrategy):
                 continue
 
             in_range += 1
-            volume = m.get('volume_24h') or m.get('volume_24h_fp') or m.get('volume') or 0
+            volume = get_volume(m)
             no_cents = 100 - yes_cents
 
             # Confidence: more expensive favorite = more confident fade

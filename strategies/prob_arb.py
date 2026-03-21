@@ -6,28 +6,17 @@ cross-market pricing within the same event for risk-free-ish opportunities.
 
 from strategies.base import BaseStrategy
 from utils.logger import setup_logger
+from utils.market_helpers import get_price, get_yes_price, get_no_price
 
 logger = setup_logger('prob_arb')
 
-# Kalshi fee formula: round_up(0.07 * contracts * price * (1-price))
 FEE_RATE = 0.07
 
 
 def kalshi_fee(contracts, price):
-    """Estimate Kalshi fee for a trade."""
     if price <= 0 or price >= 1:
         return 0
     return round(FEE_RATE * contracts * price * (1 - price) + 0.005, 2)
-
-
-def get_price(m, field_list):
-    """Try multiple field names, normalize to 0-1 dollars."""
-    for f in field_list:
-        v = m.get(f)
-        if v is not None and float(v) > 0:
-            v = float(v)
-            return v / 100.0 if v > 1 else v
-    return 0.0
 
 
 class ProbabilityArbStrategy(BaseStrategy):

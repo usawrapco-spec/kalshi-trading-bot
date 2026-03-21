@@ -27,18 +27,9 @@ from strategies.prob_arb import ProbabilityArbStrategy
 from strategies.sports_no import SportsNOStrategy
 from strategies.near_certainty import NearCertaintyStrategy
 from dashboard import start_dashboard
+from utils.market_helpers import get_yes_price as get_yes_price_dollars, get_volume
 
 logger = setup_logger('main')
-
-
-def get_yes_price_dollars(m):
-    """Extract YES price as 0-1 dollars from any known field."""
-    for f in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
-        v = m.get(f)
-        if v is not None and float(v) > 0:
-            v = float(v)
-            return v / 100.0 if v > 1 else v
-    return 0.0
 
 
 class KalshiBot:
@@ -100,6 +91,22 @@ class KalshiBot:
         data = self.client.get_markets(status='open', limit=1000)
         markets = data.get('markets', [])
 
+        # Also fetch KXHIGH weather series separately (they may not appear in the main list)
+        seen_tickers = {m.get('ticker') for m in markets}
+        for series in ('KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN'):
+            try:
+                weather = self.client.get_markets_by_series(series)
+                added = 0
+                for wm in weather:
+                    if wm.get('ticker') not in seen_tickers:
+                        markets.append(wm)
+                        seen_tickers.add(wm.get('ticker'))
+                        added += 1
+                if added:
+                    logger.info(f"  Added {added} markets from series {series}")
+            except Exception as e:
+                logger.debug(f"  Series {series} fetch failed: {e}")
+
         if not markets:
             logger.warning("No markets returned")
             self._log_status()
@@ -113,9 +120,9 @@ class KalshiBot:
             ticker = m.get('ticker', '?')
             title = (m.get('title') or '?')[:55]
             yes_p = get_yes_price_dollars(m)
-            vol = m.get('volume_24h') or m.get('volume_24h_fp') or m.get('volume') or 0
+            vol = get_volume(m)
             cat = m.get('category', '')
-            logger.info(f"  {ticker}: yes=${yes_p:.2f} vol={vol} cat={cat} \"{title}\"")
+            logger.info(f"  {ticker}: yes=${yes_p:.2f} vol={vol:.0f} cat={cat} \"{title}\"")
         if markets:
             logger.info(f"  Keys: {list(markets[0].keys())}")
 
@@ -194,14 +201,14 @@ class KalshiBot:
 
         sorted_m = sorted(
             markets,
-            key=lambda m: (m.get('volume_24h') or m.get('volume_24h_fp') or m.get('volume') or 0),
+            key=lambda m: (get_volume(m)),
             reverse=True,
         )
         m = sorted_m[0]
         ticker = m.get('ticker', 'UNKNOWN')
         title = (m.get('title') or '')[:60]
         yes_price = get_yes_price_dollars(m) or 0.50
-        volume = m.get('volume_24h') or m.get('volume_24h_fp') or m.get('volume') or 0
+        volume = get_volume(m)
 
         # Pick the side closest to 50c (most uncertain = most potential)
         side = 'yes' if yes_price <= 0.50 else 'no'
