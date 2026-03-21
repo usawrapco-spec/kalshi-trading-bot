@@ -15,7 +15,7 @@ from utils.market_helpers import get_yes_price, get_volume
 logger = setup_logger('grok_news')
 
 XAI_URL = 'https://api.x.ai/v1/chat/completions'
-MODEL = 'grok-3'
+MODEL = 'grok-4.1-fast'
 MAX_PER_CYCLE = 20
 MIN_EDGE = 0.10
 MIN_CONFIDENCE = 0.70

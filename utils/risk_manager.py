@@ -63,7 +63,7 @@ class RiskManager:
         risk_amount = bankroll_dollars * fraction
 
         # Cap at 20% of balance
-        risk_amount = min(risk_amount, bankroll_dollars * MAX_BALANCE_PCT)
+        risk_amount = min(risk_amount, bankroll_dollars * MAX_TRADE_PCT)
 
         contracts = max(1, int(risk_amount / price_dollars))
         contracts = min(contracts, Config.MAX_ORDER_SIZE)

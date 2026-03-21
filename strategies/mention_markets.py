@@ -15,7 +15,7 @@ from utils.market_helpers import get_yes_price, get_volume, safe_float
 logger = setup_logger('mention_markets')
 
 XAI_URL = 'https://api.x.ai/v1/chat/completions'
-MODEL = 'grok-3'
+MODEL = 'grok-4.1-fast'
 
 MENTION_KEYWORDS = [
     'mention', 'say', 'tweet', 'post', 'search', 'google', 'trending',
