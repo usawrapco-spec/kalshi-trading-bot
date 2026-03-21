@@ -1,0 +1,30 @@
+services:
+  - type: worker
+    name: kalshi-trading-bot
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: KALSHI_API_KEY_ID
+        sync: false
+      - key: KALSHI_PRIVATE_KEY
+        sync: false
+      - key: KALSHI_API_HOST
+        value: https://demo-api.kalshi.com
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: MAX_POSITION_SIZE
+        value: "100"
+      - key: MAX_DAILY_LOSS
+        value: "500"
+      - key: MAX_ORDER_SIZE
+        value: "50"
+      - key: ENABLE_ARBITRAGE
+        value: "true"
+      - key: ENABLE_MOMENTUM
+        value: "true"
+      - key: CHECK_INTERVAL_SECONDS
+        value: "30"

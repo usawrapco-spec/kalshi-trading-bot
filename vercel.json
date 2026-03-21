@@ -1,0 +1,17 @@
+{
+  "name": "kalshi-trading-bot",
+  "version": 2,
+  "env": {
+    "KALSHI_API_KEY_ID": "@kalshi-api-key-id",
+    "KALSHI_PRIVATE_KEY": "@kalshi-private-key",
+    "KALSHI_API_HOST": "@kalshi-api-host",
+    "SUPABASE_URL": "@supabase-url",
+    "SUPABASE_SERVICE_KEY": "@supabase-service-key",
+    "MAX_POSITION_SIZE": "100",
+    "MAX_DAILY_LOSS": "500",
+    "MAX_ORDER_SIZE": "50",
+    "ENABLE_ARBITRAGE": "true",
+    "ENABLE_MOMENTUM": "true",
+    "CHECK_INTERVAL_SECONDS": "30"
+  }
+}
