@@ -82,13 +82,13 @@ def api_status():
 
 def start_dashboard():
     """Start the Flask dashboard on a separate thread."""
-    port = int(os.environ.get('PORT', 8080))
-    logger.info(f"Starting dashboard on port {port}")
+    port = int(os.environ.get('PORT', 5000))
     thread = threading.Thread(
-        target=lambda: app.run(host='0.0.0.0', port=port, debug=False),
+        target=lambda: app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False),
         daemon=True,
     )
     thread.start()
+    logger.info(f"Dashboard running on port {port}")
     return thread
 
 

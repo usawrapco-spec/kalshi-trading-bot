@@ -105,9 +105,9 @@ class KalshiBot:
             self._log_status(balance)
             return
 
-        # Get open markets
+        # Get open markets (scan 500 for more opportunities)
         logger.info("Fetching markets...")
-        markets_data = self.client.get_markets(status='open', limit=100)
+        markets_data = self.client.get_markets(status='open', limit=500)
         markets = markets_data.get('markets', [])
 
         if not markets:
@@ -116,6 +116,9 @@ class KalshiBot:
             return
 
         logger.info(f"Analyzing {len(markets)} markets...")
+
+        # Log top near-miss opportunities for debugging
+        self._log_near_misses(markets)
 
         # Run each strategy
         total_signals = 0
@@ -150,6 +153,37 @@ class KalshiBot:
             logger.info(f"Cycle complete: {total_signals} signals, {executed} executed")
 
         self._log_status(balance)
+
+    def _log_near_misses(self, markets):
+        """Log top 5 closest-to-tradeable opportunities for debugging."""
+        candidates = []
+        for m in markets:
+            if m.get('status') != 'open':
+                continue
+            ticker = m.get('ticker', '?')
+            yes_bid = m.get('yes_bid', 0)
+            no_bid = m.get('no_bid', 0)
+            volume = m.get('volume', 0)
+
+            # Value bet proximity: how close to 90-97c range
+            for side, price in [('YES', yes_bid), ('NO', no_bid)]:
+                if 80 <= price <= 99 and price > 0:
+                    dist = 0 if 90 <= price <= 97 else min(abs(price - 90), abs(price - 97))
+                    candidates.append({
+                        'ticker': ticker, 'side': side, 'price': price,
+                        'volume': volume, 'distance': dist,
+                        'reason': f'{side}={price}c vol={volume} (value bet dist={dist})',
+                    })
+
+        # Sort by distance to sweet spot, then volume
+        candidates.sort(key=lambda c: (c['distance'], -c['volume']))
+        top = candidates[:5]
+        if top:
+            logger.info("--- Top 5 near-miss opportunities ---")
+            for c in top:
+                logger.info(f"  {c['ticker']}: {c['reason']}")
+        else:
+            logger.info("No near-miss candidates found (no markets in 80-99c range)")
 
     def _log_status(self, balance):
         """Log risk status and bot status to Supabase."""
@@ -196,6 +230,9 @@ class KalshiBot:
 
 def main():
     """Main entry point."""
+    # Start web dashboard FIRST so Railway health checks pass immediately
+    start_dashboard()
+
     parser = argparse.ArgumentParser(description='Kalshi Trading Bot')
     parser.add_argument(
         '--demo',
@@ -207,16 +244,13 @@ def main():
         action='store_true',
         help='Dry run mode - analyze but don\'t place orders'
     )
-    
+
     args = parser.parse_args()
-    
+
     # Override config if demo mode
     if args.demo:
         Config.KALSHI_API_HOST = 'https://demo-api.kalshi.co'
-        logger.info("🧪 Demo mode enabled - using demo API")
-    
-    # Start web dashboard on a separate thread
-    start_dashboard()
+        logger.info("Demo mode enabled - using demo API")
 
     # Create and run bot
     bot = KalshiBot(dry_run=args.dry_run or args.demo)
