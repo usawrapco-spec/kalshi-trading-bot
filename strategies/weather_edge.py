@@ -36,13 +36,25 @@ class WeatherEdgeStrategy(BaseStrategy):
     def analyze(self, markets):
         signals = []
 
-        # Filter to KXHIGH temperature markets
+        # Filter to temperature/weather markets with broad keyword search
         temp_markets = [m for m in markets if self._is_temp_market(m)]
+
+        # Log diagnostic info regardless
+        kxhigh_count = sum(1 for m in markets if 'KXHIGH' in m.get('ticker', ''))
+        weather_kw_count = sum(1 for m in markets if self._has_weather_keywords(m))
+        logger.info(
+            f"WeatherEdge scan: {kxhigh_count} KXHIGH tickers, "
+            f"{weather_kw_count} weather keyword matches, "
+            f"{len(temp_markets)} total weather markets"
+        )
+
         if not temp_markets:
-            logger.debug("No KXHIGH temperature markets found")
+            # Log some sample tickers so we can see what's available
+            sample_tickers = [m.get('ticker', '?') for m in markets[:20]]
+            logger.info(f"WeatherEdge: no weather markets. Sample tickers: {sample_tickers}")
             return signals
 
-        logger.info(f"Found {len(temp_markets)} temperature markets")
+        logger.info(f"Found {len(temp_markets)} temperature/weather markets")
 
         # Refresh forecasts if stale (>30 min)
         now = datetime.utcnow()
@@ -57,9 +69,29 @@ class WeatherEdgeStrategy(BaseStrategy):
         return signals
 
     def _is_temp_market(self, market):
-        ticker = market.get('ticker', '')
+        ticker = market.get('ticker', '').upper()
         title = market.get('title', '').lower()
-        return 'KXHIGH' in ticker or ('temperature' in title and 'high' in title)
+        # Match KXHIGH tickers directly
+        if 'KXHIGH' in ticker:
+            return True
+        # Match any weather/temperature keywords in ticker or title
+        return self._has_weather_keywords(market)
+
+    def _has_weather_keywords(self, market):
+        """Check if market relates to weather/temperature via broad keyword search."""
+        ticker = market.get('ticker', '').upper()
+        title = market.get('title', '').lower()
+        combined = ticker + ' ' + title
+        weather_keywords = [
+            'temperature', 'temp ', 'degrees', 'fahrenheit', 'celsius',
+            'weather', 'high temp', 'low temp', 'rain', 'snow', 'precipitation',
+            'KXHIGH', 'KXLOW', 'KXRAIN', 'KXSNOW', 'KXWEATHER',
+            'heat', 'cold', 'freeze', 'frost',
+        ]
+        for kw in weather_keywords:
+            if kw.lower() in combined.lower():
+                return True
+        return False
 
     def _refresh_forecasts(self):
         """Fetch GFS ensemble forecasts for all cities."""
@@ -184,7 +216,8 @@ class WeatherEdgeStrategy(BaseStrategy):
             return None
 
         our_prob = self._calc_probability_above(temps, threshold)
-        market_yes_price = market.get('yes_bid', 0) / 100.0  # convert cents to probability
+        raw_price = market.get('yes_bid') or market.get('yes_ask') or market.get('last_price') or 0
+        market_yes_price = raw_price / 100.0  # convert cents to probability
         market_no_price = 1.0 - market_yes_price
 
         if market_yes_price <= 0:

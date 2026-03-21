@@ -112,6 +112,25 @@ class KalshiBot:
 
         logger.info(f"Scanning {len(markets)} markets...")
 
+        # Log first 10 markets so we can see what the data actually looks like
+        logger.info("--- First 10 markets raw data ---")
+        for m in markets[:10]:
+            ticker = m.get('ticker', '?')
+            title = m.get('title', '?')[:60]
+            yes_bid = m.get('yes_bid', 'N/A')
+            yes_ask = m.get('yes_ask', 'N/A')
+            last_price = m.get('last_price', 'N/A')
+            volume = m.get('volume', 'N/A')
+            close_time = m.get('close_time', 'N/A')
+            logger.info(
+                f"  {ticker}: yes_bid={yes_bid} yes_ask={yes_ask} "
+                f"last_price={last_price} vol={volume} close={close_time} "
+                f"title=\"{title}\""
+            )
+        # Log all available keys from first market for debugging
+        if markets:
+            logger.info(f"  Market keys: {list(markets[0].keys())}")
+
         # Run each strategy
         total_signals = 0
         executed = 0
@@ -176,31 +195,21 @@ class KalshiBot:
         self._log_status(balance)
 
     def _force_paper_trade(self, markets):
-        """Force a paper trade on the single best available opportunity."""
-        best = None
-        best_score = -1
-
-        for m in markets:
-            if m.get('status') != 'open':
-                continue
-            ticker = m.get('ticker', '')
-            yes_bid = m.get('yes_bid', 0)
-            no_bid = m.get('no_bid', 0)
-            volume = m.get('volume', 0)
-
-            for side_name, price in [('yes', yes_bid), ('no', no_bid)]:
-                if price <= 0:
-                    continue
-                # Score: prefer liquid markets with extreme prices
-                extremity = max(price, 100 - price)
-                score = volume * 0.01 + extremity
-                if score > best_score:
-                    best_score = score
-                    best = {'ticker': ticker, 'side': side_name, 'price': price, 'volume': volume}
-
-        if not best:
-            logger.warning("forced-paper-trade: no viable markets found")
+        """Force a paper trade on the highest-volume market. Should NEVER fail if we have markets."""
+        if not markets:
+            logger.warning("forced-paper-trade: no markets at all")
             return
+
+        # Sort by volume descending, pick the first one - no other filters
+        sorted_markets = sorted(markets, key=lambda m: m.get('volume', 0) or 0, reverse=True)
+        m = sorted_markets[0]
+
+        ticker = m.get('ticker', 'UNKNOWN')
+        # Try multiple price fields since we don't know which one the API uses
+        yes_bid = m.get('yes_bid') or m.get('yes_ask') or m.get('last_price') or 50
+        volume = m.get('volume', 0) or 0
+
+        best = {'ticker': ticker, 'side': 'yes', 'price': yes_bid, 'volume': volume}
 
         signal = {
             'ticker': best['ticker'],

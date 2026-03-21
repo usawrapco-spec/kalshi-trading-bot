@@ -46,22 +46,33 @@ class GrokNewsAnalysisStrategy(BaseStrategy):
         return signals
 
     def _select_candidates(self, markets):
-        """Pick top 20 highest-volume open markets."""
-        open_markets = [
-            m for m in markets
-            if m.get('status') == 'open' and m.get('volume', 0) > 0
-            and m.get('yes_bid', 0) > 0
-        ]
-        open_markets.sort(key=lambda m: m.get('volume', 0), reverse=True)
-        return open_markets[:MAX_MARKETS_PER_CYCLE]
+        """Pick top 20 highest-volume markets. No price filtering - send everything to Grok."""
+        open_markets = [m for m in markets if m.get('status') == 'open']
+        # Log how many passed the filter
+        with_volume = [m for m in open_markets if (m.get('volume') or 0) > 0]
+        logger.info(
+            f"Grok candidate pool: {len(open_markets)} open markets, "
+            f"{len(with_volume)} with volume > 0"
+        )
+        # Sort by volume, but don't exclude zero-volume markets if we don't have enough
+        open_markets.sort(key=lambda m: m.get('volume') or 0, reverse=True)
+        selected = open_markets[:MAX_MARKETS_PER_CYCLE]
+        if selected:
+            logger.info(
+                f"Grok selected {len(selected)} markets, "
+                f"top volume={selected[0].get('volume', 0)}, "
+                f"top ticker={selected[0].get('ticker', '?')}"
+            )
+        return selected
 
     def _analyze_with_grok(self, market):
         """Call Grok API to analyze a single market."""
         ticker = market.get('ticker', '')
         title = market.get('title', 'Unknown')
         subtitle = market.get('subtitle', '')
-        yes_bid = market.get('yes_bid', 0)
-        volume = market.get('volume', 0)
+        # Try multiple price fields - Kalshi API may use different names
+        yes_bid = market.get('yes_bid') or market.get('yes_ask') or market.get('last_price') or 0
+        volume = market.get('volume') or 0
         close_time = market.get('close_time', '')
 
         market_desc = title

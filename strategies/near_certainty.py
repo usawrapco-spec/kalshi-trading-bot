@@ -32,14 +32,35 @@ class NearCertaintyStrategy(BaseStrategy):
         now = datetime.now(timezone.utc)
         cutoff = now + timedelta(hours=24)
 
+        # Diagnostic counters
+        near_certain_count = 0  # markets in 90-97c range
+        near_certain_wide_count = 0  # markets in 85-99c range
+        cheap_count = 0  # markets in 3-10c range
+        cheap_wide_count = 0  # markets in 1-15c range
+        closing_soon_count = 0
+
         for market in markets:
             if market.get('status') != 'open':
                 continue
 
-            ticker = market.get('ticker', '')
-            yes_bid = market.get('yes_bid', 0)
-            no_bid = market.get('no_bid', 0)
-            volume = market.get('volume', 0)
+            # Try multiple price fields
+            yes_bid = market.get('yes_bid') or market.get('yes_ask') or market.get('last_price') or 0
+            no_bid = market.get('no_bid') or market.get('no_ask') or 0
+            # Store resolved prices back so downstream methods see them
+            market['_yes_price'] = yes_bid
+            market['_no_price'] = no_bid
+
+            # Count price ranges for diagnostics
+            for price in [yes_bid, no_bid]:
+                if 90 <= price <= 97:
+                    near_certain_count += 1
+                if 85 <= price <= 99:
+                    near_certain_wide_count += 1
+                if 3 <= price <= 10:
+                    cheap_count += 1
+                if 1 <= price <= 15:
+                    cheap_wide_count += 1
+
             close_time = market.get('close_time', '')
 
             # Mode 1: Near-certain trades (require <24h to close)
@@ -47,6 +68,7 @@ class NearCertaintyStrategy(BaseStrategy):
                 try:
                     close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
                     if now < close_dt <= cutoff:
+                        closing_soon_count += 1
                         hours_left = (close_dt - now).total_seconds() / 3600
                         signal = self._check_near_certain(market, hours_left)
                         if signal:
@@ -60,29 +82,39 @@ class NearCertaintyStrategy(BaseStrategy):
             if signal:
                 signals.append(signal)
 
+        logger.info(
+            f"NearCertainty scan: {closing_soon_count} closing <24h, "
+            f"{near_certain_count} in 90-97c ({near_certain_wide_count} in 85-99c), "
+            f"{cheap_count} in 3-10c ({cheap_wide_count} in 1-15c), "
+            f"{len(signals)} signals"
+        )
+
         return signals
 
     def _check_near_certain(self, market, hours_left):
         """Buy the near-certain side of markets settling within 24h."""
         ticker = market.get('ticker', '')
         title = market.get('title', '').lower()
-        yes_bid = market.get('yes_bid', 0)
-        no_bid = market.get('no_bid', 0)
-        volume = market.get('volume', 0)
+        yes_bid = market.get('_yes_price', 0)
+        no_bid = market.get('_no_price', 0)
+        volume = market.get('volume') or 0
 
         side = None
         price = 0
+        # Try strict range first (90-97), then expanded range (85-99)
         if NEAR_CERTAIN_MIN <= yes_bid <= NEAR_CERTAIN_MAX:
             side = 'yes'
             price = yes_bid
         elif NEAR_CERTAIN_MIN <= no_bid <= NEAR_CERTAIN_MAX:
             side = 'no'
             price = no_bid
+        elif 85 <= yes_bid <= 99:
+            side = 'yes'
+            price = yes_bid
+        elif 85 <= no_bid <= 99:
+            side = 'no'
+            price = no_bid
         else:
-            return None
-
-        # Need some volume to trust the price
-        if volume < 10:
             return None
 
         # Cross-reference weather markets with Open-Meteo
@@ -139,19 +171,20 @@ class NearCertaintyStrategy(BaseStrategy):
         }
 
     def _check_cheap_contrarian(self, market):
-        """Buy cheap contracts (3-10c) for asymmetric upside."""
+        """Buy cheap contracts (1-15c) for asymmetric upside."""
         ticker = market.get('ticker', '')
-        yes_bid = market.get('yes_bid', 0)
-        no_bid = market.get('no_bid', 0)
-        volume = market.get('volume', 0)
+        yes_bid = market.get('_yes_price', 0)
+        no_bid = market.get('_no_price', 0)
+        volume = market.get('volume') or 0
 
         side = None
         price = 0
 
-        if CHEAP_MIN <= yes_bid <= CHEAP_MAX and volume > 50:
+        # Expanded range: 1-15c, no volume gate
+        if 1 <= yes_bid <= 15:
             side = 'yes'
             price = yes_bid
-        elif CHEAP_MIN <= no_bid <= CHEAP_MAX and volume > 50:
+        elif 1 <= no_bid <= 15:
             side = 'no'
             price = no_bid
         else:
