@@ -26,20 +26,6 @@ class SupabaseDB:
         logger.info(f"Supabase URL: {self.supabase_url}")
         logger.info(f"Supabase key starts with: {self.supabase_key[:20]}...")
 
-        # The new sb_secret_ / sb_publishable_ keys do NOT work with
-        # supabase-py's create_client() — it sends the key as a Bearer JWT
-        # token, which Supabase rejects for non-JWT keys.
-        # You must use the legacy JWT service_role key (starts with "eyJ").
-        if self.supabase_key.startswith('sb_'):
-            logger.error(
-                "SUPABASE_KEY uses the new sb_secret_ format which is NOT "
-                "compatible with supabase-py. Go to Supabase Dashboard > "
-                "Settings > API and copy the 'service_role' key (starts with "
-                "'eyJ...'). Set that as SUPABASE_KEY in Railway."
-            )
-            self.client = None
-            return
-
         try:
             self.client: Client = create_client(self.supabase_url, self.supabase_key)
             logger.info("Supabase connected successfully")
