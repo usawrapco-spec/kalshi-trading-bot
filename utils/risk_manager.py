@@ -8,9 +8,9 @@ from utils.logger import setup_logger
 logger = setup_logger('risk_manager')
 
 MIN_CONFIDENCE = 30
-MAX_OPEN_POSITIONS = 15
+MAX_OPEN_POSITIONS = 50
 MAX_BALANCE_PCT = 0.20  # Max 20% of balance per trade
-DAILY_LOSS_STOP = -5.0  # $5 = 50% of $10 paper balance
+DAILY_LOSS_STOP = -12.50  # 50% of $25 paper balance
 KELLY_FRACTION = 0.25   # Quarter-Kelly for conservative sizing
 MIN_VOLUME = 10         # Skip illiquid markets
 

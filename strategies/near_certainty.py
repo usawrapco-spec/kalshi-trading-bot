@@ -66,10 +66,15 @@ class NearCertaintyStrategy(BaseStrategy):
             if sig:
                 signals.append(sig)
 
+        # Limit cheap signals to top 20 by confidence to avoid log spam
+        if len(signals) > 20:
+            signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
+            signals = signals[:20]
+
         logger.info(
             f"NearCertainty: {closing_soon} closing <24h, "
             f"{nc_count} in 85-97c ({nc_wide} in 80-99c), "
-            f"{cheap_count} in 3-15c, {len(signals)} signals"
+            f"{cheap_count} in 3-15c, {len(signals)} signals (capped at 20)"
         )
         return signals
 
@@ -146,7 +151,7 @@ class NearCertaintyStrategy(BaseStrategy):
         profit_potential = 100 - price
         confidence = 30 + min(volume / 100, 20)
 
-        logger.info(
+        logger.debug(
             f"NearCertainty cheap: {ticker} {side.upper()} at {price}c, "
             f"potential={profit_potential}c, vol={volume}"
         )

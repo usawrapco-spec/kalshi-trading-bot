@@ -247,6 +247,9 @@ class KalshiBot:
             logger.info("No signals from any strategy - forcing paper trade")
             self._forced_paper_trade(markets)
 
+        # Check for settled paper trades and calculate P&L
+        self._check_settlements(markets)
+
         self._log_status()
 
     def _forced_paper_trade(self, markets):
@@ -287,6 +290,76 @@ class KalshiBot:
                 'reason': f"ForcedPaper: highest vol market, {side.upper()} @ ${entry:.2f}, vol={volume}",
                 'confidence': 0, 'order_id': 'forced_paper', 'price': entry,
             })
+
+    def _check_settlements(self, markets):
+        """Check if any open paper trades have settled and calculate P&L."""
+        if not self.risk.positions:
+            return
+
+        # Build ticker -> market lookup from current data
+        market_map = {m.get('ticker'): m for m in markets}
+
+        settled = []
+        for ticker, pos in list(self.risk.positions.items()):
+            m = market_map.get(ticker)
+            if not m:
+                # Market not in current fetch - try fetching it directly
+                try:
+                    m = self.client.get_market(ticker)
+                    if m and 'market' in m:
+                        m = m['market']
+                except Exception:
+                    continue
+
+            if not m:
+                continue
+
+            # Check if market has resolved
+            result = m.get('result')
+            settlement = m.get('settlement_value_dollars')
+
+            if result is None and settlement is None:
+                continue
+
+            # Determine if YES won
+            if result == 'yes' or result is True:
+                resolved_yes = True
+            elif result == 'no' or result is False:
+                resolved_yes = False
+            elif settlement is not None:
+                sv = float(settlement) if settlement else 0
+                resolved_yes = sv > 0.50
+            else:
+                continue
+
+            # Settle the paper trade
+            self.risk.settle_paper_trade(ticker, resolved_yes)
+            settled.append(ticker)
+
+            # Log settlement to Supabase
+            if self.db:
+                side = pos['side']
+                won = (side == 'yes' and resolved_yes) or (side == 'no' and not resolved_yes)
+                entry = pos['entry_price']
+                count = pos['count']
+                pnl = (count * 1.0 - count * entry) if won else (-count * entry)
+                try:
+                    self.db.log_trade({
+                        'ticker': ticker,
+                        'action': 'settle',
+                        'side': pos['side'],
+                        'count': count,
+                        'strategy': pos.get('strategy', 'unknown'),
+                        'reason': f"SETTLED {'WIN' if won else 'LOSS'}: pnl=${pnl:+.2f}, result={result}",
+                        'confidence': 100 if won else 0,
+                        'order_id': 'settlement',
+                        'price': 1.0 if won else 0.0,
+                    })
+                except Exception as e:
+                    logger.error(f"Failed to log settlement for {ticker}: {e}")
+
+        if settled:
+            logger.info(f"Settled {len(settled)} paper trades: {settled}")
 
     def _log_status(self):
         self.risk.log_status()
