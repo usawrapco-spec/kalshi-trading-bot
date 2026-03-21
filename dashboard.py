@@ -1418,9 +1418,12 @@ def get_latest_analysis():
 
 
 def start_dashboard():
-    """Start the dashboard web server."""
+    """Start the dashboard web server in a background thread."""
+    import threading
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    t = threading.Thread(target=lambda: app.run(host='0.0.0.0', port=port), daemon=True)
+    t.start()
+    logger.info(f"Dashboard started on port {port} (background thread)")
 
 
 if __name__ == '__main__':
