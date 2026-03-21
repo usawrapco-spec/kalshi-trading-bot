@@ -11,7 +11,7 @@ class Config:
     # API Configuration
     KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID')
     KALSHI_PRIVATE_KEY = os.getenv('KALSHI_PRIVATE_KEY')
-    KALSHI_API_HOST = os.getenv('KALSHI_API_HOST', 'https://demo-api.kalshi.com')
+    KALSHI_API_HOST = os.getenv('KALSHI_API_HOST', 'https://demo-api.kalshi.co')
     
     # Supabase Configuration
     SUPABASE_URL = os.getenv('SUPABASE_URL')

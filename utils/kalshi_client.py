@@ -35,14 +35,15 @@ class KalshiAPIClient:
         # Remove any stray backslashes
         key_str = key_str.replace('\\', '')
 
-        # Extract just the base64 content between BEGIN and END
-        match = re.search(r'-----BEGIN [A-Z ]+-----(.+?)-----END [A-Z ]+-----', key_str, re.DOTALL)
+        # Extract the key type and base64 content between BEGIN and END
+        match = re.search(r'-----BEGIN ([A-Z ]+)-----(.+?)-----END \1-----', key_str, re.DOTALL)
         if not match:
             raise ValueError("Could not find PEM header/footer in key")
 
-        header = "-----BEGIN RSA PRIVATE KEY-----"
-        footer = "-----END RSA PRIVATE KEY-----"
-        base64_content = match.group(1)
+        key_type = match.group(1)  # e.g. "RSA PRIVATE KEY", "EC PRIVATE KEY", "PRIVATE KEY"
+        header = f"-----BEGIN {key_type}-----"
+        footer = f"-----END {key_type}-----"
+        base64_content = match.group(2)
 
         # Remove ALL whitespace and non-base64 characters from the middle
         base64_clean = re.sub(r'[^A-Za-z0-9+/=]', '', base64_content)
@@ -50,6 +51,8 @@ class KalshiAPIClient:
         # Rebuild proper PEM with 64-char lines
         lines = [base64_clean[i:i+64] for i in range(0, len(base64_clean), 64)]
         pem_key = header + "\n" + "\n".join(lines) + "\n" + footer
+
+        logger.info(f"Key loaded: type={key_type}, base64_len={len(base64_clean)}")
 
         return serialization.load_pem_private_key(pem_key.encode('utf-8'), password=None)
 
@@ -78,6 +81,10 @@ class KalshiAPIClient:
         url = f"{self.host}{path}"
         headers = self._sign_request(method, path)
         response = self.session.request(method, url, headers=headers, **kwargs)
+        if response.status_code == 401:
+            logger.error(f"401 Unauthorized: {method} {url}")
+            logger.error(f"Response: {response.text}")
+            logger.error(f"Key ID used: {self.key_id[:8]}...")
         response.raise_for_status()
         return response.json()
     

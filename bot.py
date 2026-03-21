@@ -187,7 +187,7 @@ def main():
     
     # Override config if demo mode
     if args.demo:
-        Config.KALSHI_API_HOST = 'https://demo-api.kalshi.com'
+        Config.KALSHI_API_HOST = 'https://demo-api.kalshi.co'
         logger.info("🧪 Demo mode enabled - using demo API")
     
     # Create and run bot
