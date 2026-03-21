@@ -26,11 +26,22 @@ class KalshiAPIClient:
         logger.info(f"Kalshi client initialized for {self.host}")
 
     def _load_private_key(self, key_str):
-        """Load an RSA private key from a PEM string."""
+        """Load an RSA private key from a PEM string.
+
+        Handles Railway env vars where newlines are stored as literal
+        backslash-n (\\n) instead of real newline characters.
+        """
         if not key_str:
             raise ValueError("KALSHI_PRIVATE_KEY is not set")
-        # Railway env vars store newlines as literal \\n — convert them back
-        key_str = key_str.replace('\\n', '\n')
+        # Replace literal \n (the two chars backslash + n) with real newlines.
+        # Do this regardless of whether real newlines are also present.
+        if '\\n' in key_str:
+            key_str = key_str.replace('\\n', '\n')
+        # Also handle double-escaped \\\\n just in case
+        if '\\n' in key_str:
+            key_str = key_str.replace('\\n', '\n')
+        # Strip whitespace that may surround the key
+        key_str = key_str.strip()
         if not key_str.startswith('-----'):
             key_str = f"-----BEGIN RSA PRIVATE KEY-----\n{key_str}\n-----END RSA PRIVATE KEY-----"
         return serialization.load_pem_private_key(key_str.encode('utf-8'), password=None)
