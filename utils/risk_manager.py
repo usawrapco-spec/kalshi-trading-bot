@@ -19,7 +19,7 @@ class RiskManager:
     """Manages risk, Kelly sizing, and paper balance."""
 
     def __init__(self):
-        self.paper_balance = Config.PAPER_BALANCE  # $10 default
+        self.paper_balance = 10.00  # Hardcoded $10 starting balance
         self.daily_pnl = 0.0
         self.positions = {}  # ticker -> {side, count, entry_price, strategy}
         self.daily_reset = datetime.now().date()

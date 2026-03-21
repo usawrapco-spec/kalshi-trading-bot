@@ -58,6 +58,9 @@ class KalshiBot:
         self.risk = RiskManager()
         self.db = SupabaseDB()
 
+        # Fresh start: clear old paper trades from Supabase
+        self._clear_old_trades()
+
         self.strategies = []
         self._init_strategies()
 
@@ -88,6 +91,17 @@ class KalshiBot:
         if Config.ENABLE_WEATHER:
             self.strategies.append(WeatherEdgeStrategy(self.client, self.risk, self.db))
         logger.info(f"{len(self.strategies)} strategies loaded")
+
+    def _clear_old_trades(self):
+        """Clear all old paper trades from Supabase for a fresh start."""
+        if not self.db or not self.db.client:
+            return
+        try:
+            # Delete all old paper trades
+            self.db.client.table('kalshi_trades').delete().neq('id', 0).execute()
+            logger.info("Cleared all old paper trades from Supabase - fresh start")
+        except Exception as e:
+            logger.error(f"Failed to clear old trades: {e}")
 
     def _check_balance(self):
         bal = self.client.get_balance()
