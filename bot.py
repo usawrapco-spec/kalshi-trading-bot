@@ -172,13 +172,8 @@ class KalshiBot:
                     f"conf={conf:.0f} edge={edge:+.2f} - {sig.get('reason', '')}"
                 )
 
-                # Check position limits before paper trading
-                if not self.risk.check_max_positions():
-                    logger.info(f"  Skipping {sig['ticker']} - max positions reached")
-                    break
-
-                # Paper trade
-                self.risk.record_paper_trade(
+                # Paper trade (record_paper_trade has all guards built in)
+                traded = self.risk.record_paper_trade(
                     ticker=sig['ticker'],
                     side=sig['side'],
                     count=sig['count'],
@@ -186,6 +181,9 @@ class KalshiBot:
                     strategy=sig.get('strategy_type', 'unknown'),
                     title=sig.get('title', ''),
                 )
+
+                if not traded:
+                    continue  # blocked by position/balance/duplicate check
 
                 # Log to Supabase
                 if self.db:

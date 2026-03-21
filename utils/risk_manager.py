@@ -108,14 +108,28 @@ class RiskManager:
         return True
 
     def record_paper_trade(self, ticker, side, count, entry_price, strategy, title=''):
-        """Record a paper trade entry."""
+        """Record a paper trade entry. Returns False if blocked."""
+        # Hard guards - these cannot be bypassed
+        if ticker in self.positions:
+            logger.info(f"SKIP {ticker}: already have open position")
+            return False
+        if len(self.positions) >= MAX_OPEN_POSITIONS:
+            logger.info(f"SKIP {ticker}: max positions ({MAX_OPEN_POSITIONS}) reached")
+            return False
+        if self.paper_balance <= 0:
+            logger.info(f"SKIP {ticker}: paper balance ${self.paper_balance:.2f} <= $0")
+            return False
+        cost = count * entry_price
+        if cost > self.paper_balance:
+            logger.info(f"SKIP {ticker}: cost ${cost:.2f} > balance ${self.paper_balance:.2f}")
+            return False
+
         self.positions[ticker] = {
             'side': side, 'count': count,
             'entry_price': entry_price,
             'strategy': strategy, 'title': title,
             'timestamp': datetime.now().isoformat(),
         }
-        cost = count * entry_price
         self.paper_balance -= cost
         self.trades_today += 1
         self.total_trades += 1
@@ -126,8 +140,10 @@ class RiskManager:
 
         logger.info(
             f"PAPER TRADE: BUY {count}x {side.upper()} {ticker} @ ${entry_price:.2f} "
-            f"(cost=${cost:.2f}, balance=${self.paper_balance:.2f})"
+            f"(cost=${cost:.2f}, balance=${self.paper_balance:.2f}, "
+            f"positions={len(self.positions)}/{MAX_OPEN_POSITIONS})"
         )
+        return True
 
     def settle_paper_trade(self, ticker, resolved_yes):
         """Settle a paper trade. resolved_yes = True if YES won."""
