@@ -574,9 +574,7 @@ setInterval(refreshAll,12000);
 </html>"""
 
 
-@app.route('/dashboard')
-def dashboard():
-    return DASHBOARD_HTML
+
 
 
 # ============================================================
