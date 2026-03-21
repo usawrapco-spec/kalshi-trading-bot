@@ -35,6 +35,9 @@ class Config:
     ENABLE_PROB_ARB = os.getenv('ENABLE_PROB_ARB', 'true').lower() == 'true'
     ENABLE_SPORTS_NO = os.getenv('ENABLE_SPORTS_NO', 'true').lower() == 'true'
     ENABLE_NEAR_CERTAINTY = os.getenv('ENABLE_NEAR_CERTAINTY', 'true').lower() == 'true'
+    ENABLE_MENTION = os.getenv('ENABLE_MENTION', 'true').lower() == 'true'
+    ENABLE_HIGH_PROB = os.getenv('ENABLE_HIGH_PROB', 'true').lower() == 'true'
+    ENABLE_ORDERBOOK = os.getenv('ENABLE_ORDERBOOK', 'true').lower() == 'true'
 
     # Monitoring
     CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', 30))

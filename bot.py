@@ -4,10 +4,13 @@ Kalshi Trading Bot - Paper Trading System
 
 Strategies:
   - WeatherEdge: Open-Meteo GFS ensemble vs KXHIGH temperature markets
-  - GrokNewsAnalysis: xAI Grok-3 evaluates top 20 markets by volume
+  - GrokNewsAnalysis: xAI Grok-3 evaluates top 20 liquid markets (vol>=10)
   - ProbabilityArbitrage: YES+NO mispricing and orderbook spread detection
   - SportsNO: fade sports favorites (YES 60-85c) by buying NO
   - NearCertainty: 85-97c near expiry + 3-15c cheap contrarian
+  - MentionMarkets: Grok-powered mention/pop-culture market analysis
+  - HighProbLock: buy YES at 92-98c on high-confidence markets for bond-like ROI
+  - OrderBookEdge: bid/ask imbalance on short-term crypto/weather markets
   - ForcedPaperTrade: highest-volume market fallback (always fires)
 """
 
@@ -26,6 +29,9 @@ from strategies.grok_news import GrokNewsStrategy
 from strategies.prob_arb import ProbabilityArbStrategy
 from strategies.sports_no import SportsNOStrategy
 from strategies.near_certainty import NearCertaintyStrategy
+from strategies.mention_markets import MentionMarketsStrategy
+from strategies.high_prob_lock import HighProbLockStrategy
+from strategies.orderbook_edge import OrderBookEdgeStrategy
 from dashboard import start_dashboard
 from utils.market_helpers import get_yes_price as get_yes_price_dollars, get_volume
 
@@ -70,6 +76,12 @@ class KalshiBot:
             self.strategies.append(SportsNOStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_NEAR_CERTAINTY:
             self.strategies.append(NearCertaintyStrategy(self.client, self.risk, self.db))
+        if Config.ENABLE_MENTION:
+            self.strategies.append(MentionMarketsStrategy(self.client, self.risk, self.db))
+        if Config.ENABLE_HIGH_PROB:
+            self.strategies.append(HighProbLockStrategy(self.client, self.risk, self.db))
+        if Config.ENABLE_ORDERBOOK:
+            self.strategies.append(OrderBookEdgeStrategy(self.client, self.risk, self.db))
         logger.info(f"{len(self.strategies)} strategies loaded")
 
     def _check_balance(self):
@@ -122,9 +134,12 @@ class KalshiBot:
             self._log_status()
             return
 
+        # Sort all markets by volume descending so strategies analyze liquid markets first
+        markets.sort(key=lambda m: get_volume(m), reverse=True)
+
         logger.info(f"Scanned {len(markets)} markets")
 
-        # Debug: log first 10 markets
+        # Debug: log first 10 markets (now sorted by volume)
         logger.info("--- First 10 markets ---")
         for m in markets[:10]:
             ticker = m.get('ticker', '?')

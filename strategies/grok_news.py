@@ -36,19 +36,22 @@ class GrokNewsStrategy(BaseStrategy):
         if not self.api_key:
             return []
 
-        # No pre-filtering. Sort by 24h volume, take top 20.
+        # Sort by volume, skip illiquid (vol < 10), take top 20.
         open_mkts = [m for m in markets if m.get('status', 'open') == 'open']
         open_mkts.sort(key=lambda m: get_volume(m), reverse=True)
-        candidates = open_mkts[:MAX_PER_CYCLE]
+        # Filter to volume >= 10 to avoid wasting Grok calls on illiquid markets
+        liquid = [m for m in open_mkts if get_volume(m) >= 10]
+        candidates = liquid[:MAX_PER_CYCLE]
 
         if candidates:
             top = candidates[0]
             logger.info(
-                f"GrokNews: {len(open_mkts)} open markets, sending top {len(candidates)} to Grok. "
+                f"GrokNews: {len(open_mkts)} open, {len(liquid)} with vol>=10, "
+                f"sending top {len(candidates)} to Grok. "
                 f"Top: {top.get('ticker', '?')} vol={get_volume(top):.0f}"
             )
         else:
-            logger.info("GrokNews: 0 open markets, nothing to analyze")
+            logger.info(f"GrokNews: {len(open_mkts)} open but 0 with volume>=10, skipping")
 
         signals = []
         for m in candidates:
