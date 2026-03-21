@@ -73,38 +73,59 @@ class KalshiAPIClient:
             logger.error(f"Error getting orderbook for {ticker}: {e}")
             return None
     
-    def create_order(self, ticker, action, side, count, order_type='market', 
-                    yes_price=None, no_price=None, dry_run=False):
+    def create_order(self, ticker, action, side, count, order_type='market', yes_price=None, no_price=None, dry_run=False):
         """Create an order with safety checks."""
-        
-        # Validation
         if count > Config.MAX_ORDER_SIZE:
             logger.warning(f"Order size {count} exceeds max {Config.MAX_ORDER_SIZE}")
             count = Config.MAX_ORDER_SIZE
-        
-        order_params = {
-            'ticker': ticker,
-            'action': action,
-            'side': side,
-            'count': count,
-            'type': order_type
-        }
-        
+        order_params = {'ticker': ticker, 'action': action, 'side': side, 'count': count, 'type': order_type}
         if order_type == 'limit':
             if side == 'yes' and yes_price:
                 order_params['yes_price'] = yes_price
             elif side == 'no' and no_price:
                 order_params['no_price'] = no_price
-        
         logger.info(f"{'[DRY RUN] ' if dry_run else ''}Creating order: {order_params}")
-        
         if dry_run:
             return {'status': 'dry_run', 'params': order_params}
-        
         try:
             response = self.exchange_api.create_order(**order_params)
             order = response.to_dict() if hasattr(response, 'to_dict') else response
             logger.info(f"✅ Order created: {order.get('order_id')}")
             return order
         except Exception as e:
-            logger.error(f"❌ Error crea
+            logger.error(f"Error creating order: {e}")
+            return None
+    
+    def get_portfolio(self):
+        """Get current portfolio/positions."""
+        try:
+            response = self.portfolio_api.get_portfolio()
+            portfolio = response.to_dict() if hasattr(response, 'to_dict') else response
+            return portfolio
+        except Exception as e:
+            logger.error(f"Error getting portfolio: {e}")
+            return None
+    
+    def get_balance(self):
+        """Get account balance."""
+        try:
+            response = self.portfolio_api.get_balance()
+            balance = response.to_dict() if hasattr(response, 'to_dict') else response
+            logger.debug(f"Balance: ${balance.get('balance', 0)/100:.2f}")
+            return balance
+        except Exception as e:
+            logger.error(f"Error getting balance: {e}")
+            return None
+    
+    def get_fills(self, ticker=None):
+        """Get recent fills/trades."""
+        try:
+            params = {}
+            if ticker:
+                params['ticker'] = ticker
+            response = self.portfolio_api.get_fills(**params)
+            fills = response.to_dict() if hasattr(response, 'to_dict') else response
+            return fills
+        except Exception as e:
+            logger.error(f"Error getting fills: {e}")
+            return None
