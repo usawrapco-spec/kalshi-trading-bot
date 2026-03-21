@@ -32,6 +32,7 @@ from strategies.near_certainty import NearCertaintyStrategy
 from strategies.mention_markets import MentionMarketsStrategy
 from strategies.high_prob_lock import HighProbLockStrategy
 from strategies.orderbook_edge import OrderBookEdgeStrategy
+from strategies.cross_platform import CrossPlatformEdgeStrategy
 from dashboard import start_dashboard
 from utils.market_helpers import get_yes_price as get_yes_price_dollars, get_volume
 
@@ -74,6 +75,8 @@ class KalshiBot:
             self.strategies.append(MentionMarketsStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_HIGH_PROB:
             self.strategies.append(HighProbLockStrategy(self.client, self.risk, self.db))
+        if Config.ENABLE_CROSS_PLATFORM:
+            self.strategies.append(CrossPlatformEdgeStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_ORDERBOOK:
             self.strategies.append(OrderBookEdgeStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_PROB_ARB:
