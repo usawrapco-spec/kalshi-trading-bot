@@ -14,6 +14,7 @@ Strategies:
   - ForcedPaperTrade: highest-volume market fallback (always fires)
 """
 
+import os
 import sys
 import time
 import argparse
@@ -33,9 +34,11 @@ from strategies.mention_markets import MentionMarketsStrategy
 from strategies.high_prob_lock import HighProbLockStrategy
 from strategies.orderbook_edge import OrderBookEdgeStrategy
 from strategies.cross_platform import CrossPlatformEdgeStrategy
+from strategies.market_making import MarketMakingStrategy
 from dashboard import start_dashboard
 from utils.market_helpers import get_yes_price as get_yes_price_dollars, get_volume
 from utils.ai_debate import run_debate
+from self_improver import SelfImprover
 
 logger = setup_logger('main')
 
@@ -45,9 +48,31 @@ class KalshiBot:
 
     def __init__(self, dry_run=True):
         self.dry_run = dry_run
+
+        # OPERATING MODE DETECTION
+        self.operating_mode = os.environ.get('OPERATING_MODE', 'live_paper').lower()
+        mode_names = {
+            'data_collection': 'DATA COLLECTION MODE (Learning)',
+            'live_paper': 'LIVE PAPER TRADING MODE',
+            'real': 'REAL MONEY TRADING MODE'
+        }
+        mode_name = mode_names.get(self.operating_mode, f'UNKNOWN MODE: {self.operating_mode}')
+
         logger.info("=" * 60)
-        logger.info("KALSHI TRADING BOT - PAPER TRADING MODE")
+        logger.info(f"KALSHI TRADING BOT - {mode_name}")
         logger.info("=" * 60)
+
+        # Mode-specific settings
+        if self.operating_mode == 'data_collection':
+            logger.info("🎯 MAXIMUM DATA COLLECTION: Evaluating ALL markets, logging ALL signals")
+            logger.info("💰 Virtual trading with $1 positions - NO real money at risk")
+            logger.info("📊 Goal: Generate maximum signal volume for self-improvement analysis")
+        elif self.operating_mode == 'live_paper':
+            logger.info("📈 LIVE PAPER TRADING: Risk-managed paper trading with learned parameters")
+        elif self.operating_mode == 'real':
+            logger.info("💰 REAL MONEY TRADING: Production mode with tight risk controls")
+        else:
+            logger.warning(f"⚠️  Unknown operating mode: {self.operating_mode}. Defaulting to live_paper")
 
         try:
             Config.validate()
@@ -59,8 +84,9 @@ class KalshiBot:
         self.risk = RiskManager()
         self.db = SupabaseDB()
 
-        # Fresh start: clear old paper trades from Supabase
-        self._clear_old_trades()
+        # Fresh start: clear old paper trades from Supabase (unless in data_collection mode)
+        if self.operating_mode != 'data_collection':
+            self._clear_old_trades()
 
         self.strategies = []
         self._init_strategies()
@@ -83,6 +109,8 @@ class KalshiBot:
             self.strategies.append(CrossPlatformEdgeStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_ORDERBOOK:
             self.strategies.append(OrderBookEdgeStrategy(self.client, self.risk, self.db))
+        if Config.ENABLE_MARKET_MAKING:
+            self.strategies.append(MarketMakingStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_PROB_ARB:
             self.strategies.append(ProbabilityArbStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_SPORTS_NO:
@@ -118,74 +146,169 @@ class KalshiBot:
             self._log_status()
             return
 
-        # Fetch markets from multiple sources to get real binary markets
-        # The default /markets endpoint is flooded with KXMVE parlays,
-        # so we also use /events and series-specific fetches.
-        logger.info("Fetching markets from multiple sources...")
-        seen_tickers = set()
-        markets = []
-
-        def _add_markets(batch, source):
-            added = 0
-            skipped_resolved = 0
-            for m in batch:
-                ticker = m.get('ticker')
-                if not ticker or ticker in seen_tickers:
-                    continue
-                if ticker.startswith('KXMVE'):
-                    continue  # Skip multivariate parlays
-                # Skip already-resolved markets (result field is set, or price is 0/1.00)
-                if m.get('result'):
-                    skipped_resolved += 1
-                    continue
-                yes_p = get_yes_price_dollars(m)
-                if yes_p >= 0.99 or (yes_p <= 0.01 and yes_p > 0):
-                    skipped_resolved += 1
-                    continue
-                m['status'] = 'open'
-                markets.append(m)
-                seen_tickers.add(ticker)
-                added += 1
-            msg = f"  +{added} from {source}"
-            if skipped_resolved:
-                msg += f" ({skipped_resolved} resolved/settled skipped)"
-            if added or skipped_resolved:
-                logger.info(msg)
-
-        # 1. Events endpoint - returns categorized binary markets
-        try:
-            events = self.client.get_events(status='open', limit=200)
-            event_markets = []
-            for evt in events:
-                for m in (evt.get('markets') or []):
-                    event_markets.append(m)
-            _add_markets(event_markets, f"events ({len(events)} events)")
-        except Exception as e:
-            logger.error(f"Events fetch failed: {e}")
-
-        # 2. Direct markets fetch (will get some non-KXMVE binary markets)
-        try:
-            data = self.client.get_markets(status='open', limit=1000)
-            _add_markets(data.get('markets', []), "markets endpoint")
-        except Exception as e:
-            logger.error(f"Markets fetch failed: {e}")
-
-        # 3. Weather series
-        for series in ('KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN'):
-            try:
-                _add_markets(self.client.get_markets_by_series(series), series)
-            except Exception as e:
-                logger.debug(f"  {series} failed: {e}")
-
-        if not markets:
-            logger.warning("No markets returned")
+        if not self.risk.check_circuit_breaker():
+            logger.warning("Circuit breaker tripped - halting")
             self._log_status()
             return
 
-        # Sort all markets by volume descending so strategies analyze liquid markets first
-        markets.sort(key=lambda m: get_volume(m), reverse=True)
+        # OPERATING MODE: Different market fetching strategies
+        if self.operating_mode == 'data_collection':
+            # DATA COLLECTION MODE: Fetch ALL markets for maximum signal volume
+            logger.info("🎯 DATA COLLECTION: Fetching ALL markets for maximum signal volume...")
+            seen_tickers = set()
+            all_markets = []
+            total_added = 0
+            total_skipped_resolved = 0
 
-        logger.info(f"Scanned {len(markets)} markets")
+            def _add_all_markets(batch, source):
+                nonlocal total_added, total_skipped_resolved
+                if not batch:
+                    return
+                added = 0
+                skipped_resolved = 0
+                skipped_dupes = 0
+                for m in batch:
+                    ticker = m.get('ticker')
+                    if not ticker:
+                        continue
+                    if ticker in seen_tickers:
+                        skipped_dupes += 1
+                        continue
+                    if ticker.startswith('KXMVE'):
+                        continue  # Skip multivariate parlays
+                    # In data collection mode, we want to evaluate markets that will resolve
+                    # So we include recently resolved ones for settlement tracking
+                    yes_p = get_yes_price_dollars(m)
+                    m['status'] = 'open' if not m.get('result') else 'resolved'
+                    all_markets.append(m)
+                    seen_tickers.add(ticker)
+                    added += 1
+
+                total_added += added
+                total_skipped_resolved += skipped_resolved
+
+                msg = f"  +{added} from {source}"
+                if skipped_dupes:
+                    msg += f" ({skipped_dupes} duplicates)"
+                logger.info(msg)
+
+            # Fetch ALL markets with pagination
+            try:
+                # Get all events first
+                events = self.client.get_events(limit=500)  # Higher limit for data collection
+                event_markets = []
+                for evt in events:
+                    for m in (evt.get('markets') or []):
+                        event_markets.append(m)
+                _add_all_markets(event_markets, f"events ({len(event_markets)} markets)")
+            except Exception as e:
+                logger.error(f"Events fetch failed: {e}")
+
+            # Paginate through all markets
+            cursor = None
+            page_count = 0
+            while page_count < 10:  # Limit to 10 pages to avoid infinite loops
+                try:
+                    data = self.client.get_markets(limit=100, cursor=cursor)
+                    markets_batch = data.get('markets', [])
+                    if not markets_batch:
+                        break
+                    _add_all_markets(markets_batch, f"markets page {page_count + 1}")
+                    cursor = data.get('cursor')
+                    page_count += 1
+                    if not cursor:
+                        break
+                except Exception as e:
+                    logger.error(f"Markets page {page_count + 1} fetch failed: {e}")
+                    break
+
+            markets = all_markets
+            logger.info(f"📊 DATA COLLECTION: Evaluating {len(markets)} total markets")
+
+        else:
+            # LIVE PAPER/REAL MODE: Use market trimming for focused trading
+            logger.info("Fetching markets with volume-based trimming...")
+            seen_tickers = set()
+            all_markets = []
+            total_added = 0
+            total_skipped_resolved = 0
+
+            def _add_markets(batch, source):
+                nonlocal total_added, total_skipped_resolved
+                if not batch:
+                    return
+                added = 0
+                skipped_resolved = 0
+                skipped_dupes = 0
+                for m in batch:
+                    ticker = m.get('ticker')
+                    if not ticker:
+                        continue
+                    if ticker in seen_tickers:
+                        skipped_dupes += 1
+                        continue
+                    if ticker.startswith('KXMVE'):
+                        continue  # Skip multivariate parlays
+                    # Skip already-resolved markets (result field is set, or price is 0/1.00)
+                    if m.get('result'):
+                        skipped_resolved += 1
+                        continue
+                    yes_p = get_yes_price_dollars(m)
+                    if yes_p >= 0.99 or (yes_p <= 0.01 and yes_p > 0):
+                        skipped_resolved += 1
+                        continue
+                    m['status'] = 'open'
+                    all_markets.append(m)
+                    seen_tickers.add(ticker)
+                    added += 1
+
+                total_added += added
+                total_skipped_resolved += skipped_resolved
+
+                msg = f"  +{added} from {source}"
+                if skipped_resolved:
+                    msg += f" ({skipped_resolved} resolved)"
+                if skipped_dupes:
+                    msg += f" ({skipped_dupes} duplicates)"
+                if added or skipped_resolved or skipped_dupes:
+                    logger.info(msg)
+
+            # 1. Events endpoint - returns categorized binary markets
+            try:
+                events = self.client.get_events(status='open', limit=200)
+                event_markets = []
+                for evt in events:
+                    for m in (evt.get('markets') or []):
+                        event_markets.append(m)
+                _add_markets(event_markets, f"events ({len(events)} events)")
+            except Exception as e:
+                logger.error(f"Events fetch failed: {e}")
+
+            # 2. Direct markets fetch (will get some non-KXMVE binary markets)
+            try:
+                data = self.client.get_markets(status='open', limit=1000)
+                _add_markets(data.get('markets', []), "markets endpoint")
+            except Exception as e:
+                logger.error(f"Markets fetch failed: {e}")
+
+            # 3. Weather series
+            for series in ('KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN'):
+                try:
+                    _add_markets(self.client.get_markets_by_series(series), series)
+                except Exception as e:
+                    logger.debug(f"  {series} failed: {e}")
+
+            if not all_markets:
+                logger.warning("No markets returned")
+                self._log_status()
+                return
+
+            # MARKET TRIMMING: Take top 50 most liquid markets only
+            # Sort by volume descending, then take top 50 for focused trading
+            all_markets.sort(key=lambda m: get_volume(m), reverse=True)
+            markets = all_markets[:50]  # Top 50 most liquid markets
+
+            logger.info(f"Market trimming: {len(all_markets)} total -> {len(markets)} top volume markets")
 
         # Debug: log first 10 markets (now sorted by volume)
         logger.info("--- First 10 markets ---")
@@ -215,88 +338,229 @@ class KalshiBot:
             else:
                 logger.info(f"{strategy.name}: 0 signals")
 
-        # Phase 2: Pick top 2 signals by confidence, max $5 total spend
-        MAX_TRADES = 2
-        MAX_CYCLE_SPEND = 5.00
-        all_signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
-        logger.info(f"Total signals across all strategies: {len(all_signals)}")
+        # Phase 2: MODE-SPECIFIC SIGNAL PROCESSING
+        if self.operating_mode == 'data_collection':
+            # DATA COLLECTION MODE: Log ALL signals, virtual trading only
+            logger.info("🎯 DATA COLLECTION: Processing all signals for learning...")
 
-        trades_placed = 0
-        cycle_spent = 0.0
-        debates_used = 0
-        MAX_DEBATES = 4  # Max 4 AI calls per cycle (2 per trade x 2 trades)
-        for sig in all_signals:
-            if trades_placed >= MAX_TRADES:
-                break
+            # Log ALL signals to signal_evaluations table
+            signals_logged = 0
+            virtual_trades = 0
 
-            # Calculate price and Kelly sizing
-            edge = sig.get('edge', 0)
-            prob = sig.get('model_prob', 0.5)
-            price = get_yes_price_dollars(
-                next((m for m in markets if m.get('ticker') == sig['ticker']), {})
-            ) or 0.50
-            price_for_side = price if sig['side'] == 'yes' else (1 - price)
+            for sig in all_signals:
+                try:
+                    # Get market data
+                    market = next((m for m in markets if m.get('ticker') == sig['ticker']), {})
+                    yes_price = get_yes_price_dollars(market) or 0.50
+                    no_price = 1.0 - yes_price
+                    price_for_side = yes_price if sig['side'] == 'yes' else no_price
 
-            if edge > 0 and prob > 0:
-                sig['count'] = self.risk.kelly_size(edge, prob, int(price_for_side * 100))
+                    # Calculate potential trade size (virtual)
+                    edge = sig.get('edge', 0)
+                    prob = sig.get('model_prob', 0.5)
+                    virtual_size = 1.00  # $1 virtual position for all trades
 
-            cost = sig['count'] * price_for_side
-            if cycle_spent + cost > MAX_CYCLE_SPEND:
-                remaining = MAX_CYCLE_SPEND - cycle_spent
-                if remaining < price_for_side:
+                    # Calculate reward-to-risk
+                    potential_profit = 1.0 - price_for_side if sig['side'] == 'yes' else price_for_side
+                    potential_loss = price_for_side if sig['side'] == 'yes' else 1.0 - price_for_side
+                    reward_to_risk = potential_profit / max(potential_loss, 0.01)
+
+                    # Determine action
+                    passes_asymmetric = reward_to_risk >= 2.0
+                    action = 'VIRTUAL_TRADE' if passes_asymmetric else 'SKIP'
+                    skip_reason = 'Fails asymmetric reward check' if not passes_asymmetric else None
+
+                    # Log to signal_evaluations table
+                    if self.db:
+                        signal_data = {
+                            'cycle_id': f"cycle_{int(time.time())}",
+                            'strategy': sig.get('strategy_type', 'unknown'),
+                            'ticker': sig['ticker'],
+                            'market_title': sig.get('title', ''),
+                            'event_ticker': market.get('event_ticker', ''),
+                            'side': sig['side'],
+                            'yes_price': yes_price,
+                            'no_price': no_price,
+                            'spread': abs(yes_price - no_price),
+                            'volume_24h': get_volume(market),
+                            'time_to_close_hours': None,  # Could calculate from close_date
+                            'our_probability': prob,
+                            'market_probability': price_for_side,
+                            'edge': edge,
+                            'confidence': sig.get('confidence', 0),
+                            'action': action,
+                            'skip_reason': skip_reason,
+                            'virtual_trade_size': virtual_size if action == 'VIRTUAL_TRADE' else None,
+                            'virtual_entry_price': price_for_side if action == 'VIRTUAL_TRADE' else None,
+                            'potential_profit': potential_profit,
+                            'potential_loss': potential_loss,
+                            'reward_to_risk': reward_to_risk,
+                            'kelly_fraction': 0.1,  # Default
+                        }
+
+                        # Add AI opinions if available
+                        if hasattr(sig, 'grok_probability'):
+                            signal_data.update({
+                                'grok_probability': sig.get('grok_probability'),
+                                'grok_recommendation': sig.get('grok_recommendation'),
+                                'claude_probability': sig.get('claude_probability'),
+                                'claude_recommendation': sig.get('claude_recommendation'),
+                                'debate_agreement': sig.get('debate_agreement', False),
+                            })
+
+                        self.db.client.table('signal_evaluations').insert(signal_data).execute()
+                        signals_logged += 1
+
+                        if action == 'VIRTUAL_TRADE':
+                            virtual_trades += 1
+                            logger.info(
+                                f"📊 VIRTUAL TRADE: {sig['ticker']} {sig['side'].upper()} "
+                                f"edge={edge:+.2f} conf={sig.get('confidence', 0):.0f} "
+                                f"R:R={reward_to_risk:.1f} [{sig.get('strategy_type', '?')}]"
+                            )
+                        else:
+                            logger.debug(
+                                f"📊 SKIP: {sig['ticker']} {skip_reason} "
+                                f"edge={edge:+.2f} R:R={reward_to_risk:.1f}"
+                            )
+
+                except Exception as e:
+                    logger.error(f"Error logging signal for {sig.get('ticker', 'unknown')}: {e}")
                     continue
-                sig['count'] = max(1, int(remaining / price_for_side))
+
+            logger.info(f"📊 DATA COLLECTION: Logged {signals_logged} signals, {virtual_trades} virtual trades")
+
+        else:
+            # LIVE PAPER/REAL MODE: Normal trading with risk management
+            logger.info("📈 LIVE TRADING: Processing signals with risk management...")
+
+            # LEARNING ALLOCATION SYSTEM
+            LEARNING_ALLOCATION = 0.05  # 5% of balance for learning
+            PRODUCTION_ALLOCATION = 0.95  # 95% for production
+
+            learning_budget = self.risk.paper_balance * LEARNING_ALLOCATION
+            production_budget = self.risk.paper_balance * PRODUCTION_ALLOCATION
+
+            MAX_TRADES = 2
+            MAX_CYCLE_SPEND = min(5.00, production_budget)  # Cap at production budget
+            all_signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
+            logger.info(f"Total signals across all strategies: {len(all_signals)}")
+            logger.info(f"Learning budget: ${learning_budget:.2f}, Production budget: ${production_budget:.2f}")
+
+            trades_placed = 0
+            cycle_spent = 0.0
+            learning_spent = 0.0
+            production_spent = 0.0
+            debates_used = 0
+            MAX_DEBATES = 4  # Max 4 AI calls per cycle (2 per trade x 2 trades)
+
+            for sig in all_signals:
+                if trades_placed >= MAX_TRADES:
+                    break
+
+                # Determine if this is a learning trade or production trade
+                is_learning_trade = (learning_spent < learning_budget and
+                                   sig.get('confidence', 0) < 70)  # Lower confidence = learning
+
+                # Calculate price and Kelly sizing
+                edge = sig.get('edge', 0)
+                prob = sig.get('model_prob', 0.5)
+                price = get_yes_price_dollars(
+                    next((m for m in markets if m.get('ticker') == sig['ticker']), {})
+                ) or 0.50
+                price_for_side = price if sig['side'] == 'yes' else (1 - price)
+
+                if edge > 0 and prob > 0:
+                    sig['count'] = self.risk.kelly_size(edge, prob, int(price_for_side * 100))
+
                 cost = sig['count'] * price_for_side
 
-            conf = sig.get('confidence', 0)
-            logger.info(
-                f"TOP PICK: {sig['ticker']} BUY {sig['side'].upper()} x{sig['count']} "
-                f"conf={conf:.0f} edge={edge:+.2f} cost=${cost:.2f} "
-                f"[{sig.get('strategy_type', '?')}]"
-            )
+                # Check budget constraints
+                if is_learning_trade:
+                    if learning_spent + cost > learning_budget:
+                        remaining = learning_budget - learning_spent
+                        if remaining < price_for_side:
+                            continue
+                        sig['count'] = max(1, int(remaining / price_for_side))
+                        cost = sig['count'] * price_for_side
+                else:
+                    if production_spent + cost > production_budget:
+                        remaining = production_budget - production_spent
+                        if remaining < price_for_side:
+                            continue
+                        sig['count'] = max(1, int(remaining / price_for_side))
+                        cost = sig['count'] * price_for_side
 
-            # Run Grok vs Claude debate before trading
-            if debates_used < MAX_DEBATES:
-                should_trade, sig, debate_log = run_debate(sig, price)
-                debates_used += 2  # Each debate uses 2 API calls
-                if not should_trade:
-                    logger.info(f"  Trade vetoed by debate: {debate_log}")
+                # Asymmetric reward filter (Soros Rule)
+                if not self.risk.passes_asymmetric_check(price_for_side, sig['side'], sig.get('confidence', 0)):
+                    logger.info(f"  SKIP {sig['ticker']}: fails asymmetric reward check (not 2:1 reward-to-risk)")
                     continue
-            else:
-                logger.info(f"  Debate limit reached, trading without debate")
 
-            traded = self.risk.record_paper_trade(
-                ticker=sig['ticker'],
-                side=sig['side'],
-                count=sig['count'],
-                entry_price=price_for_side,
-                strategy=sig.get('strategy_type', 'unknown'),
-                title=sig.get('title', ''),
-            )
+                trade_type = "LEARNING" if is_learning_trade else "PRODUCTION"
+                conf = sig.get('confidence', 0)
+                logger.info(
+                    f"{trade_type} PICK: {sig['ticker']} BUY {sig['side'].upper()} x{sig['count']} "
+                    f"conf={conf:.0f} edge={edge:+.2f} cost=${cost:.2f} "
+                    f"[{sig.get('strategy_type', '?')}]"
+                )
 
-            if not traded:
-                continue
+                # Run Grok vs Claude debate before trading (skip for learning trades to save API costs)
+                if not is_learning_trade and debates_used < MAX_DEBATES:
+                    should_trade, sig, debate_log = run_debate(sig, price)
+                    debates_used += 2  # Each debate uses 2 API calls
+                    if not should_trade:
+                        logger.info(f"  Trade vetoed by debate: {debate_log}")
+                        continue
+                elif is_learning_trade:
+                    logger.info(f"  Learning trade - skipping debate to save API costs")
+                else:
+                    logger.info(f"  Debate limit reached, trading without debate")
 
-            trades_placed += 1
-            cycle_spent += cost
+                # Mark strategy for learning vs production
+                strategy_name = sig.get('strategy_type', 'unknown')
+                if is_learning_trade:
+                    strategy_name = f"{strategy_name}_LEARNING"
 
-            if self.db:
-                reason = sig.get('reason', '')
-                if debates_used > 0:
-                    reason = f"[DEBATED] {reason}"
-                self.db.log_trade({
-                    'ticker': sig['ticker'],
-                    'action': 'buy',
-                    'side': sig['side'],
-                    'count': sig['count'],
-                    'strategy': sig.get('strategy_type', 'unknown'),
-                    'reason': reason,
-                    'confidence': sig.get('confidence', conf),
-                    'order_id': 'paper',
-                    'price': price_for_side,
-                })
+                traded = self.risk.record_paper_trade(
+                    ticker=sig['ticker'],
+                    side=sig['side'],
+                    count=sig['count'],
+                    entry_price=price_for_side,
+                    strategy=strategy_name,
+                    title=sig.get('title', ''),
+                )
 
-        logger.info(f"Cycle done: {trades_placed} trades, ${cycle_spent:.2f} spent")
+                if not traded:
+                    continue
+
+                trades_placed += 1
+                cycle_spent += cost
+
+                if is_learning_trade:
+                    learning_spent += cost
+                else:
+                    production_spent += cost
+
+                if self.db:
+                    reason = sig.get('reason', '')
+                    if not is_learning_trade and debates_used > 0:
+                        reason = f"[DEBATED] {reason}"
+                    elif is_learning_trade:
+                        reason = f"[LEARNING] {reason}"
+
+                    self.db.log_trade({
+                        'ticker': sig['ticker'],
+                        'action': 'buy',
+                        'side': sig['side'],
+                        'count': sig['count'],
+                        'strategy': strategy_name,
+                        'reason': reason,
+                        'confidence': sig.get('confidence', conf),
+                        'order_id': 'paper',
+                        'price': price_for_side,
+                    })
+
+            logger.info(f"Cycle done: {trades_placed} trades, ${cycle_spent:.2f} spent")
 
         # Forced paper trade if nothing fired
         if len(all_signals) == 0:
@@ -305,6 +569,10 @@ class KalshiBot:
 
         # Check for settled paper trades and calculate P&L
         self._check_settlements(markets)
+
+        # In data collection mode, also check for settled virtual trades
+        if self.operating_mode == 'data_collection':
+            self._check_virtual_settlements()
 
         self._log_status()
 
@@ -417,6 +685,91 @@ class KalshiBot:
         if settled:
             logger.info(f"Settled {len(settled)} paper trades: {settled}")
 
+    def _check_virtual_settlements(self):
+        """Check if any virtual trades from signal_evaluations have settled."""
+        if not self.db:
+            return
+
+        try:
+            # Get all unsettled virtual trades
+            unsettled = self.db.client.table('signal_evaluations') \
+                .select('id, ticker, side, virtual_entry_price, virtual_trade_size, potential_loss') \
+                .eq('settled', False) \
+                .eq('action', 'VIRTUAL_TRADE') \
+                .limit(200) \
+                .execute()
+
+            if not unsettled.data:
+                return
+
+            settled_count = 0
+            for signal in unsettled.data:
+                try:
+                    # Check if market has settled via Kalshi API
+                    market_data = self.client.get_market(signal['ticker'])
+                    if not market_data or 'market' not in market_data:
+                        continue
+
+                    market = market_data['market']
+                    result = market.get('result')
+                    settlement = market.get('settlement_value_dollars')
+
+                    if result is None and settlement is None:
+                        continue
+
+                    # Determine settlement price
+                    if result == 'yes' or result is True:
+                        settlement_price = 1.0
+                    elif result == 'no' or result is False:
+                        settlement_price = 0.0
+                    elif settlement is not None:
+                        settlement_price = float(settlement) if settlement else 0.0
+                    else:
+                        continue
+
+                    # Calculate virtual P&L
+                    entry_price = signal['virtual_entry_price'] or 0
+                    trade_size = signal['virtual_trade_size'] or 1.0
+                    side = signal['side']
+
+                    if side == 'yes':
+                        virtual_pnl = (settlement_price - entry_price) * trade_size
+                    else:  # side == 'no'
+                        virtual_pnl = (entry_price - settlement_price) * trade_size
+
+                    was_correct = virtual_pnl > 0
+                    risk_amount = signal['potential_loss'] or entry_price
+                    r_multiple = virtual_pnl / max(risk_amount, 0.01) if risk_amount else 0
+
+                    # Update the signal evaluation record
+                    self.db.client.table('signal_evaluations').update({
+                        'settled': True,
+                        'settlement_price': settlement_price,
+                        'virtual_pnl': virtual_pnl,
+                        'settled_at': datetime.utcnow().isoformat(),
+                        'was_correct': was_correct,
+                        'r_multiple': r_multiple
+                    }).eq('id', signal['id']).execute()
+
+                    settled_count += 1
+
+                    # Log settlement
+                    logger.info(
+                        f"📊 VIRTUAL SETTLEMENT: {signal['ticker']} {side.upper()} "
+                        f"P&L=${virtual_pnl:+.2f} {'✅' if was_correct else '❌'} "
+                        f"R={r_multiple:.1f}"
+                    )
+
+                except Exception as e:
+                    logger.error(f"Error settling virtual trade {signal['ticker']}: {e}")
+                    continue
+
+            if settled_count > 0:
+                logger.info(f"📊 Settled {settled_count} virtual trades")
+
+        except Exception as e:
+            logger.error(f"Virtual settlement check failed: {e}")
+
     def _log_status(self):
         self.risk.log_status()
         status = self.risk.get_status()
@@ -431,10 +784,42 @@ class KalshiBot:
 
     def run(self):
         logger.info("Bot running. Ctrl+C to stop.")
+
+        # SELF-IMPROVEMENT AUTO-RUN SETUP
+        last_analysis = None
+        ANALYSIS_INTERVAL_HOURS = 6
+
         try:
             while True:
                 try:
                     self.run_cycle()
+
+                    # AUTO SELF-IMPROVEMENT: Run analysis every 6 hours
+                    if (last_analysis is None or
+                        (datetime.utcnow() - last_analysis).total_seconds() > ANALYSIS_INTERVAL_HOURS * 3600):
+                        try:
+                            logger.info("🤖 Running self-improvement analysis...")
+                            improver = SelfImprover(self.db)
+
+                            # Run full analysis
+                            results = improver.run_full_analysis(lookback_days=7)
+
+                            # Apply new parameters (only in live_paper mode)
+                            if self.operating_mode == 'live_paper':
+                                success = improver.apply_parameters(results['new_parameters'])
+                                if success:
+                                    logger.info("✅ New parameters applied to live trading")
+                                else:
+                                    logger.warning("⚠️ Failed to apply new parameters")
+                            elif self.operating_mode == 'data_collection':
+                                logger.info("📊 Data collection mode - parameters logged but not applied")
+
+                            last_analysis = datetime.utcnow()
+                            logger.info(f"📈 Self-improvement complete. Next analysis in {ANALYSIS_INTERVAL_HOURS}h.")
+
+                        except Exception as e:
+                            logger.error(f"Self-improvement analysis failed: {e}")
+
                 except Exception as e:
                     logger.error(f"Cycle error: {e}", exc_info=True)
                 logger.info(f"Next cycle in {Config.CHECK_INTERVAL_SECONDS}s...")

@@ -7,6 +7,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from config import Config
 from utils.logger import setup_logger
+from utils.api_resilience import APIResilience
 
 logger = setup_logger('kalshi_client')
 
@@ -77,16 +78,19 @@ class KalshiAPIClient:
         }
 
     def _request(self, method, path, **kwargs):
-        """Make an authenticated request to the Kalshi API."""
-        url = f"{self.host}{path}"
-        headers = self._sign_request(method, path)
-        response = self.session.request(method, url, headers=headers, **kwargs)
-        if response.status_code == 401:
-            logger.error(f"401 Unauthorized: {method} {url}")
-            logger.error(f"Response: {response.text}")
-            logger.error(f"Key ID used: {self.key_id[:8]}...")
-        response.raise_for_status()
-        return response.json()
+        """Make an authenticated request to the Kalshi API with resilience."""
+        def api_call(timeout):
+            url = f"{self.host}{path}"
+            headers = self._sign_request(method, path)
+            response = self.session.request(method, url, headers=headers, timeout=timeout, **kwargs)
+            if response.status_code == 401:
+                logger.error(f"401 Unauthorized: {method} {url}")
+                logger.error(f"Response: {response.text}")
+                logger.error(f"Key ID used: {self.key_id[:8]}...")
+            response.raise_for_status()
+            return response.json()
+
+        return APIResilience.kalshi_call(api_call)
     
     def get_markets(self, status='open', limit=3000, **kwargs):
         """Get markets with cursor pagination to fetch all pages."""

@@ -16,9 +16,9 @@ from utils.market_helpers import get_yes_price, get_volume
 logger = setup_logger('cross_platform')
 
 POLYMARKET_URL = 'https://gamma-api.polymarket.com/markets'
-MIN_EDGE = 0.05  # 5% minimum price difference to trade
-MIN_SIMILARITY = 0.70  # 70% title similarity required
-MIN_SHARED_WORDS = 3   # At least 3 meaningful words in common
+MIN_EDGE = 0.08  # 8% minimum price difference to trade (more conservative)
+MIN_SIMILARITY = 0.80  # 80% title similarity required (stricter matching)
+MIN_SHARED_WORDS = 4   # At least 4 meaningful words in common (stricter)
 MAX_MATCHES = 20
 
 # Words to exclude from keyword matching (not meaningful for matching events)

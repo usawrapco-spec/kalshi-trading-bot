@@ -9,11 +9,11 @@ logger = setup_logger('risk_manager')
 
 MIN_CONFIDENCE = 30
 MAX_OPEN_POSITIONS = 50
-MAX_TRADE_PCT = 0.10       # Max 10% of starting balance per single trade ($10)
-MAX_STRATEGY_PCT = 0.20    # Max 20% of starting balance per strategy per cycle ($20)
+MAX_TRADE_PCT = 0.05       # Max 5% of starting balance per single trade ($5)
+MAX_STRATEGY_PCT = 0.10    # Max 10% of starting balance per strategy per cycle ($10)
 CASH_RESERVE_PCT = 0.30    # Never go below 30% of starting balance ($30)
-DAILY_LOSS_STOP = -50.0    # 50% of $100 paper balance
-KELLY_FRACTION = 0.25      # Quarter-Kelly for conservative sizing
+DAILY_LOSS_STOP = -30.0    # 30% of $100 paper balance
+KELLY_FRACTION = 0.10      # Tenth-Kelly for very conservative sizing
 STARTING_BALANCE = 100.0   # Reference for percentage calculations
 
 
@@ -31,6 +31,11 @@ class RiskManager:
         self.total_wins = 0
         self.total_pnl = 0.0
         self.strategy_stats = {}  # strategy -> {trades, wins, pnl}
+
+        # Circuit breaker for losing streaks
+        self.recent_trades = []  # Last 50 trades for circuit breaker
+        self.circuit_breaker_tripped = False
+
         logger.info(
             f"RiskManager: paper_balance=${self.paper_balance:.2f}, "
             f"kelly={KELLY_FRACTION}, max_positions={MAX_OPEN_POSITIONS}, "
@@ -40,6 +45,21 @@ class RiskManager:
     def set_balance(self, balance_cents):
         """Update from real API balance (not used in paper mode)."""
         pass  # Paper mode tracks its own balance
+
+    def passes_asymmetric_check(self, entry_price, side, confidence):
+        """Soros Rule: Only take trades where upside > 2x downside"""
+        if side == 'yes':
+            potential_profit = 1.0 - entry_price  # Pays $1 if correct
+            potential_loss = entry_price           # Lose entry if wrong
+        else:  # NO side
+            potential_profit = entry_price         # NO pays (1 - entry)
+            potential_loss = 1.0 - entry_price
+
+        if potential_loss <= 0:
+            return True  # No risk = always pass
+
+        reward_to_risk = potential_profit / potential_loss
+        return reward_to_risk >= 2.0  # Minimum 2:1 R:R
 
     def kelly_size(self, edge, probability, price_cents=50):
         """Kelly Criterion position sizing: bankroll * 0.25 * (edge * confidence) / (1 - market_price)."""
@@ -62,8 +82,8 @@ class RiskManager:
         bankroll_dollars = self.paper_balance
         risk_amount = bankroll_dollars * fraction
 
-        # Cap at 20% of balance
-        risk_amount = min(risk_amount, bankroll_dollars * MAX_TRADE_PCT)
+        # Cap at 2% of balance (conservative, down from 5%)
+        risk_amount = min(risk_amount, bankroll_dollars * 0.02)
 
         contracts = max(1, int(risk_amount / price_dollars))
         contracts = min(contracts, Config.MAX_ORDER_SIZE)
@@ -84,6 +104,28 @@ class RiskManager:
             return False
         return True
 
+    def check_circuit_breaker(self):
+        """Circuit breaker: shutdown if win rate < 30% in last 50 trades."""
+        if self.circuit_breaker_tripped:
+            return False
+
+        if len(self.recent_trades) < 10:  # Need minimum sample
+            return True
+
+        recent_wins = sum(1 for trade in self.recent_trades if trade.get('pnl', 0) > 0)
+        recent_win_rate = recent_wins / len(self.recent_trades)
+
+        if recent_win_rate < 0.30:  # Less than 30% win rate
+            logger.critical(
+                f"CIRCUIT BREAKER TRIPPED: {recent_win_rate:.1%} win rate "
+                f"({recent_wins}/{len(self.recent_trades)}) in last {len(self.recent_trades)} trades"
+            )
+            self.circuit_breaker_tripped = True
+            self.stopped = True
+            return False
+
+        return True
+
     def check_max_positions(self):
         active = len(self.positions)
         if active >= MAX_OPEN_POSITIONS:
@@ -100,6 +142,7 @@ class RiskManager:
     def can_trade(self, ticker, count, confidence=0, price_cents=50):
         checks = [
             ("Daily loss", self.check_daily_loss_limit()),
+            ("Circuit breaker", self.check_circuit_breaker()),
             ("Confidence", self.check_confidence(confidence)),
             ("Max positions", self.check_max_positions()),
         ]
@@ -191,6 +234,17 @@ class RiskManager:
             self.total_wins += 1
             self.strategy_stats[strategy]['wins'] += 1
         self.strategy_stats[strategy]['pnl'] += pnl
+
+        # Track recent trades for circuit breaker (keep last 50)
+        self.recent_trades.append({
+            'ticker': ticker,
+            'pnl': pnl,
+            'strategy': strategy,
+            'timestamp': datetime.now().isoformat(),
+            'won': won
+        })
+        if len(self.recent_trades) > 50:
+            self.recent_trades.pop(0)
 
         del self.positions[ticker]
         logger.info(

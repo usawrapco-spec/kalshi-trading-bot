@@ -12,7 +12,7 @@ from utils.market_helpers import get_yes_price, get_no_price, get_volume, safe_f
 
 logger = setup_logger('high_prob_lock')
 
-LOCK_MIN = 0.92  # 92c minimum YES price
+LOCK_MIN = 0.95  # 95c minimum YES price (better risk/reward)
 LOCK_MAX = 0.98  # 98c maximum (above this, ROI too thin)
 
 # Categories/keywords that are high-confidence when at 92c+
@@ -75,6 +75,10 @@ class HighProbLockStrategy(BaseStrategy):
 
         # Calculate ROI
         roi = (1.0 - price) / price  # e.g. buy at 0.95, win 1.00 = 5.3% ROI
+
+        # Require minimum 2% ROI (e.g. 96c+ gives ~4% ROI, 97c+ gives ~3% ROI)
+        if roi < 0.02:
+            return None
 
         # Higher confidence for markets closing soon
         hours_left = 999

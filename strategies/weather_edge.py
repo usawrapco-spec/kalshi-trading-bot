@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from strategies.base import BaseStrategy
 from utils.logger import setup_logger
 from utils.market_helpers import get_yes_price, get_volume
+from utils.api_resilience import APIResilience, resilient_strategy
 
 logger = setup_logger('weather_edge')
 
@@ -40,6 +41,7 @@ class WeatherEdgeStrategy(BaseStrategy):
         self._cache_time = None
         logger.info("WeatherEdge initialized (Open-Meteo GFS ensemble, 5% min edge)")
 
+    @resilient_strategy
     def analyze(self, markets):
         signals = []
 
@@ -87,34 +89,39 @@ class WeatherEdgeStrategy(BaseStrategy):
     def _refresh(self):
         self._cache = {}
         for series, city in CITIES.items():
-            try:
+            def api_call(timeout):
                 resp = requests.get(OPEN_METEO_URL, params={
                     'latitude': city['lat'], 'longitude': city['lon'],
                     'daily': 'temperature_2m_max',
                     'models': 'gfs_seamless',
                     'temperature_unit': 'fahrenheit',
                     'forecast_days': 7,
-                }, timeout=15)
+                }, timeout=timeout)
                 resp.raise_for_status()
-                daily = resp.json().get('daily', {})
-                dates = daily.get('time', [])
-                # Collect all ensemble member columns
-                keys = [k for k in daily if k.startswith('temperature_2m_max')]
-                if not keys:
-                    # Fallback: non-ensemble endpoint
-                    vals = daily.get('temperature_2m_max', [])
-                    if vals and dates:
-                        self._cache[series] = {dates[i]: [vals[i]] for i in range(len(dates)) if vals[i] is not None}
-                    continue
-                result = {}
-                for i, d in enumerate(dates):
-                    temps = [daily[k][i] for k in keys if i < len(daily[k]) and daily[k][i] is not None]
-                    if temps:
-                        result[d] = temps
-                self._cache[series] = result
-                logger.info(f"  Forecast loaded: {city['name']} ({len(result)} days, {len(keys)} members)")
-            except Exception as e:
-                logger.error(f"  Forecast failed for {city['name']}: {e}")
+                return resp.json()
+
+            forecast_data = APIResilience.open_meteo_call(api_call)
+            if not forecast_data:
+                logger.warning(f"  Forecast unavailable for {city['name']} - using cached data if available")
+                continue
+
+            daily = forecast_data.get('daily', {})
+            dates = daily.get('time', [])
+            # Collect all ensemble member columns
+            keys = [k for k in daily if k.startswith('temperature_2m_max')]
+            if not keys:
+                # Fallback: non-ensemble endpoint
+                vals = daily.get('temperature_2m_max', [])
+                if vals and dates:
+                    self._cache[series] = {dates[i]: [vals[i]] for i in range(len(dates)) if vals[i] is not None}
+                continue
+            result = {}
+            for i, d in enumerate(dates):
+                temps = [daily[k][i] for k in keys if i < len(daily[k]) and daily[k][i] is not None]
+                if temps:
+                    result[d] = temps
+            self._cache[series] = result
+            logger.info(f"  Forecast loaded: {city['name']} ({len(result)} days, {len(keys)} members)")
         self._cache_time = datetime.utcnow()
 
     def _evaluate(self, m):

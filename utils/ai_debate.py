@@ -16,6 +16,7 @@ import re
 import json
 import requests
 from utils.logger import setup_logger
+from utils.api_resilience import APIResilience
 
 logger = setup_logger('ai_debate')
 
@@ -54,7 +55,8 @@ def _ask_grok(title, price, side, edge, api_key):
         f"Reply with ONLY a JSON object: "
         f'{{\"probability\": 0.XX, \"confidence\": 0-100, \"reasoning\": \"one sentence\"}}'
     )
-    try:
+
+    def api_call(timeout):
         resp = requests.post(GROK_URL, headers={
             'Authorization': f'Bearer {api_key}',
             'Content-Type': 'application/json',
@@ -63,13 +65,12 @@ def _ask_grok(title, price, side, edge, api_key):
             'messages': [{'role': 'user', 'content': prompt}],
             'temperature': 0.1,
             'max_tokens': 200,
-        }, timeout=30)
+        }, timeout=timeout)
         resp.raise_for_status()
         text = resp.json()['choices'][0]['message']['content'].strip()
         return _parse_json_response(text)
-    except Exception as e:
-        logger.debug(f"Grok debate error: {e}")
-        return None
+
+    return APIResilience.grok_call(api_call)
 
 
 def _ask_claude(title, price, side, edge, grok_prob, grok_reasoning, api_key):
@@ -82,7 +83,8 @@ def _ask_claude(title, price, side, edge, grok_prob, grok_reasoning, api_key):
         f"Reply with ONLY a JSON object: "
         f'{{\"probability\": 0.XX, \"confidence\": 0-100, \"reasoning\": \"one sentence\"}}'
     )
-    try:
+
+    def api_call(timeout):
         resp = requests.post(CLAUDE_URL, headers={
             'x-api-key': api_key,
             'anthropic-version': '2023-06-01',
@@ -92,13 +94,12 @@ def _ask_claude(title, price, side, edge, grok_prob, grok_reasoning, api_key):
             'max_tokens': 200,
             'temperature': 0.2,
             'messages': [{'role': 'user', 'content': prompt}],
-        }, timeout=30)
+        }, timeout=timeout)
         resp.raise_for_status()
         text = resp.json()['content'][0]['text'].strip()
         return _parse_json_response(text)
-    except Exception as e:
-        logger.debug(f"Claude debate error: {e}")
-        return None
+
+    return APIResilience.claude_call(api_call)
 
 
 def run_debate(signal, market_price):

@@ -7,16 +7,23 @@ cross-market pricing within the same event for risk-free-ish opportunities.
 from strategies.base import BaseStrategy
 from utils.logger import setup_logger
 from utils.market_helpers import get_price, get_yes_price, get_no_price
+from utils.api_resilience import resilient_strategy
 
 logger = setup_logger('prob_arb')
 
-FEE_RATE = 0.07
+# Kalshi charges ~3.5% fee on the winning position
+FEE_RATE = 0.035
+
+# Minimum profitable gap after fees (conservative estimate)
+MIN_PROFITABLE_GAP = 0.08  # 8% gap needed to overcome fees + slippage
 
 
-def kalshi_fee(contracts, price):
-    if price <= 0 or price >= 1:
+def kalshi_fee(cost_basis):
+    """Estimate Kalshi fees on a position. Kalshi charges ~3.5% on winning positions."""
+    if cost_basis <= 0:
         return 0
-    return round(FEE_RATE * contracts * price * (1 - price) + 0.005, 2)
+    # Conservative estimate: fees are ~3.5% of the position value
+    return cost_basis * FEE_RATE
 
 
 class ProbabilityArbStrategy(BaseStrategy):
@@ -26,6 +33,7 @@ class ProbabilityArbStrategy(BaseStrategy):
         super().__init__(client, risk_manager, db)
         logger.info("ProbabilityArb initialized (fee-adjusted YES+NO mispricing)")
 
+    @resilient_strategy
     def analyze(self, markets):
         signals = []
 
@@ -42,15 +50,19 @@ class ProbabilityArbStrategy(BaseStrategy):
             no_price = get_price(m, ['no_bid', 'no_bid_dollars'])
 
             # If we have both yes and no prices, check if they sum to less than $1
-            if yes_price > 0 and no_price > 0:
+            if yes_price > 0 and no_price > 0 and yes_price < 0.95 and no_price < 0.95:
                 arb_checked += 1
                 total = yes_price + no_price
-                if total < 0.98:
-                    gap = 1.0 - total
-                    fee_yes = kalshi_fee(1, yes_price)
-                    fee_no = kalshi_fee(1, no_price)
-                    net_profit = gap - fee_yes - fee_no
-                    if net_profit > 0:
+                gap = 1.0 - total
+
+                # Only consider if gap is large enough to overcome fees
+                if gap >= MIN_PROFITABLE_GAP:
+                    # Estimate profit: buy both sides, one wins
+                    # Cost: $1 total, get back $1 from winner minus fees
+                    est_fee = kalshi_fee(1.0)  # Fee on winning $1 position
+                    net_profit = gap - est_fee
+
+                    if net_profit > 0.01:  # At least 1 cent profit per dollar
                         arb_found += 1
                         ticker = m.get('ticker', '')
                         signals.append({
@@ -58,7 +70,7 @@ class ProbabilityArbStrategy(BaseStrategy):
                             'side': 'yes', 'count': 1, 'confidence': 95,
                             'strategy_type': 'prob_arb',
                             'edge': net_profit, 'model_prob': 0.99,
-                            'reason': f"ProbArb: YES={yes_price:.2f}+NO={no_price:.2f}={total:.2f}, net={net_profit:.3f}",
+                            'reason': f"ProbArb: YES={yes_price:.2f}+NO={no_price:.2f}={total:.2f}, gap={gap:.1%}, net={net_profit:.3f} after {est_fee:.3f} fees",
                         })
 
             # Spread opportunity

@@ -39,6 +39,7 @@ class Config:
     ENABLE_HIGH_PROB = os.getenv('ENABLE_HIGH_PROB', 'true').lower() == 'true'
     ENABLE_ORDERBOOK = os.getenv('ENABLE_ORDERBOOK', 'true').lower() == 'true'
     ENABLE_CROSS_PLATFORM = os.getenv('ENABLE_CROSS_PLATFORM', 'true').lower() == 'true'
+    ENABLE_MARKET_MAKING = os.getenv('ENABLE_MARKET_MAKING', 'false').lower() == 'true'
 
     # Monitoring
     CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', 30))

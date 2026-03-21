@@ -18,8 +18,18 @@ SPORTS_KEYWORDS = [
     'college basketball', 'college football', 'march madness',
     'basketball', 'football', 'hockey', 'baseball', 'soccer',
     'spread', 'moneyline', 'over under', 'total points',
-    'win', 'beat', 'defeat', 'score', 'game', 'match', 'playoff',
-    'champion', 'tournament', 'series', 'super bowl', 'world series',
+    'playoff', 'champion', 'tournament', 'series', 'super bowl', 'world series',
+]
+
+# Generic terms that could match politics - only allow in sports context
+GENERIC_SPORTS_TERMS = ['win', 'beat', 'defeat', 'score', 'game', 'match']
+
+# Political exclusion keywords - if any of these appear, it's not sports
+POLITICAL_KEYWORDS = [
+    'senate', 'congress', 'president', 'governor', 'election', 'democrat', 'republican',
+    'trump', 'biden', 'party', 'vote', 'poll', 'pardon', 'impeach', 'senator',
+    'ohio', 'pennsylvania', 'arizona', 'georgia', 'nevada', 'idaho', 'wisconsin',
+    'north carolina', 'michigan', 'house', 'senate', 'midterm', 'primary',
 ]
 
 
@@ -99,7 +109,18 @@ class SportsNOStrategy(BaseStrategy):
         title = (m.get('title') or '').lower()
         category = (m.get('category') or '').lower()
         combined = f"{ticker} {title} {category}"
-        return any(kw in combined for kw in SPORTS_KEYWORDS)
+
+        # First check: exclude political markets
+        if any(kw in combined for kw in POLITICAL_KEYWORDS):
+            return False
+
+        # Check for specific sports keywords
+        has_sports_keywords = any(kw in combined for kw in SPORTS_KEYWORDS)
+
+        # Allow generic terms only if we also have specific sports context
+        has_generic_terms = any(kw in combined for kw in GENERIC_SPORTS_TERMS)
+
+        return has_sports_keywords or (has_generic_terms and any(kw in combined for kw in ['basketball', 'football', 'baseball', 'hockey', 'soccer', 'ncaa', 'nba', 'nfl', 'mlb', 'nhl']))
 
     def execute(self, signal, dry_run=False):
         if not self.can_execute(signal):

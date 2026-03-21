@@ -11,6 +11,7 @@ import requests
 from strategies.base import BaseStrategy
 from utils.logger import setup_logger
 from utils.market_helpers import get_yes_price, get_volume
+from utils.api_resilience import APIResilience, resilient_strategy
 
 logger = setup_logger('grok_news')
 
@@ -32,6 +33,7 @@ class GrokNewsStrategy(BaseStrategy):
         else:
             logger.info(f"GrokNews initialized (model={MODEL}, max {MAX_PER_CYCLE}/cycle, edge>{MIN_EDGE:.0%})")
 
+    @resilient_strategy
     def analyze(self, markets):
         if not self.api_key:
             return []
@@ -84,7 +86,7 @@ class GrokNewsStrategy(BaseStrategy):
             f'{{\"probability\": 0.XX, \"confidence\": 0.XX, \"reasoning\": \"one sentence\"}}'
         )
 
-        try:
+        def api_call(timeout):
             resp = requests.post(XAI_URL, headers={
                 'Authorization': f'Bearer {self.api_key}',
                 'Content-Type': 'application/json',
@@ -93,33 +95,14 @@ class GrokNewsStrategy(BaseStrategy):
                 'messages': [{'role': 'user', 'content': prompt}],
                 'temperature': 0.1,
                 'max_tokens': 250,
-            }, timeout=30)
+            }, timeout=timeout)
             resp.raise_for_status()
             text = resp.json()['choices'][0]['message']['content'].strip()
-        except Exception as e:
-            logger.debug(f"GrokNews API error for {ticker}: {e}")
-            return None
+            return self._parse_grok_response(text)
 
-        # Parse JSON from response
-        try:
-            # Strip markdown fences
-            clean = text
-            if '```' in clean:
-                clean = re.sub(r'```\w*\n?', '', clean).strip()
-            result = json.loads(clean)
-        except json.JSONDecodeError:
-            # Fallback: extract number
-            prob_match = re.search(r'"probability"\s*:\s*([\d.]+)', text)
-            conf_match = re.search(r'"confidence"\s*:\s*([\d.]+)', text)
-            if prob_match:
-                result = {
-                    'probability': float(prob_match.group(1)),
-                    'confidence': float(conf_match.group(1)) if conf_match else 0.5,
-                    'reasoning': text[:100],
-                }
-            else:
-                logger.debug(f"GrokNews parse failed for {ticker}: {text[:80]}")
-                return None
+        result = APIResilience.grok_call(api_call)
+        if not result:
+            return None
 
         grok_prob = result.get('probability', 0.5)
         grok_conf = result.get('confidence', 0.5)
@@ -160,6 +143,29 @@ class GrokNewsStrategy(BaseStrategy):
             'edge': actual_edge, 'model_prob': model_prob,
             'reason': f"GrokNews: {side.upper()} grok={grok_prob:.0%} vs market={yes_price:.0%}, edge={actual_edge:+.0%}, conf={grok_conf:.0%} - {reasoning}",
         }
+
+    def _parse_grok_response(self, text):
+        """Parse JSON response from Grok API."""
+        try:
+            # Strip markdown fences
+            clean = text
+            if '```' in clean:
+                clean = re.sub(r'```\w*\n?', '', clean).strip()
+            result = json.loads(clean)
+        except json.JSONDecodeError:
+            # Fallback: extract number
+            prob_match = re.search(r'"probability"\s*:\s*([\d.]+)', text)
+            conf_match = re.search(r'"confidence"\s*:\s*([\d.]+)', text)
+            if prob_match:
+                result = {
+                    'probability': float(prob_match.group(1)),
+                    'confidence': float(conf_match.group(1)) if conf_match else 0.5,
+                    'reasoning': text[:100],
+                }
+            else:
+                logger.debug(f"GrokNews parse failed: {text[:80]}")
+                return None
+        return result
 
     def execute(self, signal, dry_run=False):
         if not self.can_execute(signal):
