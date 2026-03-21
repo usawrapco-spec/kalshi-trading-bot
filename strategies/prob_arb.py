@@ -24,7 +24,8 @@ def get_price(m, field_list):
     """Try multiple field names, normalize to 0-1 dollars."""
     for f in field_list:
         v = m.get(f)
-        if v is not None and v > 0:
+        if v is not None and float(v) > 0:
+            v = float(v)
             return v / 100.0 if v > 1 else v
     return 0.0
 

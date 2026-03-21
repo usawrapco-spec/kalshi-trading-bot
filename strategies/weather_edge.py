@@ -34,7 +34,8 @@ def get_yes_price(m):
     """Extract YES price in dollars (0-1) from a market dict, trying all known fields."""
     for field in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
         v = m.get(field)
-        if v is not None and v > 0:
+        if v is not None and float(v) > 0:
+            v = float(v)
             return v / 100.0 if v > 1 else v  # normalize cents to dollars
     return 0.0
 

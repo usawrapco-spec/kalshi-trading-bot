@@ -23,7 +23,8 @@ MIN_CONFIDENCE = 0.70
 def get_yes_price(m):
     for f in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
         v = m.get(f)
-        if v is not None and v > 0:
+        if v is not None and float(v) > 0:
+            v = float(v)
             return v / 100.0 if v > 1 else v
     return 0.0
 

@@ -26,7 +26,8 @@ def get_yes_price_cents(m):
     """Get YES price in cents (0-100)."""
     for f in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
         v = m.get(f)
-        if v is not None and v > 0:
+        if v is not None and float(v) > 0:
+            v = float(v)
             return int(v * 100) if v <= 1 else int(v)
     return 0
 

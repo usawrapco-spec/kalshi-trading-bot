@@ -35,7 +35,8 @@ def get_yes_price_dollars(m):
     """Extract YES price as 0-1 dollars from any known field."""
     for f in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
         v = m.get(f)
-        if v is not None and v > 0:
+        if v is not None and float(v) > 0:
+            v = float(v)
             return v / 100.0 if v > 1 else v
     return 0.0
 

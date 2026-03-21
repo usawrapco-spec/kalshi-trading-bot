@@ -16,7 +16,8 @@ logger = setup_logger('near_certainty')
 def get_yes_cents(m):
     for f in ('yes_bid', 'yes_bid_dollars', 'yes_ask', 'yes_ask_dollars', 'last_price', 'last_price_dollars'):
         v = m.get(f)
-        if v is not None and v > 0:
+        if v is not None and float(v) > 0:
+            v = float(v)
             return int(v * 100) if v <= 1 else int(v)
     return 0
 
@@ -24,7 +25,8 @@ def get_yes_cents(m):
 def get_no_cents(m):
     for f in ('no_bid', 'no_bid_dollars', 'no_ask', 'no_ask_dollars'):
         v = m.get(f)
-        if v is not None and v > 0:
+        if v is not None and float(v) > 0:
+            v = float(v)
             return int(v * 100) if v <= 1 else int(v)
     yes = get_yes_cents(m)
     return 100 - yes if yes > 0 else 0
