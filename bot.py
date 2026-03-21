@@ -307,7 +307,7 @@ class KalshiBot:
             # MARKET TRIMMING: Take top 50 most liquid markets only
             # Sort by volume descending, then take top 50 for focused trading
             all_markets.sort(key=lambda m: get_volume(m), reverse=True)
-            markets = all_markets[:200]  # Top 200 most liquid markets
+            markets = all_markets  # Top 200 most liquid markets
 
             logger.info(f"Market trimming: {len(all_markets)} total -> {len(markets)} top volume markets")
 
