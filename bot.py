@@ -18,6 +18,7 @@ import os
 import sys
 import time
 import argparse
+import concurrent.futures
 from datetime import datetime
 
 from config import Config
@@ -322,28 +323,36 @@ class KalshiBot:
         if markets:
             logger.info(f"  Keys: {list(markets[0].keys())}")
 
-        # Phase 1: Collect signals from ALL strategies
+        # Phase 1: Collect signals from ALL strategies (PARALLEL EXECUTION)
         all_signals = []
-        for strategy in self.strategies:
-            logger.info(f"--- Running {strategy.name} ---")
+
+        def run_strategy(strategy, markets):
+            """Run a single strategy and return its signals."""
             try:
                 signals = strategy.analyze(markets)
+                return strategy.name, signals or []
             except Exception as e:
                 logger.error(f"{strategy.name} crashed: {e}", exc_info=True)
-                signals = []
+                return strategy.name, []
 
-            if signals:
-                logger.info(f"{strategy.name}: {len(signals)} signals")
-                all_signals.extend(signals)
-            else:
-                logger.info(f"{strategy.name}: 0 signals")
+        logger.info(f"🚀 Running {len(self.strategies)} strategies in parallel...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(run_strategy, s, markets): s for s in self.strategies}
+            for future in concurrent.futures.as_completed(futures):
+                name, signals = future.result()
+                if signals:
+                    logger.info(f"{name}: {len(signals)} signals")
+                    all_signals.extend(signals)
+                else:
+                    logger.info(f"{name}: 0 signals")
 
         # Phase 2: MODE-SPECIFIC SIGNAL PROCESSING
         if self.operating_mode == 'data_collection':
             # DATA COLLECTION MODE: Log ALL signals, virtual trading only
             logger.info("🎯 DATA COLLECTION: Processing all signals for learning...")
 
-            # Log ALL signals to signal_evaluations table
+            # SPEED OPTIMIZATION: Batch Supabase writes instead of individual inserts
+            batch_signals = []
             signals_logged = 0
             virtual_trades = 0
 
@@ -370,65 +379,78 @@ class KalshiBot:
                     action = 'VIRTUAL_TRADE' if passes_asymmetric else 'SKIP'
                     skip_reason = 'Fails asymmetric reward check' if not passes_asymmetric else None
 
-                    # Log to signal_evaluations table
-                    if self.db:
-                        signal_data = {
-                            'cycle_id': f"cycle_{int(time.time())}",
-                            'strategy': sig.get('strategy_type', 'unknown'),
-                            'ticker': sig['ticker'],
-                            'market_title': sig.get('title', ''),
-                            'event_ticker': market.get('event_ticker', ''),
-                            'side': sig['side'],
-                            'yes_price': yes_price,
-                            'no_price': no_price,
-                            'spread': abs(yes_price - no_price),
-                            'volume_24h': get_volume(market),
-                            'time_to_close_hours': None,  # Could calculate from close_date
-                            'our_probability': prob,
-                            'market_probability': price_for_side,
-                            'edge': edge,
-                            'confidence': sig.get('confidence', 0),
-                            'action': action,
-                            'skip_reason': skip_reason,
-                            'virtual_trade_size': virtual_size if action == 'VIRTUAL_TRADE' else None,
-                            'virtual_entry_price': price_for_side if action == 'VIRTUAL_TRADE' else None,
-                            'potential_profit': potential_profit,
-                            'potential_loss': potential_loss,
-                            'reward_to_risk': reward_to_risk,
-                            'kelly_fraction': 0.1,  # Default
-                        }
+                    # Prepare signal data for batch insert
+                    signal_data = {
+                        'cycle_id': f"cycle_{int(time.time())}",
+                        'strategy': sig.get('strategy_type', 'unknown'),
+                        'ticker': sig['ticker'],
+                        'market_title': sig.get('title', ''),
+                        'event_ticker': market.get('event_ticker', ''),
+                        'side': sig['side'],
+                        'yes_price': yes_price,
+                        'no_price': no_price,
+                        'spread': abs(yes_price - no_price),
+                        'volume_24h': get_volume(market),
+                        'time_to_close_hours': None,  # Could calculate from close_date
+                        'our_probability': prob,
+                        'market_probability': price_for_side,
+                        'edge': edge,
+                        'confidence': sig.get('confidence', 0),
+                        'action': action,
+                        'skip_reason': skip_reason,
+                        'virtual_trade_size': virtual_size if action == 'VIRTUAL_TRADE' else None,
+                        'virtual_entry_price': price_for_side if action == 'VIRTUAL_TRADE' else None,
+                        'potential_profit': potential_profit,
+                        'potential_loss': potential_loss,
+                        'reward_to_risk': reward_to_risk,
+                        'kelly_fraction': 0.1,  # Default
+                    }
 
-                        # Add AI opinions if available
-                        if hasattr(sig, 'grok_probability'):
-                            signal_data.update({
-                                'grok_probability': sig.get('grok_probability'),
-                                'grok_recommendation': sig.get('grok_recommendation'),
-                                'claude_probability': sig.get('claude_probability'),
-                                'claude_recommendation': sig.get('claude_recommendation'),
-                                'debate_agreement': sig.get('debate_agreement', False),
-                            })
+                    # Add AI opinions if available
+                    if hasattr(sig, 'grok_probability'):
+                        signal_data.update({
+                            'grok_probability': sig.get('grok_probability'),
+                            'grok_recommendation': sig.get('grok_recommendation'),
+                            'claude_probability': sig.get('claude_probability'),
+                            'claude_recommendation': sig.get('claude_recommendation'),
+                            'debate_agreement': sig.get('debate_agreement', False),
+                        })
 
-                        self.db.client.table('signal_evaluations').insert(signal_data).execute()
-                        signals_logged += 1
+                    batch_signals.append(signal_data)
+                    signals_logged += 1
 
-                        if action == 'VIRTUAL_TRADE':
-                            virtual_trades += 1
-                            logger.info(
-                                f"📊 VIRTUAL TRADE: {sig['ticker']} {sig['side'].upper()} "
-                                f"edge={edge:+.2f} conf={sig.get('confidence', 0):.0f} "
-                                f"R:R={reward_to_risk:.1f} [{sig.get('strategy_type', '?')}]"
-                            )
-                        else:
-                            logger.debug(
-                                f"📊 SKIP: {sig['ticker']} {skip_reason} "
-                                f"edge={edge:+.2f} R:R={reward_to_risk:.1f}"
-                            )
+                    if action == 'VIRTUAL_TRADE':
+                        virtual_trades += 1
+                        logger.info(
+                            f"📊 VIRTUAL TRADE: {sig['ticker']} {sig['side'].upper()} "
+                            f"edge={edge:+.2f} conf={sig.get('confidence', 0):.0f} "
+                            f"R:R={reward_to_risk:.1f} [{sig.get('strategy_type', '?')}]"
+                        )
+                    else:
+                        logger.debug(
+                            f"📊 SKIP: {sig['ticker']} {skip_reason} "
+                            f"edge={edge:+.2f} R:R={reward_to_risk:.1f}"
+                        )
 
                 except Exception as e:
-                    logger.error(f"Error logging signal for {sig.get('ticker', 'unknown')}: {e}")
+                    logger.error(f"Error processing signal for {sig.get('ticker', 'unknown')}: {e}")
                     continue
 
-            logger.info(f"📊 DATA COLLECTION: Logged {signals_logged} signals, {virtual_trades} virtual trades")
+            # BATCH INSERT: Insert all signals at once for speed
+            if batch_signals and self.db:
+                try:
+                    self.db.client.table('signal_evaluations').insert(batch_signals).execute()
+                    logger.info(f"🚀 BATCH INSERT: {len(batch_signals)} signal evaluations logged in one operation")
+                except Exception as e:
+                    logger.error(f"Batch insert failed, falling back to individual inserts: {e}")
+                    # Fallback to individual inserts
+                    for item in batch_signals:
+                        try:
+                            self.db.client.table('signal_evaluations').insert(item).execute()
+                        except:
+                            pass
+
+            logger.info(f"📊 DATA COLLECTION: Processed {signals_logged} signals, {virtual_trades} virtual trades")
 
         else:
             # LIVE PAPER/REAL MODE: Normal trading with risk management
@@ -504,17 +526,25 @@ class KalshiBot:
                     f"[{sig.get('strategy_type', '?')}]"
                 )
 
-                # Run Grok vs Claude debate before trading (skip for learning trades to save API costs)
-                if not is_learning_trade and debates_used < MAX_DEBATES:
+                # SPEED OPTIMIZATION: Skip AI debate for speed-sensitive strategies
+                # Only run debate for AI opinion strategies (GrokNews, MentionMarkets)
+                strategy_name = sig.get('strategy_type', 'unknown')
+                DEBATE_STRATEGIES = {'GrokNewsAnalysis', 'grok_news', 'MentionMarkets', 'mention_markets'}
+
+                needs_debate = any(ds.lower() in strategy_name.lower() for ds in DEBATE_STRATEGIES)
+
+                if needs_debate and not is_learning_trade and debates_used < MAX_DEBATES:
                     should_trade, sig, debate_log = run_debate(sig, price)
                     debates_used += 2  # Each debate uses 2 API calls
                     if not should_trade:
                         logger.info(f"  Trade vetoed by debate: {debate_log}")
                         continue
-                elif is_learning_trade:
+                elif needs_debate and is_learning_trade:
                     logger.info(f"  Learning trade - skipping debate to save API costs")
-                else:
+                elif needs_debate:
                     logger.info(f"  Debate limit reached, trading without debate")
+                else:
+                    logger.info(f"  Data-driven strategy ({strategy_name}) - skipping debate for speed")
 
                 # Mark strategy for learning vs production
                 strategy_name = sig.get('strategy_type', 'unknown')

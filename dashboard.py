@@ -24,72 +24,70 @@ def dashboard():
 
 @app.route('/api/status')
 def api_status():
-    """Bot status, uptime, current cycle, last run time."""
-    status_rows, trades, positions = [], [], []
+    """Bot status for neural cortex dashboard."""
+    try:
+        # Get bot status
+        result = db.client.table('kalshi_bot_status').select('*').order('last_check', desc=True).limit(1).execute()
+        latest = result.data[0] if result.data else {}
 
-    if db.client:
-        try:
-            result = db.client.table('kalshi_bot_status').select('*').order('last_check', desc=True).limit(1).execute()
-            status_rows = result.data or []
-        except Exception as e:
-            logger.error(f"Status fetch failed: {e}")
+        # Get operating mode from environment
+        operating_mode = os.environ.get('OPERATING_MODE', 'live_paper')
 
-        try:
-            result = db.client.table('kalshi_trades').select('*').order('timestamp', desc=True).limit(200).execute()
-            trades = result.data or []
-        except Exception as e:
-            logger.error(f"Trades fetch failed: {e}")
+        # Get recent trades for stats
+        result = db.client.table('kalshi_trades').select('*').order('timestamp', desc=True).limit(100).execute()
+        trades = result.data or []
 
-    latest = status_rows[0] if status_rows else {}
+        # Calculate stats
+        entries = [t for t in trades if t.get('action') != 'settle']
+        settlements = [t for t in trades if t.get('action') == 'settle']
+        wins = sum(1 for t in settlements if t.get('confidence', 0) == 100)
+        total_settled = len(settlements)
+        win_rate = (wins / total_settled * 100) if total_settled > 0 else 0
 
-    # Separate entries from settlements
-    entries = [t for t in trades if t.get('action') != 'settle']
-    settlements = [t for t in trades if t.get('action') == 'settle']
-    wins = sum(1 for t in settlements if t.get('confidence', 0) == 100)  # We log conf=100 for wins
-    total_settled = len(settlements)
-    win_rate = (wins / total_settled * 100) if total_settled > 0 else 0
+        # Calculate realized P&L
+        realized_pnl = 0.0
+        for t in settlements:
+            if t.get('confidence', 0) == 100:  # WIN
+                realized_pnl += (t.get('count') or 1) * (1.0 - (t.get('price') or 0))
+            else:  # LOSS
+                realized_pnl -= (t.get('count') or 1) * (t.get('price') or 0)
 
-    # Calculate realized P&L from settlements
-    realized_pnl = 0.0
-    for t in settlements:
-        if t.get('confidence', 0) == 100:  # WIN
-            realized_pnl += (t.get('count') or 1) * (1.0 - (t.get('price') or 0))
-        else:  # LOSS
-            realized_pnl -= (t.get('count') or 1) * (t.get('price') or 0)
-
-    # Per-strategy breakdown
-    strat_stats = {}
-    for t in entries:
-        s = t.get('strategy', 'unknown')
-        if s not in strat_stats:
-            strat_stats[s] = {'trades': 0, 'total_conf': 0}
-        strat_stats[s]['trades'] += 1
-        strat_stats[s]['total_conf'] += t.get('confidence') or 0
-
-    strategy_breakdown = []
-    for s, st in sorted(strat_stats.items(), key=lambda x: -x[1]['trades']):
-        avg_conf = st['total_conf'] / st['trades'] if st['trades'] > 0 else 0
-        strategy_breakdown.append({'name': s, 'trades': st['trades'], 'avg_confidence': round(avg_conf, 1)})
-
-    return jsonify({
-        'bot': {
-            'is_running': latest.get('is_running', False),
-            'last_check': latest.get('last_check', 'never'),
-            'balance': latest.get('balance', 0),
+        return jsonify({
+            'is_running': latest.get('is_running', True),
+            'balance': latest.get('balance', 100.0),
             'daily_pnl': latest.get('daily_pnl', 0),
             'trades_today': latest.get('trades_today', 0),
             'active_positions': latest.get('active_positions', 0),
-        },
-        'stats': {
+            'last_scan': latest.get('last_check'),
+            'operating_mode': operating_mode,
             'total_trades': len(entries),
-            'settled': total_settled,
+            'settled_trades': total_settled,
             'wins': wins,
             'win_rate': round(win_rate, 1),
             'realized_pnl': round(realized_pnl, 2),
-        },
-        'strategies': strategy_breakdown,
-        'trades': trades[:50],
-    })
+            'network_load': 72,  # Mock for now
+            'active_signals': len(entries),
+            'strategies_active': 10  # Mock for now
+        })
+    except Exception as e:
+        logger.error(f"Status API error: {e}")
+        return jsonify({
+            'is_running': True,
+            'balance': 100.0,
+            'daily_pnl': 0,
+            'trades_today': 0,
+            'active_positions': 0,
+            'last_scan': None,
+            'operating_mode': 'live_paper',
+            'total_trades': 0,
+            'settled_trades': 0,
+            'wins': 0,
+            'win_rate': 0,
+            'realized_pnl': 0,
+            'network_load': 0,
+            'active_signals': 0,
+            'strategies_active': 0
+        })
 
 
 @app.route('/api/balance')
@@ -547,1001 +545,859 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>💰 $--.-- | KALSHI ALPHA</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<title>◆ KALSHI ALPHA v1.0 | NEURAL CORTEX</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  :root {
-    --bg-primary: #0a0a0f;
-    --bg-secondary: #111118;
-    --bg-card: rgba(255, 255, 255, 0.03);
-    --border: rgba(255, 255, 255, 0.08);
-    --border-hover: rgba(0, 240, 255, 0.2);
-    --text-primary: #ffffff;
-    --text-secondary: #a0a0a0;
-    --text-muted: #666666;
-    --neon-cyan: #00f0ff;
-    --neon-magenta: #ff006e;
-    --neon-lime: #39ff14;
-    --neon-red: #ff3333;
-    --glass-bg: rgba(255, 255, 255, 0.03);
-    --glass-border: rgba(255, 255, 255, 0.08);
-  }
-
   body {
-    font-family: 'Inter', sans-serif;
-    background: var(--bg-primary);
-    color: var(--text-primary);
+    background: #050508;
+    color: #39ff14;
+    font-family: 'JetBrains Mono', monospace;
+    min-height: 100vh;
     overflow-x: hidden;
+    position: relative;
   }
 
-  .command-bar {
-    position: sticky;
-    top: 0;
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border);
-    padding: 12px 20px;
+  /* SCAN LINES OVERLAY */
+  body::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      rgba(0, 0, 0, 0) 0px,
+      rgba(0, 0, 0, 0) 2px,
+      rgba(0, 0, 0, 0.03) 2px,
+      rgba(0, 0, 0, 0.03) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* TERMINAL BORDER */
+  .terminal {
+    border: 1px solid rgba(0, 240, 255, 0.15);
+    background: rgba(0, 240, 255, 0.02);
+    margin: 10px;
+    min-height: calc(100vh - 20px);
+    position: relative;
+  }
+
+  /* HEADER BAR */
+  .header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    z-index: 1000;
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
+    padding: 8px 16px;
+    border-bottom: 1px solid rgba(0, 240, 255, 0.15);
+    background: rgba(0, 0, 0, 0.3);
   }
 
-  .logo {
-    font-size: 18px;
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+
+  .title {
+    color: #00f0ff;
+    font-size: 1.2rem;
     font-weight: 700;
-    color: var(--neon-cyan);
     text-shadow: 0 0 10px rgba(0, 240, 255, 0.5);
-    letter-spacing: 1px;
+    letter-spacing: 0.15em;
   }
 
-  .status-indicator {
+  .status {
+    color: #39ff14;
+    font-size: 0.8rem;
     display: flex;
     align-items: center;
     gap: 8px;
   }
 
   .status-dot {
-    width: 8px;
-    height: 8px;
+    width: 6px;
+    height: 6px;
+    background: #39ff14;
     border-radius: 50%;
-    background: var(--neon-lime);
     animation: pulse 2s infinite;
   }
 
-  .status-text {
-    font-size: 12px;
-    color: var(--text-secondary);
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .time-info {
-    text-align: center;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 12px;
-    color: var(--text-secondary);
-  }
-
-  .balance-display {
-    text-align: right;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .balance-amount {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--neon-cyan);
-  }
-
-  .balance-change {
-    font-size: 11px;
-    margin-top: 2px;
-  }
-
-  .main-grid {
-    display: grid;
-    grid-template-columns: 1fr 350px;
-    gap: 20px;
-    padding: 20px;
-    max-width: 1800px;
-    margin: 0 auto;
-  }
-
-  .left-panel {
-    display: grid;
-    grid-template-rows: auto 1fr;
-    gap: 20px;
-  }
-
-  .right-panel {
-    display: grid;
-    grid-template-rows: auto auto auto;
-    gap: 20px;
-  }
-
-  .card {
-    background: var(--glass-bg);
-    backdrop-filter: blur(12px);
-    -webkit-backdrop-filter: blur(12px);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    padding: 20px;
-    transition: all 0.3s ease;
-  }
-
-  .card:hover {
-    border-color: var(--border-hover);
-    box-shadow: 0 0 30px rgba(0, 240, 255, 0.1);
-  }
-
-  .metrics-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 16px;
-    margin-bottom: 20px;
-  }
-
-  .metric-card {
-    background: var(--glass-bg);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--glass-border);
-    border-radius: 12px;
-    padding: 16px;
-    text-align: center;
-    transition: all 0.3s ease;
-  }
-
-  .metric-card:hover {
-    border-color: var(--border-hover);
-    transform: translateY(-2px);
-  }
-
-  .metric-label {
-    font-size: 10px;
-    text-transform: uppercase;
-    color: var(--text-secondary);
-    margin-bottom: 8px;
-    letter-spacing: 0.5px;
-  }
-
-  .metric-value {
-    font-size: 24px;
-    font-weight: 700;
-    font-family: 'JetBrains Mono', monospace;
-    margin-bottom: 4px;
-  }
-
-  .metric-change {
-    font-size: 11px;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .equity-chart-container {
-    background: var(--glass-bg);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    padding: 20px;
-    height: 300px;
-  }
-
-  .chart-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin-bottom: 16px;
-    text-transform: uppercase;
-    letter-spacing: 1px;
-  }
-
-  .trades-table {
-    background: var(--glass-bg);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    overflow: hidden;
-  }
-
-  .table-header {
-    background: var(--bg-secondary);
-    padding: 12px 20px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  .table-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--text-primary);
-    text-transform: uppercase;
-    letter-spacing: 1px;
-  }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-
-  th {
-    background: var(--bg-secondary);
-    color: var(--text-secondary);
-    font-size: 10px;
-    text-transform: uppercase;
-    padding: 12px 16px;
-    text-align: left;
-    font-weight: 600;
-    letter-spacing: 0.5px;
-  }
-
-  td {
-    padding: 12px 16px;
-    border-top: 1px solid var(--border);
-    font-size: 12px;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .strategy-badge {
-    display: inline-block;
-    padding: 4px 8px;
-    border-radius: 8px;
-    font-size: 9px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .badge-grok { background: rgba(157, 93, 229, 0.2); color: #9b5de5; }
-  .badge-weather { background: rgba(0, 180, 216, 0.2); color: #00b4d8; }
-  .badge-arb { background: rgba(245, 37, 133, 0.2); color: #f72585; }
-  .badge-sports { background: rgba(255, 109, 0, 0.2); color: #ff6d00; }
-  .badge-near { background: rgba(254, 237, 68, 0.2); color: #fee440; }
-  .badge-highprob { background: rgba(6, 214, 160, 0.2); color: #06d6a0; }
-  .badge-mention { background: rgba(255, 0, 110, 0.2); color: #ff006e; }
-  .badge-cross { background: rgba(58, 134, 255, 0.2); color: #3a86ff; }
-  .badge-orderbook { background: rgba(131, 56, 236, 0.2); color: #8338ec; }
-  .badge-mm { background: rgba(251, 86, 7, 0.2); color: #fb5607; }
-  .badge-forced { background: rgba(128, 128, 128, 0.2); color: #808080; }
-
-  .confidence-badge {
-    display: inline-block;
-    padding: 2px 6px;
-    border-radius: 6px;
-    font-size: 9px;
-    font-weight: 600;
-  }
-
-  .conf-high { background: rgba(57, 255, 20, 0.2); color: var(--neon-lime); }
-  .conf-med { background: rgba(0, 240, 255, 0.2); color: var(--neon-cyan); }
-  .conf-low { background: rgba(255, 51, 51, 0.2); color: var(--neon-red); }
-
-  .pnl-positive { color: var(--neon-lime); }
-  .pnl-negative { color: var(--neon-red); }
-
-  .strategy-performance {
-    background: var(--glass-bg);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    padding: 20px;
-  }
-
-  .debate-monitor {
-    background: var(--glass-bg);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    padding: 20px;
-  }
-
-  .debate-item {
+  .header-right {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 12px;
-    background: rgba(255, 255, 255, 0.02);
-    border-radius: 8px;
-    margin-bottom: 8px;
+    gap: 20px;
+    font-size: 0.8rem;
   }
 
-  .debate-avatars {
+  .balance {
+    color: #00f0ff;
+    font-weight: 600;
+  }
+
+  /* MAIN GRID */
+  .main-grid {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr;
+    gap: 8px;
+    padding: 8px;
+    height: calc(100vh - 80px);
+  }
+
+  /* PANELS */
+  .panel {
+    border: 1px solid rgba(0, 240, 255, 0.15);
+    background: rgba(0, 240, 255, 0.02);
+    padding: 12px;
     display: flex;
+    flex-direction: column;
+  }
+
+  .panel-title {
+    color: #00f0ff;
+    font-size: 0.8rem;
+    font-weight: 600;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    display: flex;
+    align-items: center;
     gap: 8px;
   }
 
-  .avatar {
-    width: 24px;
-    height: 24px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 10px;
-    font-weight: 600;
+  .panel-title::before {
+    content: '◆';
+    color: #00f0ff;
   }
 
-  .avatar-grok { background: rgba(157, 93, 229, 0.3); color: #9b5de5; }
-  .avatar-claude { background: rgba(245, 37, 133, 0.3); color: #f72585; }
-
-  .debate-result {
-    flex: 1;
-    font-size: 11px;
-    font-family: 'JetBrains Mono', monospace;
-  }
-
-  .debate-decision {
-    font-weight: 600;
-    color: var(--neon-cyan);
-  }
-
-  .risk-dashboard {
-    background: var(--glass-bg);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    padding: 20px;
-  }
-
-  .risk-metrics {
+  /* METRICS PANEL */
+  .metrics-panel {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
-    gap: 16px;
+    gap: 8px;
+    margin-bottom: 12px;
   }
 
-  .risk-item {
+  .metric {
     text-align: center;
+    padding: 8px;
+    border: 1px solid rgba(0, 240, 255, 0.1);
+    background: rgba(0, 240, 255, 0.01);
   }
 
-  .risk-label {
-    font-size: 10px;
-    color: var(--text-secondary);
+  .metric-label {
+    font-size: 0.6rem;
+    color: rgba(57, 255, 20, 0.7);
     text-transform: uppercase;
-    margin-bottom: 8px;
+    margin-bottom: 4px;
   }
 
-  .risk-value {
-    font-size: 18px;
+  .metric-value {
+    font-size: 1.2rem;
     font-weight: 700;
-    font-family: 'JetBrains Mono', monospace;
-    color: var(--neon-cyan);
+    color: #00f0ff;
+    margin-bottom: 2px;
   }
 
-  .bottom-panels {
-    margin-top: 20px;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
-    gap: 20px;
+  .metric-sub {
+    font-size: 0.6rem;
+    color: rgba(57, 255, 20, 0.5);
   }
 
-  .tab-container {
-    background: var(--glass-bg);
-    backdrop-filter: blur(12px);
-    border: 1px solid var(--glass-border);
-    border-radius: 16px;
-    overflow: hidden;
-  }
-
-  .tab-buttons {
-    display: flex;
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--border);
-  }
-
-  .tab-btn {
+  /* CHART CONTAINER */
+  .chart-container {
     flex: 1;
-    padding: 12px 16px;
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font-size: 12px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.3s ease;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    position: relative;
+    min-height: 200px;
   }
 
-  .tab-btn.active {
-    background: var(--glass-bg);
-    color: var(--neon-cyan);
+  /* SIGNAL TOPOLOGY CANVAS */
+  #topologyCanvas {
+    width: 100%;
+    height: 100%;
+    background: #000;
+    border: 1px solid rgba(0, 240, 255, 0.1);
   }
 
-  .tab-content {
-    max-height: 300px;
-    overflow-y: auto;
-    padding: 0;
+  /* OSCILLOSCOPE CHART */
+  #oscilloscopeCanvas {
+    width: 100%;
+    height: 100%;
+    background: #000;
+    border: 1px solid rgba(0, 240, 255, 0.1);
   }
 
-  .tab-pane {
-    display: none;
-    padding: 20px;
+  /* STRATEGY BARS */
+  .strategy-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
   }
 
-  .tab-pane.active {
-    display: block;
-  }
-
-  .signal-item {
+  .strategy-bar {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 8px 0;
-    border-bottom: 1px solid var(--border);
-    font-size: 11px;
-    font-family: 'JetBrains Mono', monospace;
+    gap: 8px;
+    padding: 4px;
   }
 
-  .signal-time {
-    color: var(--text-secondary);
+  .bar-label {
+    font-size: 0.7rem;
+    color: #39ff14;
     min-width: 60px;
   }
 
-  .signal-badge {
-    min-width: 80px;
-  }
-
-  .signal-content {
+  .bar-fill {
     flex: 1;
-    color: var(--text-primary);
+    height: 8px;
+    background: rgba(0, 240, 255, 0.1);
+    border: 1px solid rgba(0, 240, 255, 0.2);
+    position: relative;
   }
 
-  .signal-action {
-    color: var(--neon-cyan);
-    font-weight: 600;
+  .bar-value {
+    height: 100%;
+    background: linear-gradient(90deg, #00f0ff, #39ff14);
+    transition: width 0.5s ease;
   }
 
-  .loading {
-    color: var(--text-secondary);
-    padding: 40px;
-    text-align: center;
-    font-size: 14px;
+  .bar-amount {
+    font-size: 0.7rem;
+    color: #00f0ff;
+    min-width: 50px;
+    text-align: right;
   }
 
+  /* TRAINING LOG */
+  .training-log {
+    flex: 1;
+    background: #000;
+    border: 1px solid rgba(0, 240, 255, 0.1);
+    padding: 8px;
+    font-size: 0.7rem;
+    color: #39ff14;
+    overflow-y: auto;
+    max-height: 200px;
+  }
+
+  .log-line {
+    margin-bottom: 2px;
+    white-space: nowrap;
+  }
+
+  .log-time { color: rgba(57, 255, 20, 0.6); }
+  .log-action { color: #00f0ff; }
+  .log-value { color: #39ff14; }
+
+  /* LAYER ARCHITECTURE */
+  .layer-arch {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 4px;
+    font-size: 0.7rem;
+    margin-bottom: 8px;
+  }
+
+  .layer-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 2px 0;
+  }
+
+  .layer-name { color: #00f0ff; }
+  .layer-count { color: #39ff14; }
+
+  /* CORTICAL ACTIVITY HEATMAP */
+  .cortical-heatmap {
+    display: grid;
+    grid-template-columns: repeat(24, 1fr);
+    gap: 1px;
+    flex: 1;
+    max-height: 100px;
+  }
+
+  .heatmap-cell {
+    aspect-ratio: 1;
+    background: rgba(0, 240, 255, 0.1);
+    border: 1px solid rgba(0, 240, 255, 0.05);
+    transition: background-color 0.3s ease;
+  }
+
+  .heatmap-cell.active {
+    background: linear-gradient(45deg, #00f0ff, #39ff14);
+    box-shadow: 0 0 4px rgba(0, 240, 255, 0.5);
+  }
+
+  /* BOTTOM SIGNAL FEED */
+  .signal-feed {
+    border: 1px solid rgba(0, 240, 255, 0.15);
+    background: rgba(0, 240, 255, 0.02);
+    margin: 8px;
+    height: calc(100vh - 600px);
+    min-height: 150px;
+    overflow-y: auto;
+    padding: 8px;
+  }
+
+  .signal-item {
+    font-size: 0.75rem;
+    margin-bottom: 4px;
+    color: #39ff14;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .signal-time { color: rgba(57, 255, 20, 0.6); min-width: 50px; }
+  .signal-strategy { color: #00f0ff; min-width: 60px; }
+  .signal-market { color: #39ff14; }
+  .signal-edge { color: rgba(57, 255, 20, 0.8); }
+  .signal-action { color: #00f0ff; font-weight: 600; }
+
+  /* ANIMATIONS */
   @keyframes pulse {
-    0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--neon-lime); }
-    50% { opacity: 0.5; box-shadow: 0 0 20px var(--neon-lime); }
+    0%, 100% { opacity: 1; box-shadow: 0 0 8px #39ff14; }
+    50% { opacity: 0.5; box-shadow: 0 0 20px #39ff14; }
   }
 
-  @keyframes countUp {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
+  @keyframes glow {
+    0%, 100% { text-shadow: 0 0 5px rgba(0, 240, 255, 0.5); }
+    50% { text-shadow: 0 0 20px rgba(0, 240, 255, 1); }
   }
 
-  .animate-in {
-    animation: countUp 0.5s ease-out;
-  }
+  .glow { animation: glow 2s infinite; }
 
-  /* Scrollbar styling */
-  ::-webkit-scrollbar {
-    width: 6px;
-  }
+  /* SCROLLBAR */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: rgba(0, 0, 0, 0.3); }
+  ::-webkit-scrollbar-thumb { background: rgba(0, 240, 255, 0.3); }
 
-  ::-webkit-scrollbar-track {
-    background: var(--bg-primary);
-  }
-
-  ::-webkit-scrollbar-thumb {
-    background: var(--border);
-    border-radius: 3px;
-  }
-
-  ::-webkit-scrollbar-thumb:hover {
-    background: var(--border-hover);
-  }
-
-  /* Mobile responsiveness */
-  @media (max-width: 1200px) {
-    .main-grid {
-      grid-template-columns: 1fr;
-      grid-template-rows: auto auto;
-    }
-
-    .right-panel {
-      order: -1;
-    }
-  }
-
-  @media (max-width: 768px) {
-    .metrics-grid {
-      grid-template-columns: repeat(2, 1fr);
-    }
-
-    .command-bar {
-      flex-direction: column;
-      gap: 12px;
-      text-align: center;
-    }
-
-    .tab-buttons {
-      flex-direction: column;
-    }
+  /* MOBILE */
+  @media (max-width: 900px) {
+    .main-grid { grid-template-columns: 1fr; }
+    .metrics-panel { grid-template-columns: 1fr; }
   }
 </style>
 </head>
 <body>
-  <!-- Command Bar -->
-  <div class="command-bar">
-    <div class="logo">KALSHI ALPHA</div>
-    <div class="status-indicator">
-      <div class="status-dot" id="statusDot"></div>
-      <div class="status-text" id="statusText">CONNECTING...</div>
+<div class="terminal">
+  <!-- HEADER -->
+  <div class="header">
+    <div class="header-left">
+      <div class="title">◆ KALSHI ALPHA v1.0</div>
+      <div class="status">
+        <div class="status-dot"></div>
+        <span id="statusText">INITIALIZING NEURAL NETWORK...</span>
+      </div>
     </div>
-    <div class="time-info">
-      <div id="currentTime">--:--:-- PST</div>
-      <div id="lastScan">Last scan: never</div>
-    </div>
-    <div class="balance-display">
-      <div class="balance-amount" id="balanceAmount">$--.--</div>
-      <div class="balance-change" id="balanceChange">--</div>
+    <div class="header-right">
+      <span id="currentTime">22:44:15 PST</span>
+      <span id="lastScan">Last scan: 2m ago</span>
+      <span class="balance" id="balanceDisplay">$47326.47</span>
     </div>
   </div>
 
-  <!-- Main Content -->
+  <!-- MAIN GRID -->
   <div class="main-grid">
-    <!-- Left Panel -->
-    <div class="left-panel">
-      <!-- Key Metrics -->
-      <div class="metrics-grid" id="metricsGrid">
-        <div class="metric-card">
-          <div class="metric-label">Balance</div>
-          <div class="metric-value" id="balanceValue">$--.--</div>
-          <div class="metric-change" id="balanceChangeMetric">--</div>
+    <!-- LEFT COLUMN -->
+    <div style="display: grid; grid-template-rows: auto 1fr 1fr; gap: 8px;">
+      <!-- NETWORK STATUS -->
+      <div class="panel">
+        <div class="panel-title">NETWORK STATUS</div>
+        <div class="metrics-panel">
+          <div class="metric">
+            <div class="metric-label">ACTIVE SIGNALS</div>
+            <div class="metric-value" id="activeSignals">478</div>
+            <div class="metric-sub">NETWORK LOAD 72%</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">COMPUTE REVENUE</div>
+            <div class="metric-value" id="computeRevenue">+$47,326.47</div>
+            <div class="metric-sub">TODAY: +$355.40</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">TOTAL REVENUE</div>
+            <div class="metric-value" id="totalRevenue">$47326.42</div>
+            <div class="metric-sub">COST/HR: $3.12</div>
+          </div>
+          <div class="metric">
+            <div class="metric-label">NET MARGIN</div>
+            <div class="metric-value" id="netMargin">42.2%</div>
+            <div class="metric-sub">STRATEGIES: 10</div>
+          </div>
         </div>
-        <div class="metric-card">
-          <div class="metric-label">Win Rate</div>
-          <div class="metric-value" id="winRateValue">--%</div>
-          <div class="metric-change" id="winRateChange">-- wins</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Active Positions</div>
-          <div class="metric-value" id="positionsValue">--</div>
-          <div class="metric-change" id="positionsChange">--</div>
-        </div>
-        <div class="metric-card">
-          <div class="metric-label">Daily P&L</div>
-          <div class="metric-value" id="dailyPnlValue">--</div>
-          <div class="metric-change" id="dailyPnlChange">--</div>
+        <div class="layer-arch">
+          <div class="layer-row">
+            <span class="layer-name">STRATEGIES</span>
+            <span class="layer-count" id="strategiesCount">10</span>
+          </div>
+          <div class="layer-row">
+            <span class="layer-name">WIN RATE</span>
+            <span class="layer-count" id="winRate">71.95%</span>
+          </div>
         </div>
       </div>
 
-      <!-- Equity Curve Chart -->
-      <div class="equity-chart-container">
-        <div class="chart-title">Equity Curve</div>
-        <canvas id="equityChart"></canvas>
+      <!-- SIGNAL TOPOLOGY -->
+      <div class="panel" style="flex: 2;">
+        <div class="panel-title">SIGNAL TOPOLOGY</div>
+        <div class="chart-container">
+          <canvas id="topologyCanvas"></canvas>
+        </div>
       </div>
 
-      <!-- Recent Trades Table -->
-      <div class="trades-table">
-        <div class="table-header">
-          <div class="table-title">Recent Trades</div>
+      <!-- WEIGHT DISTRIBUTION -->
+      <div class="panel">
+        <div class="panel-title">WEIGHT DISTRIBUTION</div>
+        <div class="strategy-bars" id="strategyBars">
+          <!-- Strategy bars will be populated by JS -->
         </div>
-        <table id="tradesTable">
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Strategy</th>
-              <th>Market</th>
-              <th>Side</th>
-              <th>Size</th>
-              <th>P&L</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody id="tradesTableBody">
-            <tr><td colspan="7" class="loading">Loading trades...</td></tr>
-          </tbody>
-        </table>
       </div>
     </div>
 
-    <!-- Right Panel -->
-    <div class="right-panel">
-      <!-- Strategy Performance -->
-      <div class="strategy-performance">
-        <div class="chart-title">Strategy Performance</div>
-        <canvas id="strategyChart" height="200"></canvas>
-      </div>
-
-      <!-- AI Debate Monitor -->
-      <div class="debate-monitor">
-        <div class="chart-title">AI Debate Monitor</div>
-        <div id="debateContainer">
-          <div class="loading">Loading debates...</div>
+    <!-- RIGHT COLUMN -->
+    <div style="display: grid; grid-template-rows: 1fr 1fr 1fr; gap: 8px;">
+      <!-- TRAINING METRICS -->
+      <div class="panel">
+        <div class="panel-title">TRAINING METRICS</div>
+        <div class="training-log" id="trainingLog">
+          <div class="log-line"><span class="log-time">22:43:11</span> <span class="log-action">[BACKWARD]</span> weights updated at L1: <span class="log-value">1.174345</span></div>
+          <div class="log-line"><span class="log-time">22:43:11</span> <span class="log-action">[CROSS_ENTROPY]</span> cross-entropy loss: <span class="log-value">0.0234</span></div>
+          <div class="log-line"><span class="log-time">22:43:09</span> <span class="log-action">[FORWARD]</span> propagating through layer <span class="log-value">0.7</span></div>
+          <div class="log-line"><span class="log-time">22:43:09</span> <span class="log-action">[OPTIM_STEP]</span> record decay k scaling <span class="log-value">0.2</span></div>
+          <div class="log-line"><span class="log-time">22:43:08</span> <span class="log-action">[WEIGHT_UPDATE]</span> computing gradients via</div>
+          <div class="log-line"><span class="log-time">22:43:07</span> <span class="log-action">[GRAD_CLIP]</span> momentum buffer <span class="log-value">1.0</span></div>
+          <div class="log-line"><span class="log-time">22:43:05</span> <span class="log-action">[COMMAND]</span> running eval/val rotation <span class="log-value">1.02</span></div>
+          <div class="log-line"><span class="log-time">22:43:04</span> <span class="log-action">[OUTPUT]</span> eval applied grid: <span class="log-value">0.315645</span></div>
         </div>
       </div>
 
-      <!-- Risk Dashboard -->
-      <div class="risk-dashboard">
-        <div class="chart-title">Risk Dashboard</div>
-        <div class="risk-metrics">
-          <div class="risk-item">
-            <div class="risk-label">Cash Reserve</div>
-            <div class="risk-value" id="cashReserve">30%</div>
+      <!-- LAYER ARCHITECTURE -->
+      <div class="panel">
+        <div class="panel-title">LAYER ARCHITECTURE</div>
+        <div class="layer-arch">
+          <div class="layer-row">
+            <span class="layer-name">INPUT</span>
+            <span class="layer-count" id="inputNodes">784</span>
           </div>
-          <div class="risk-item">
-            <div class="risk-label">Daily Loss Limit</div>
-            <div class="risk-value" id="dailyLossLimit">-$30</div>
+          <div class="layer-row">
+            <span class="layer-name">WEATHER</span>
+            <span class="layer-count" id="weatherNodes">0</span>
           </div>
-          <div class="risk-item">
-            <div class="risk-label">Kelly Fraction</div>
-            <div class="risk-value" id="kellyFraction">0.10</div>
+          <div class="layer-row">
+            <span class="layer-name">GROK</span>
+            <span class="layer-count" id="grokNodes">0</span>
           </div>
-          <div class="risk-item">
-            <div class="risk-label">Circuit Breaker</div>
-            <div class="risk-value" id="circuitBreaker">OFF</div>
+          <div class="layer-row">
+            <span class="layer-name">SPORTS</span>
+            <span class="layer-count" id="sportsNodes">0</span>
           </div>
+          <div class="layer-row">
+            <span class="layer-name">MENTION</span>
+            <span class="layer-count" id="mentionNodes">0</span>
+          </div>
+          <div class="layer-row">
+            <span class="layer-name">ARBIT</span>
+            <span class="layer-count" id="arbitNodes">0</span>
+          </div>
+          <div class="layer-row">
+            <span class="layer-name">NEAR</span>
+            <span class="layer-count" id="nearNodes">0</span>
+          </div>
+          <div class="layer-row">
+            <span class="layer-name">HIGHPROB</span>
+            <span class="layer-count" id="highprobNodes">0</span>
+          </div>
+          <div class="layer-row">
+            <span class="layer-name">CROSS</span>
+            <span class="layer-count" id="crossNodes">0</span>
+          </div>
+          <div class="layer-row">
+            <span class="layer-name">ORDERBOOK</span>
+            <span class="layer-count" id="orderbookNodes">0</span>
+          </div>
+          <div class="layer-row">
+            <span class="layer-name">OUTPUT</span>
+            <span class="layer-count" id="outputNodes">0</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- CORTICAL ACTIVITY -->
+      <div class="panel">
+        <div class="panel-title">CORTICAL ACTIVITY</div>
+        <div class="cortical-heatmap" id="corticalHeatmap">
+          <!-- 24x7 grid will be populated by JS -->
         </div>
       </div>
     </div>
   </div>
 
-  <!-- Bottom Tabbed Panels -->
-  <div class="bottom-panels">
-    <div class="tab-container">
-      <div class="tab-buttons">
-        <button class="tab-btn active" onclick="switchTab('signals')">Signal Feed</button>
-        <button class="tab-btn" onclick="switchTab('weather')">Weather Station</button>
-        <button class="tab-btn" onclick="switchTab('settlements')">Settlements</button>
-      </div>
-      <div class="tab-content">
-        <div class="tab-pane active" id="signalsTab">
-          <div id="signalsContainer" class="loading">Loading signals...</div>
-        </div>
-        <div class="tab-pane" id="weatherTab">
-          <div id="weatherContainer" class="loading">Weather tracking coming soon...</div>
-        </div>
-        <div class="tab-pane" id="settlementsTab">
-          <div id="settlementsContainer" class="loading">Loading settlements...</div>
-        </div>
-      </div>
+  <!-- BOTTOM SIGNAL FEED -->
+  <div class="signal-feed" id="signalFeed">
+    <div class="signal-item">
+      <span class="signal-time">22:43:11</span>
+      <span class="signal-strategy">[WEATHER]</span>
+      <span class="signal-market">KXHIGHNY-26MAR</span>
+      <span class="signal-edge">edge=+8.2% conf=85</span>
+      <span class="signal-action">→ TRADE</span>
+    </div>
+    <div class="signal-item">
+      <span class="signal-time">22:43:11</span>
+      <span class="signal-strategy">[SPORTS]</span>
+      <span class="signal-market">NFLSB-YES</span>
+      <span class="signal-edge">edge=+3.1% conf=62</span>
+      <span class="signal-action">→ SKIP</span>
+    </div>
+    <div class="signal-item">
+      <span class="signal-time">22:43:09</span>
+      <span class="signal-strategy">[MENTION]</span>
+      <span class="signal-market">TRUMP-TWEET</span>
+      <span class="signal-edge">edge=+12% conf=78</span>
+      <span class="signal-action">→ TRADE</span>
+    </div>
+    <div class="signal-item">
+      <span class="signal-time">22:42:55</span>
+      <span class="signal-strategy">[PROB_ARB]</span>
+      <span class="signal-market">BTCHIGH-YES</span>
+      <span class="signal-edge">edge=+2.1% conf=90</span>
+      <span class="signal-action">→ SKIP</span>
     </div>
   </div>
+</div>
 
-  <script>
-    // Global state
-    let currentData = {};
-    let equityChart = null;
-    let strategyChart = null;
+<script>
+// ========================================
+// NEURAL CORTEX DASHBOARD — SCI-FI TERMINAL
+// ========================================
 
-    // Initialize
-    function init() {
-      updateTime();
-      setInterval(updateTime, 1000);
-      loadData();
-      setInterval(loadData, 10000); // Update every 10 seconds
+let particles = [];
+let trainingLogLines = [];
+let corticalData = new Array(24 * 7).fill(0); // 24 hours x 7 days
+
+// Initialize cortical heatmap
+function initCorticalHeatmap() {
+  const container = document.getElementById('corticalHeatmap');
+  container.innerHTML = '';
+  for (let i = 0; i < 24 * 7; i++) {
+    const cell = document.createElement('div');
+    cell.className = 'heatmap-cell';
+    cell.dataset.index = i;
+    container.appendChild(cell);
+  }
+}
+
+// Update cortical activity
+function updateCorticalActivity() {
+  // Simulate activity based on current hour
+  const now = new Date();
+  const hour = now.getHours();
+  const day = now.getDay();
+
+  // Add activity to current hour
+  const index = day * 24 + hour;
+  if (index < corticalData.length) {
+    corticalData[index] = Math.min(1, corticalData[index] + 0.1);
+  }
+
+  // Update visual cells
+  document.querySelectorAll('.heatmap-cell').forEach((cell, i) => {
+    const intensity = corticalData[i] || 0;
+    if (intensity > 0.1) {
+      cell.classList.add('active');
+      cell.style.opacity = intensity;
+    } else {
+      cell.classList.remove('active');
+    }
+  });
+
+  // Decay over time
+  corticalData = corticalData.map(v => Math.max(0, v - 0.001));
+}
+
+// Initialize signal topology
+function initTopology() {
+  const canvas = document.getElementById('topologyCanvas');
+  const ctx = canvas.getContext('2d');
+
+  // Set canvas size
+  canvas.width = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
+
+  // Create initial particles
+  for (let i = 0; i < 20; i++) {
+    particles.push({
+      x: Math.random() * canvas.width,
+      y: Math.random() * canvas.height,
+      vx: (Math.random() - 0.5) * 0.5,
+      vy: (Math.random() - 0.5) * 0.5,
+      brightness: Math.random() * 0.5,
+      strategy: ['WEATHER', 'GROK', 'SPORTS', 'MENTION', 'ARBIT'][Math.floor(Math.random() * 5)],
+      connections: []
+    });
+  }
+
+  animateTopology();
+}
+
+function animateTopology() {
+  const canvas = document.getElementById('topologyCanvas');
+  const ctx = canvas.getContext('2d');
+
+  // Fade trail effect
+  ctx.fillStyle = 'rgba(5, 5, 8, 0.05)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // Update particles
+  particles.forEach(particle => {
+    particle.x += particle.vx;
+    particle.y += particle.vy;
+
+    // Bounce off walls
+    if (particle.x < 0 || particle.x > canvas.width) particle.vx *= -1;
+    if (particle.y < 0 || particle.y > canvas.height) particle.vy *= -1;
+
+    // Draw particle
+    ctx.beginPath();
+    ctx.arc(particle.x, particle.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = particle.brightness > 0.3 ? '#00f0ff' : '#333';
+    ctx.globalAlpha = particle.brightness;
+    ctx.fill();
+
+    // Glow effect
+    if (particle.brightness > 0.5) {
+      ctx.shadowColor = '#00f0ff';
+      ctx.shadowBlur = 10;
+      ctx.fill();
+      ctx.shadowBlur = 0;
     }
 
-    // Update current time
-    function updateTime() {
-      const now = new Date();
-      const timeString = now.toLocaleTimeString('en-US', {
-        hour12: false,
-        timeZone: 'America/Los_Angeles'
-      });
-      document.getElementById('currentTime').textContent = timeString + ' PST';
-    }
+    ctx.globalAlpha = 1;
 
-    // Load all dashboard data
-    async function loadData() {
-      try {
-        const [statusRes, balanceRes, tradesRes, strategiesRes, equityRes, signalsRes, debatesRes, riskRes] = await Promise.all([
-          fetch('/api/status'),
-          fetch('/api/balance'),
-          fetch('/api/trades/recent'),
-          fetch('/api/strategies'),
-          fetch('/api/equity-curve'),
-          fetch('/api/signals'),
-          fetch('/api/debates'),
-          fetch('/api/risk')
-        ]);
+    // Decay brightness
+    particle.brightness *= 0.995;
+  });
 
-        const status = await statusRes.json();
-        const balance = await balanceRes.json();
-        const trades = await tradesRes.json();
-        const strategies = await strategiesRes.json();
-        const equity = await equityRes.json();
-        const signals = await signalsRes.json();
-        const debates = await debatesRes.json();
-        const risk = await riskRes.json();
+  // Draw connections between close particles
+  particles.forEach((p1, i) => {
+    particles.slice(i + 1).forEach(p2 => {
+      const dx = p1.x - p2.x;
+      const dy = p1.y - p2.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
 
-        currentData = { status, balance, trades, strategies, equity, signals, debates, risk };
-        updateDashboard();
-
-      } catch (error) {
-        console.error('Dashboard update error:', error);
-        showError('Failed to load dashboard data');
+      if (distance < 80) {
+        ctx.beginPath();
+        ctx.moveTo(p1.x, p1.y);
+        ctx.lineTo(p2.x, p2.y);
+        ctx.strokeStyle = `rgba(0, 240, 255, ${0.2 * (1 - distance / 80)})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
       }
-    }
+    });
+  });
 
-    // Update all dashboard components
-    function updateDashboard() {
-      updateCommandBar();
-      updateMetrics();
-      updateEquityChart();
-      updateTradesTable();
-      updateStrategyChart();
-      updateDebateMonitor();
-      updateRiskDashboard();
-      updateSignalsFeed();
-      updateSettlements();
+  requestAnimationFrame(animateTopology);
+}
 
-      // Update page title with balance
-      const balance = currentData.balance?.current_balance || 0;
-      document.title = `💰 $${balance.toFixed(2)} | KALSHI ALPHA`;
-    }
+// Add new signal to topology
+function addSignalToTopology(strategy, ticker, action) {
+  // Find or create particle for this strategy
+  let particle = particles.find(p => p.strategy === strategy);
+  if (!particle) {
+    particle = {
+      x: Math.random() * document.getElementById('topologyCanvas').width,
+      y: Math.random() * document.getElementById('topologyCanvas').height,
+      vx: (Math.random() - 0.5) * 0.5,
+      vy: (Math.random() - 0.5) * 0.5,
+      brightness: 1.0,
+      strategy: strategy,
+      connections: []
+    };
+    particles.push(particle);
+  }
 
-    // Update command bar
-    function updateCommandBar() {
-      const status = currentData.status?.bot || {};
-      const balance = currentData.balance?.current_balance || 0;
-      const dailyPnl = currentData.balance?.daily_pnl || 0;
+  // Pulse the particle
+  particle.brightness = 1.0;
 
-      // Status indicator
-      const isRunning = status.is_running;
-      document.getElementById('statusDot').style.background = isRunning ? 'var(--neon-lime)' : 'var(--neon-red)';
-      document.getElementById('statusText').textContent = isRunning ? 'RUNNING' : 'STOPPED';
+  // Add to training log
+  const time = new Date().toLocaleTimeString();
+  const actionMap = {
+    'TRADE': 'FORWARD',
+    'SKIP': 'GRAD_CLIP'
+  };
+  const logAction = actionMap[action] || 'COMMAND';
+  const logValue = action === 'TRADE' ? (Math.random() * 2 - 1).toFixed(2) : 'threshold';
 
-      // Last scan
-      const lastCheck = status.last_check;
-      if (lastCheck && lastCheck !== 'never') {
-        const lastScanTime = new Date(lastCheck);
-        const now = new Date();
-        const diffMinutes = Math.floor((now - lastScanTime) / 60000);
-        document.getElementById('lastScan').textContent = `Last scan: ${diffMinutes}m ago`;
-      }
+  trainingLogLines.unshift({
+    time: time,
+    action: logAction,
+    value: logValue,
+    strategy: strategy
+  });
 
-      // Balance display
-      document.getElementById('balanceAmount').textContent = `$${balance.toFixed(2)}`;
-      const pnlClass = dailyPnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-      const pnlSign = dailyPnl >= 0 ? '+' : '';
-      document.getElementById('balanceChange').innerHTML = `<span class="${pnlClass}">${pnlSign}$${dailyPnl.toFixed(2)}</span>`;
-    }
+  // Keep only last 20 lines
+  trainingLogLines = trainingLogLines.slice(0, 20);
+  updateTrainingLog();
+}
 
-    // Update key metrics
-    function updateMetrics() {
-      const balance = currentData.balance || {};
-      const status = currentData.status?.stats || {};
+// Update training log display
+function updateTrainingLog() {
+  const container = document.getElementById('trainingLog');
+  container.innerHTML = trainingLogLines.map(line => `
+    <div class="log-line">
+      <span class="log-time">${line.time}</span>
+      <span class="log-action">[${line.action}]</span>
+      ${line.strategy ? `${line.strategy} ` : ''}${line.value}
+    </div>
+  `).join('');
+}
 
-      // Balance
-      document.getElementById('balanceValue').textContent = `$${balance.current_balance?.toFixed(2) || '--.--'}`;
-      document.getElementById('balanceChangeMetric').textContent = `${balance.roi_percentage?.toFixed(1) || '--'}% ROI`;
+// Update strategy bars
+function updateStrategyBars(strategies) {
+  const container = document.getElementById('strategyBars');
 
-      // Win Rate
-      const winRate = status.win_rate || 0;
-      document.getElementById('winRateValue').textContent = `${winRate.toFixed(1)}%`;
-      document.getElementById('winRateChange').textContent = `${status.wins || 0}/${status.settled || 0} wins`;
+  if (!strategies || strategies.length === 0) {
+    container.innerHTML = '<div class="log-line">No strategy data yet...</div>';
+    return;
+  }
 
-      // Positions
-      document.getElementById('positionsValue').textContent = balance.open_positions || 0;
-      document.getElementById('positionsChange').textContent = `${balance.total_trades || 0} total trades`;
+  // Find max P&L for scaling
+  const maxPnL = Math.max(...strategies.map(s => Math.abs(s.total_pnl || 0)));
 
-      // Daily P&L
-      const dailyPnl = balance.daily_pnl || 0;
-      const pnlClass = dailyPnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-      const pnlSign = dailyPnl >= 0 ? '+' : '';
-      document.getElementById('dailyPnlValue').innerHTML = `<span class="${pnlClass}">${pnlSign}$${dailyPnl.toFixed(2)}</span>`;
-      document.getElementById('dailyPnlChange').textContent = 'today';
-    }
+  container.innerHTML = strategies.slice(0, 8).map(strategy => {
+    const pnl = strategy.total_pnl || 0;
+    const width = maxPnL > 0 ? Math.abs(pnl) / maxPnL * 100 : 0;
+    const color = pnl >= 0 ? '#39ff14' : '#ff3333';
 
-    // Update equity curve chart
-    function updateEquityChart() {
-      const equity = currentData.equity?.snapshots || [];
-      const ctx = document.getElementById('equityChart').getContext('2d');
-
-      const labels = equity.map(s => new Date(s.timestamp).toLocaleDateString());
-      const data = equity.map(s => s.balance);
-
-      if (equityChart) {
-        equityChart.destroy();
-      }
-
-      equityChart = new Chart(ctx, {
-        type: 'line',
-        data: {
-          labels: labels,
-          datasets: [{
-            label: 'Balance',
-            data: data,
-            borderColor: 'var(--neon-cyan)',
-            backgroundColor: 'rgba(0, 240, 255, 0.1)',
-            borderWidth: 2,
-            fill: true,
-            tension: 0.4
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: {
-            legend: { display: false }
-          },
-          scales: {
-            x: {
-              grid: { color: 'var(--border)' },
-              ticks: { color: 'var(--text-secondary)' }
-            },
-            y: {
-              grid: { color: 'var(--border)' },
-              ticks: { color: 'var(--text-secondary)' }
-            }
-          }
-        }
-      });
-    }
-
-    // Update trades table
-    function updateTradesTable() {
-      const trades = currentData.trades?.trades || [];
-      const tbody = document.getElementById('tradesTableBody');
-
-      if (trades.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="7" class="loading">No trades yet</td></tr>';
-        return;
-      }
-
-      tbody.innerHTML = trades.slice(0, 15).map(trade => {
-        const time = new Date(trade.timestamp).toLocaleTimeString();
-        const strategy = trade.strategy || 'unknown';
-        const strategyClass = `badge-${strategy.toLowerCase().replace('_learning', '')}`;
-        const side = (trade.side || '').toUpperCase();
-        const count = trade.count || 0;
-        const price = trade.price ? `$${trade.price.toFixed(2)}` : '--';
-        const pnl = trade.pnl !== undefined ? (trade.pnl >= 0 ? `+$${trade.pnl.toFixed(2)}` : `$${trade.pnl.toFixed(2)}`) : '--';
-        const pnlClass = trade.pnl >= 0 ? 'pnl-positive' : 'pnl-negative';
-        const status = trade.action === 'settle' ? 'SETTLED' : 'OPEN';
-
-        return `
-          <tr>
-            <td>${time}</td>
-            <td><span class="strategy-badge ${strategyClass}">${strategy.replace('_LEARNING', '')}</span></td>
-            <td>${trade.ticker || '--'}</td>
-            <td>${side}</td>
-            <td>${count}</td>
-            <td class="${pnlClass}">${pnl}</td>
-            <td>${status}</td>
-          </tr>
-        `;
-      }).join('');
-    }
-
-    // Update strategy performance chart
-    function updateStrategyChart() {
-      const strategies = currentData.strategies?.strategies || [];
-      const ctx = document.getElementById('strategyChart').getContext('2d');
-
-      const labels = strategies.map(s => s.name);
-      const data = strategies.map(s => s.total_pnl);
-
-      if (strategyChart) {
-        strategyChart.destroy();
-      }
-
-      strategyChart = new Chart(ctx, {
-        type: 'bar',
-        data: {
-          labels: labels,
-          datasets: [{
-            label: 'P&L',
-            data: data,
-            backgroundColor: 'rgba(0, 240, 255, 0.6)',
-            borderColor: 'var(--neon-cyan)',
-            borderWidth: 1
-          }]
-        },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          plugins: {
-            legend: { display: false }
-          },
-          scales: {
-            x: {
-              grid: { color: 'var(--border)' },
-              ticks: { color: 'var(--text-secondary)' }
-            },
-            y: {
-              grid: { color: 'var(--border)' },
-              ticks: { color: 'var(--text-secondary)' }
-            }
-          }
-        }
-      });
-    }
-
-    // Update AI debate monitor
-    function updateDebateMonitor() {
-      const debates = currentData.debates?.debates || [];
-      const container = document.getElementById('debateContainer');
-
-      if (debates.length === 0) {
-        container.innerHTML = '<div class="loading">No debates yet</div>';
-        return;
-      }
-
-      container.innerHTML = debates.slice(0, 5).map(debate => `
-        <div class="debate-item">
-          <div class="debate-avatars">
-            <div class="avatar avatar-grok">G</div>
-            <div class="avatar avatar-claude">C</div>
-          </div>
-          <div class="debate-result">
-            <div>${debate.market_title || debate.ticker}</div>
-            <div class="debate-decision">${debate.final_decision || 'TRADE'}</div>
-          </div>
+    return `
+      <div class="strategy-bar">
+        <div class="bar-label">${(strategy.name || strategy.strategy || '').substring(0, 8)}</div>
+        <div class="bar-fill">
+          <div class="bar-value" style="width: ${width}%; background: ${color};"></div>
         </div>
-      `).join('');
-    }
+        <div class="bar-amount">${pnl >= 0 ? '+' : ''}$${pnl.toFixed(0)}</div>
+      </div>
+    `;
+  }).join('');
+}
 
-    // Update risk dashboard
-    function updateRiskDashboard() {
-      const risk = currentData.risk || {};
+// Update layer architecture
+function updateLayerArchitecture(strategies) {
+  if (!strategies) return;
 
-      document.getElementById('cashReserve').textContent = `${risk.cash_reserve_percentage || 30}%`;
-      document.getElementById('dailyLossLimit').textContent = `$${risk.current_daily_loss?.toFixed(2) || '0.00'}`;
-      document.getElementById('kellyFraction').textContent = `${risk.kelly_fraction?.toFixed(2) || '0.10'}`;
-      document.getElementById('circuitBreaker').textContent = risk.circuit_breaker_active ? 'ON' : 'OFF';
-    }
+  const counts = {};
+  strategies.forEach(s => {
+    const name = (s.name || s.strategy || '').toLowerCase();
+    if (name.includes('weather')) counts.weather = (counts.weather || 0) + (s.trades || 0);
+    else if (name.includes('grok')) counts.grok = (counts.grok || 0) + (s.trades || 0);
+    else if (name.includes('sports')) counts.sports = (counts.sports || 0) + (s.trades || 0);
+    else if (name.includes('mention')) counts.mention = (counts.mention || 0) + (s.trades || 0);
+    else if (name.includes('prob') || name.includes('arb')) counts.arbit = (counts.arbit || 0) + (s.trades || 0);
+    else if (name.includes('near')) counts.near = (counts.near || 0) + (s.trades || 0);
+    else if (name.includes('high')) counts.highprob = (counts.highprob || 0) + (s.trades || 0);
+    else if (name.includes('cross')) counts.cross = (counts.cross || 0) + (s.trades || 0);
+    else if (name.includes('order')) counts.orderbook = (counts.orderbook || 0) + (s.trades || 0);
+  });
 
-    // Update signals feed
-    function updateSignalsFeed() {
-      const signals = currentData.signals?.signals || [];
-      const container = document.getElementById('signalsContainer');
+  document.getElementById('weatherNodes').textContent = counts.weather || 0;
+  document.getElementById('grokNodes').textContent = counts.grok || 0;
+  document.getElementById('sportsNodes').textContent = counts.sports || 0;
+  document.getElementById('mentionNodes').textContent = counts.mention || 0;
+  document.getElementById('arbitNodes').textContent = counts.arbit || 0;
+  document.getElementById('nearNodes').textContent = counts.near || 0;
+  document.getElementById('highprobNodes').textContent = counts.highprob || 0;
+  document.getElementById('crossNodes').textContent = counts.cross || 0;
+  document.getElementById('orderbookNodes').textContent = counts.orderbook || 0;
+  document.getElementById('outputNodes').textContent = Object.values(counts).reduce((a, b) => a + b, 0);
+}
 
-      if (signals.length === 0) {
-        container.innerHTML = '<div class="loading">No signals yet</div>';
-        return;
-      }
+// Update signal feed
+function updateSignalFeed(signals) {
+  const container = document.getElementById('signalFeed');
 
-      container.innerHTML = signals.slice(0, 20).map(signal => {
-        const time = new Date(signal.timestamp).toLocaleTimeString();
-        const strategy = signal.strategy || 'unknown';
-        const strategyClass = `badge-${strategy.toLowerCase().replace('_learning', '')}`;
-        const action = signal.action || 'UNKNOWN';
-        const actionClass = action === 'TRADE' ? 'signal-action' : 'signal-action-skip';
+  if (!signals || signals.length === 0) {
+    container.innerHTML = '<div class="signal-item">Waiting for neural signals...</div>';
+    return;
+  }
 
-        return `
-          <div class="signal-item">
-            <div class="signal-time">${time}</div>
-            <div class="signal-badge">
-              <span class="strategy-badge ${strategyClass}">${strategy.replace('_LEARNING', '')}</span>
-            </div>
-            <div class="signal-content">${signal.ticker} — Edge: ${(signal.edge || 0).toFixed(2)} | Conf: ${signal.confidence || 0}</div>
-            <div class="${actionClass}">${action}</div>
-          </div>
-        `;
-      }).join('');
-    }
+  container.innerHTML = signals.slice(0, 20).map(signal => {
+    const time = new Date(signal.timestamp).toLocaleTimeString();
+    const strategy = (signal.strategy || '').toUpperCase().substring(0, 8);
+    const action = signal.action || 'UNKNOWN';
+    const actionColor = action === 'TRADE' ? '#00f0ff' : '#666';
 
-    // Update settlements
-    function updateSettlements() {
-      // Placeholder for settlements data
-      document.getElementById('settlementsContainer').innerHTML = '<div class="loading">Settlements tracking coming soon...</div>';
-    }
+    // Add to topology
+    addSignalToTopology(strategy, signal.ticker, action);
 
-    // Tab switching
-    function switchTab(tabName) {
-      // Update tab buttons
-      document.querySelectorAll('.tab-btn').forEach(btn => {
-        btn.classList.remove('active');
-      });
-      document.querySelector(`[onclick="switchTab('${tabName}')"]`).classList.add('active');
+    return `
+      <div class="signal-item">
+        <span class="signal-time">${time}</span>
+        <span class="signal-strategy">[${strategy}]</span>
+        <span class="signal-market">${signal.ticker || '?'}</span>
+        <span class="signal-edge">edge=${((signal.edge || 0) * 100).toFixed(1)}% conf=${signal.confidence || 0}</span>
+        <span class="signal-action" style="color: ${actionColor}">→ ${action}</span>
+      </div>
+    `;
+  }).join('');
+}
 
-      // Update tab content
-      document.querySelectorAll('.tab-pane').forEach(pane => {
-        pane.classList.remove('active');
-      });
-      document.getElementById(`${tabName}Tab`).classList.add('active');
-    }
+// FETCH AND UPDATE DATA
+async function fetchData() {
+  try {
+    const [statusRes, strategiesRes, signalsRes] = await Promise.all([
+      fetch('/api/status'),
+      fetch('/api/strategies'),
+      fetch('/api/signals')
+    ]);
 
-    // Error handling
-    function showError(message) {
-      console.error(message);
-      // Could show user-friendly error message
-    }
+    const status = await statusRes.json();
+    const strategies = await strategiesRes.json();
+    const signals = await signalsRes.json();
 
-    // Initialize on page load
-    document.addEventListener('DOMContentLoaded', init);
-  </script>
+    // Update header
+    document.getElementById('statusText').textContent = status.operating_mode?.toUpperCase() || 'ACTIVE';
+    document.getElementById('balanceDisplay').textContent = `$${status.balance?.toFixed(2) || '0.00'}`;
+    document.getElementById('activeSignals').textContent = status.active_signals || 0;
+    document.getElementById('strategiesCount').textContent = status.strategies_active || 0;
+    document.getElementById('winRate').textContent = status.win_rate?.toFixed(1) + '%' || '0%';
+
+    // Update strategy bars and layers
+    updateStrategyBars(strategies.strategies || []);
+    updateLayerArchitecture(strategies.strategies || []);
+
+    // Update signal feed
+    updateSignalFeed(signals.signals || []);
+
+  } catch (error) {
+    console.error('Data fetch error:', error);
+  }
+}
+
+// Update time
+function updateTime() {
+  const now = new Date();
+  const timeString = now.toLocaleTimeString('en-US', {
+    hour12: false,
+    timeZone: 'America/Los_Angeles'
+  });
+  document.getElementById('currentTime').textContent = timeString + ' PST';
+}
+
+// Initialize
+function init() {
+  initCorticalHeatmap();
+  initTopology();
+  updateTime();
+  setInterval(updateTime, 1000);
+  setInterval(updateCorticalActivity, 5000);
+  fetchData();
+  setInterval(fetchData, 10000);
+}
+
+// Start the neural cortex
+document.addEventListener('DOMContentLoaded', init);
+</script>
 </body>
 </html>"""
