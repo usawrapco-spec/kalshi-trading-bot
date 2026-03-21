@@ -1,6 +1,6 @@
 """Kalshi API client wrapper with error handling and retry logic."""
 
-from kalshi_python import ApiClient, Configuration, MarketApi, PortfolioApi, ExchangeApi
+from kalshi_python import ApiClient, Configuration, MarketsApi, PortfolioApi, ExchangeApi
 import time
 from config import Config
 from utils.logger import setup_logger
@@ -28,7 +28,7 @@ class KalshiAPIClient:
             api_client = ApiClient(configuration)
             
             # Initialize API instances
-            self.market_api = MarketApi(api_client)
+            self.market_api = MarketsApi(api_client)
             self.portfolio_api = PortfolioApi(api_client)
             self.exchange_api = ExchangeApi(api_client)
             
@@ -107,39 +107,4 @@ class KalshiAPIClient:
             logger.info(f"✅ Order created: {order.get('order_id')}")
             return order
         except Exception as e:
-            logger.error(f"❌ Error creating order: {e}")
-            return None
-    
-    def get_portfolio(self):
-        """Get current portfolio/positions."""
-        try:
-            response = self.portfolio_api.get_portfolio()
-            portfolio = response.to_dict() if hasattr(response, 'to_dict') else response
-            return portfolio
-        except Exception as e:
-            logger.error(f"Error getting portfolio: {e}")
-            return None
-    
-    def get_balance(self):
-        """Get account balance."""
-        try:
-            response = self.portfolio_api.get_balance()
-            balance = response.to_dict() if hasattr(response, 'to_dict') else response
-            logger.debug(f"Balance: ${balance.get('balance', 0)/100:.2f}")
-            return balance
-        except Exception as e:
-            logger.error(f"Error getting balance: {e}")
-            return None
-    
-    def get_fills(self, ticker=None):
-        """Get recent fills/trades."""
-        try:
-            params = {}
-            if ticker:
-                params['ticker'] = ticker
-            response = self.portfolio_api.get_fills(**params)
-            fills = response.to_dict() if hasattr(response, 'to_dict') else response
-            return fills
-        except Exception as e:
-            logger.error(f"Error getting fills: {e}")
-            return None
+            logger.error(f"❌ Error crea
