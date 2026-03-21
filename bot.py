@@ -887,7 +887,7 @@ class KalshiBot:
 
 
 def main():
-    start_dashboard()
+    import threading
 
     parser = argparse.ArgumentParser(description='Kalshi Trading Bot')
     parser.add_argument('--demo', action='store_true', help='Use demo API')
@@ -899,7 +899,13 @@ def main():
         logger.info("Demo mode - using demo API")
 
     bot = KalshiBot(dry_run=True)  # Always paper trading for now
-    bot.run()
+
+    # Run bot trading loop in background thread
+    bot_thread = threading.Thread(target=bot.run, daemon=True)
+    bot_thread.start()
+
+    # Run Flask dashboard on main thread (Railway routes HTTP to PORT)
+    start_dashboard()
 
 
 if __name__ == '__main__':
