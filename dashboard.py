@@ -52,14 +52,21 @@ def api_status():
             else:  # LOSS
                 realized_pnl -= (t.get('count') or 1) * (t.get('price') or 0)
 
+        # Get starting balance from env
+        starting_balance = float(os.environ.get('PAPER_BALANCE', 100))
+        current_balance = latest.get('balance', starting_balance)
+        roi_percent = ((current_balance - starting_balance) / starting_balance * 100) if starting_balance else 0
+
         return jsonify({
             'is_running': latest.get('is_running', True),
-            'balance': latest.get('balance', 100.0),
+            'balance': current_balance,
+            'starting_balance': starting_balance,
             'daily_pnl': latest.get('daily_pnl', 0),
             'trades_today': latest.get('trades_today', 0),
             'active_positions': latest.get('active_positions', 0),
             'last_scan': latest.get('last_check'),
             'operating_mode': operating_mode,
+            'roi_percent': round(roi_percent, 2),
             'total_trades': len(entries),
             'settled_trades': total_settled,
             'wins': wins,
@@ -79,6 +86,7 @@ def api_status():
             'active_positions': 0,
             'last_scan': None,
             'operating_mode': 'live_paper',
+            'roi_percent': 0,
             'total_trades': 0,
             'settled_trades': 0,
             'wins': 0,
@@ -882,7 +890,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </style>
 </head>
 <body>
-<div class="terminal">
+<!-- LIVING BACKGROUND CANVAS -->
+<canvas id="bgCanvas" style="position:fixed;top:0;left:0;width:100%;height:100%;z-index:0;pointer-events:none;"></canvas>
+
+<div class="terminal" style="position:relative;z-index:1;">
   <!-- HEADER -->
   <div class="header">
     <div class="header-left">
@@ -894,8 +905,8 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     </div>
     <div class="header-right">
       <span id="currentTime">22:44:15 PST</span>
-      <span id="lastScan">Last scan: 2m ago</span>
-      <span class="balance" id="balanceDisplay">$47326.47</span>
+      <span data-field="last_scan">Last scan: 2m ago</span>
+      <span class="balance" data-field="balance">$—</span>
     </div>
   </div>
 
@@ -909,23 +920,23 @@ DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="metrics-panel">
           <div class="metric">
             <div class="metric-label">ACTIVE SIGNALS</div>
-            <div class="metric-value" id="activeSignals">478</div>
+            <div class="metric-value" data-field="active_signals">—</div>
             <div class="metric-sub">NETWORK LOAD 72%</div>
           </div>
           <div class="metric">
             <div class="metric-label">COMPUTE REVENUE</div>
-            <div class="metric-value" id="computeRevenue">+$47,326.47</div>
-            <div class="metric-sub">TODAY: +$355.40</div>
+            <div class="metric-value" data-field="balance">$—</div>
+            <div class="metric-sub">TODAY: <span data-field="daily_pnl">$—</span></div>
           </div>
           <div class="metric">
             <div class="metric-label">TOTAL REVENUE</div>
-            <div class="metric-value" id="totalRevenue">$47326.42</div>
-            <div class="metric-sub">COST/HR: $3.12</div>
+            <div class="metric-value" data-field="balance">$—</div>
+            <div class="metric-sub">ROI: <span data-field="roi">—%</span></div>
           </div>
           <div class="metric">
             <div class="metric-label">NET MARGIN</div>
-            <div class="metric-value" id="netMargin">42.2%</div>
-            <div class="metric-sub">STRATEGIES: 10</div>
+            <div class="metric-value" data-field="win_rate">—%</div>
+            <div class="metric-sub">STRATEGIES: <span data-field="strategies_active">—</span></div>
           </div>
         </div>
         <div class="layer-arch">
@@ -1076,6 +1087,327 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 let particles = [];
 let trainingLogLines = [];
 let corticalData = new Array(24 * 7).fill(0); // 24 hours x 7 days
+
+// === LIVING BACKGROUND PARTICLE SYSTEM ===
+let bgParticles = [];
+let ripples = [];
+let lastTradeCount = null;
+let lastBalance = null;
+let knownTrades = new Set();
+
+// Background particle system
+function initBackgroundParticles() {
+  const bgCanvas = document.getElementById('bgCanvas');
+  const bgCtx = bgCanvas.getContext('2d');
+
+  function resizeBgCanvas() {
+    bgCanvas.width = window.innerWidth;
+    bgCanvas.height = window.innerHeight;
+  }
+  resizeBgCanvas();
+  window.addEventListener('resize', resizeBgCanvas);
+
+  // Initialize ambient particles
+  for (let i = 0; i < 60; i++) {
+    bgParticles.push(new BgParticle(-10, Math.random() * bgCanvas.height));
+  }
+
+  animateBg();
+}
+
+class BgParticle {
+  constructor(x, y, opts = {}) {
+    this.x = x || Math.random() * document.getElementById('bgCanvas').width;
+    this.y = y || Math.random() * document.getElementById('bgCanvas').height;
+    this.vx = opts.vx || (Math.random() * 0.3 + 0.1);
+    this.vy = opts.vy || (Math.random() - 0.5) * 0.2;
+    this.size = opts.size || Math.random() * 2 + 0.5;
+    this.alpha = opts.alpha || Math.random() * 0.15 + 0.05;
+    this.maxAlpha = this.alpha;
+    this.color = opts.color || '0, 240, 255';  // cyan
+    this.life = opts.life || Infinity;
+    this.age = 0;
+    this.decay = opts.decay || 0;
+  }
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.age++;
+    if (this.decay > 0) {
+      this.alpha -= this.decay;
+    }
+    const canvas = document.getElementById('bgCanvas');
+    if (this.x > canvas.width + 10) this.x = -10;
+    if (this.x < -10) this.x = canvas.width + 10;
+    if (this.y > canvas.height + 10) this.y = -10;
+    if (this.y < -10) this.y = canvas.height + 10;
+  }
+  draw(ctx) {
+    if (this.alpha <= 0) return;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${this.color}, ${Math.max(0, this.alpha)})`;
+    ctx.fill();
+  }
+  isDead() {
+    return this.alpha <= 0 || this.age > this.life;
+  }
+}
+
+class Ripple {
+  constructor(x, y, color, maxRadius) {
+    this.x = x;
+    this.y = y;
+    this.radius = 0;
+    this.maxRadius = maxRadius || 200;
+    this.alpha = 0.6;
+    this.color = color || '0, 240, 255';
+    this.speed = 3;
+  }
+  update() {
+    this.radius += this.speed;
+    this.alpha -= 0.01;
+  }
+  draw(ctx) {
+    if (this.alpha <= 0) return;
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(${this.color}, ${this.alpha})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+  isDead() { return this.alpha <= 0; }
+}
+
+function animateBg() {
+  const bgCanvas = document.getElementById('bgCanvas');
+  const bgCtx = bgCanvas.getContext('2d');
+
+  // Fade trail effect
+  bgCtx.fillStyle = 'rgba(5, 5, 8, 0.15)';
+  bgCtx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+
+  // Update and draw particles
+  for (let p of bgParticles) {
+    p.update();
+    p.draw(bgCtx);
+  }
+  bgParticles = bgParticles.filter(p => !p.isDead());
+
+  // Draw neural mesh connections
+  const ambientParticles = bgParticles.filter(p => p.life === Infinity);
+  for (let i = 0; i < ambientParticles.length; i++) {
+    for (let j = i + 1; j < ambientParticles.length; j++) {
+      const dx = ambientParticles[i].x - ambientParticles[j].x;
+      const dy = ambientParticles[i].y - ambientParticles[j].y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 100) {
+        const alpha = (1 - dist / 100) * 0.06;
+        bgCtx.beginPath();
+        bgCtx.moveTo(ambientParticles[i].x, ambientParticles[i].y);
+        bgCtx.lineTo(ambientParticles[j].x, ambientParticles[j].y);
+        bgCtx.strokeStyle = `rgba(0, 240, 255, ${alpha})`;
+        bgCtx.lineWidth = 0.5;
+        bgCtx.stroke();
+      }
+    }
+  }
+
+  // Update and draw ripples
+  for (let r of ripples) {
+    r.update();
+    r.draw(bgCtx);
+  }
+  ripples = ripples.filter(r => !r.isDead());
+
+  // Keep ambient particle count at ~60
+  while (bgParticles.filter(p => p.life === Infinity).length < 60) {
+    bgParticles.push(new BgParticle(-10, Math.random() * bgCanvas.height));
+  }
+
+  requestAnimationFrame(animateBg);
+}
+
+// === EVENT TRIGGERS ===
+function triggerScanPulse() {
+  // Bot just scanned — brief speed burst + brightness wave
+  for (let p of bgParticles) {
+    if (p.life === Infinity) {
+      p.vx *= 3;
+      setTimeout(() => { p.vx /= 3; }, 500);
+      p.alpha = Math.min(p.maxAlpha * 3, 0.4);
+    }
+  }
+  // Add wave of new particles
+  for (let i = 0; i < 15; i++) {
+    bgParticles.push(new BgParticle(-10, Math.random() * document.getElementById('bgCanvas').height, {
+      vx: Math.random() * 2 + 1,
+      alpha: 0.3,
+      decay: 0.003,
+      life: 200,
+      size: Math.random() * 3 + 1
+    }));
+  }
+}
+
+function triggerNewTrade(side) {
+  // New trade placed — sonar ping + particle burst from center
+  const cx = document.getElementById('bgCanvas').width / 2;
+  const cy = document.getElementById('bgCanvas').height / 2;
+
+  // Sonar ripple
+  ripples.push(new Ripple(cx, cy, '0, 240, 255', 300));
+
+  // Particle burst
+  for (let i = 0; i < 40; i++) {
+    const angle = (Math.PI * 2 * i) / 40;
+    const speed = Math.random() * 2 + 1;
+    bgParticles.push(new BgParticle(cx, cy, {
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      alpha: 0.6,
+      decay: 0.008,
+      life: 120,
+      size: Math.random() * 3 + 1,
+      color: side === 'yes' ? '0, 240, 255' : '255, 106, 0'
+    }));
+  }
+
+  // Screen border flash
+  flashBorder('0, 240, 255');
+}
+
+function triggerWin(pnl) {
+  // SETTLEMENT WIN — EPIC CELEBRATION
+  const cx = document.getElementById('bgCanvas').width / 2;
+  const cy = document.getElementById('bgCanvas').height / 2;
+
+  // Multiple expanding ripples (golden/green)
+  for (let i = 0; i < 3; i++) {
+    setTimeout(() => {
+      ripples.push(new Ripple(cx, cy, '57, 255, 20', 400 + i * 100));
+    }, i * 200);
+  }
+
+  // MASSIVE particle explosion — golden and green
+  for (let i = 0; i < 80; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = Math.random() * 4 + 1;
+    const isGold = Math.random() > 0.5;
+    bgParticles.push(new BgParticle(cx + (Math.random() - 0.5) * 100, cy + (Math.random() - 0.5) * 100, {
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      alpha: 0.8,
+      decay: 0.005,
+      life: 200,
+      size: Math.random() * 4 + 2,
+      color: isGold ? '255, 215, 0' : '57, 255, 20'
+    }));
+  }
+
+  // Screen border flash green
+  flashBorder('57, 255, 20');
+
+  // Show floating P&L text
+  showFloatingText(`+$${Math.abs(pnl).toFixed(2)}`, 'profit');
+}
+
+function triggerLoss(pnl) {
+  // SETTLEMENT LOSS — dramatic but not depressing
+  const cx = document.getElementById('bgCanvas').width / 2;
+  const cy = document.getElementById('bgCanvas').height / 2;
+
+  // Red ripple (like an impact)
+  ripples.push(new Ripple(cx, cy, '255, 51, 51', 250));
+
+  // Particles "scatter" outward from center — red/orange
+  for (let i = 0; i < 30; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = Math.random() * 3 + 0.5;
+    bgParticles.push(new BgParticle(cx, cy, {
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed + 1,
+      alpha: 0.5,
+      decay: 0.008,
+      life: 120,
+      size: Math.random() * 3 + 1,
+      color: Math.random() > 0.5 ? '255, 51, 51' : '255, 106, 0'
+    }));
+  }
+
+  // Brief screen shake effect
+  shakeScreen();
+
+  // Red border flash
+  flashBorder('255, 51, 51');
+
+  // Show floating P&L text
+  showFloatingText(`-$${Math.abs(pnl).toFixed(2)}`, 'loss');
+}
+
+// === VISUAL HELPER FUNCTIONS ===
+function flashBorder(color) {
+  const flash = document.createElement('div');
+  flash.style.cssText = `
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    border: 2px solid rgba(${color}, 0.8);
+    box-shadow: inset 0 0 60px rgba(${color}, 0.3);
+    pointer-events: none; z-index: 9998;
+    transition: opacity 1s ease-out;
+  `;
+  document.body.appendChild(flash);
+  setTimeout(() => { flash.style.opacity = '0'; }, 50);
+  setTimeout(() => { flash.remove(); }, 1100);
+}
+
+function shakeScreen() {
+  const body = document.body;
+  body.style.transition = 'none';
+  const shakes = [
+    {x: 3, y: 0}, {x: -3, y: 2}, {x: 2, y: -2},
+    {x: -2, y: 1}, {x: 1, y: -1}, {x: 0, y: 0}
+  ];
+  shakes.forEach((s, i) => {
+    setTimeout(() => {
+      body.style.transform = `translate(${s.x}px, ${s.y}px)`;
+    }, i * 50);
+  });
+}
+
+function showFloatingText(text, type) {
+  const el = document.createElement('div');
+  const color = type === 'profit' ? '#39ff14' : '#ff3333';
+  const glow = type === 'profit' ? '0 0 20px rgba(57,255,20,0.6)' : '0 0 20px rgba(255,51,51,0.6)';
+  el.textContent = text;
+  el.style.cssText = `
+    position: fixed;
+    top: 40%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 3rem;
+    font-weight: 700;
+    color: ${color};
+    text-shadow: ${glow};
+    z-index: 9999;
+    pointer-events: none;
+    animation: floatUp 2s ease-out forwards;
+  `;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2500);
+}
+
+// Add the float-up animation to the page styles
+const floatStyle = document.createElement('style');
+floatStyle.textContent = `
+  @keyframes floatUp {
+    0% { opacity: 1; transform: translate(-50%, -50%) scale(0.5); }
+    20% { opacity: 1; transform: translate(-50%, -50%) scale(1.2); }
+    40% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%, -150%) scale(1); }
+  }
+`;
+document.head.appendChild(floatStyle);
 
 // Initialize cortical heatmap
 function initCorticalHeatmap() {
@@ -1346,22 +1678,112 @@ function updateSignalFeed(signals) {
 // FETCH AND UPDATE DATA
 async function fetchData() {
   try {
-    const [statusRes, strategiesRes, signalsRes] = await Promise.all([
+    const [statusRes, strategiesRes, signalsRes, tradesRes] = await Promise.all([
       fetch('/api/status'),
       fetch('/api/strategies'),
-      fetch('/api/signals')
+      fetch('/api/signals'),
+      fetch('/api/trades')
     ]);
 
     const status = await statusRes.json();
     const strategies = await strategiesRes.json();
     const signals = await signalsRes.json();
+    const trades = await tradesRes.json();
+
+    // === DETECT EVENTS AND TRIGGER ANIMATIONS ===
+    triggerScanPulse();  // Always trigger scan pulse on refresh
+
+    // Detect new trades
+    if (trades.trades && Array.isArray(trades.trades)) {
+      for (let t of trades.trades) {
+        const tradeId = t.id || t.timestamp;
+        if (tradeId && !knownTrades.has(tradeId)) {
+          knownTrades.add(tradeId);
+
+          // Only animate if this isn't the first load
+          if (lastTradeCount !== null) {
+            const reason = (t.reason || '').toUpperCase();
+
+            if (reason.includes('SETTLED WIN')) {
+              // Extract P&L from reason string
+              let pnl = 0;
+              if (t.reason && t.reason.includes('pnl=')) {
+                try { pnl = parseFloat(t.reason.split('pnl=')[1].split(',')[0].replace('$','').replace('+','')); } catch(e) {}
+              }
+              triggerWin(pnl);
+            } else if (reason.includes('SETTLED LOSS')) {
+              let pnl = 0;
+              if (t.reason && t.reason.includes('pnl=')) {
+                try { pnl = parseFloat(t.reason.split('pnl=')[1].split(',')[0].replace('$','').replace('+','')); } catch(e) {}
+              }
+              triggerLoss(Math.abs(pnl));
+            } else if (t.action === 'buy') {
+              triggerNewTrade(t.side);
+            }
+          }
+        }
+      }
+      lastTradeCount = trades.trades.length;
+    }
+
+    // Detect balance change
+    if (status && status.balance) {
+      if (lastBalance !== null && lastBalance !== status.balance) {
+        const diff = status.balance - lastBalance;
+        if (Math.abs(diff) > 0.01) {
+          // Balance changed — could be a settlement
+          if (diff > 0) {
+            flashBorder('57, 255, 20');
+          } else {
+            flashBorder('255, 51, 51');
+          }
+        }
+      }
+      lastBalance = status.balance;
+    }
+
+    // === UPDATE ALL DASHBOARD ELEMENTS WITH REAL DATA ===
 
     // Update header
     document.getElementById('statusText').textContent = status.operating_mode?.toUpperCase() || 'ACTIVE';
     document.getElementById('balanceDisplay').textContent = `$${status.balance?.toFixed(2) || '0.00'}`;
-    document.getElementById('activeSignals').textContent = status.active_signals || 0;
-    document.getElementById('strategiesCount').textContent = status.strategies_active || 0;
-    document.getElementById('winRate').textContent = status.win_rate?.toFixed(1) + '%' || '0%';
+
+    // Update metrics using data-field attributes
+    document.querySelectorAll('[data-field="balance"]').forEach(el => {
+      el.textContent = `$${status.balance?.toFixed(2) || '0.00'}`;
+    });
+    document.querySelectorAll('[data-field="daily_pnl"]').forEach(el => {
+      const pnl = status.daily_pnl || 0;
+      const prefix = pnl >= 0 ? '+$' : '-$';
+      el.textContent = prefix + Math.abs(pnl).toFixed(2);
+      el.className = pnl >= 0 ? 'profit' : 'loss';
+    });
+    document.querySelectorAll('[data-field="roi"]').forEach(el => {
+      const roi = status.roi_percent || 0;
+      el.textContent = (roi >= 0 ? '+' : '') + roi.toFixed(2) + '%';
+      el.className = roi >= 0 ? 'profit' : 'loss';
+    });
+    document.querySelectorAll('[data-field="trades_today"]').forEach(el => {
+      el.textContent = status.trades_today || 0;
+    });
+    document.querySelectorAll('[data-field="positions"]').forEach(el => {
+      el.textContent = status.active_positions || 0;
+    });
+    document.querySelectorAll('[data-field="last_scan"]').forEach(el => {
+      if (status.last_scan) {
+        const d = new Date(status.last_scan);
+        const now = new Date();
+        const diff = (now - d) / 1000;
+        if (diff < 60) el.textContent = Math.floor(diff) + 's ago';
+        else if (diff < 3600) el.textContent = Math.floor(diff / 60) + 'm ago';
+        else el.textContent = Math.floor(diff / 3600) + 'h ago';
+      } else {
+        el.textContent = '—';
+      }
+    });
+
+    // Update page title with real balance
+    document.title = `💰 $${status.balance?.toFixed(0) || '0'} | KALSHI ALPHA`;
 
     // Update strategy bars and layers
     updateStrategyBars(strategies.strategies || []);
