@@ -25,54 +25,33 @@ class KalshiAPIClient:
         self._private_key = self._load_private_key(raw_key)
         logger.info(f"Kalshi client initialized for {self.host}")
 
-    @staticmethod
-    def _load_private_key(key_str):
-        """Load an RSA private key from a PEM string.
-
-        Handles Railway env vars where the key may be quoted, have literal
-        backslash-n instead of real newlines, or arrive as one long line
-        with spaces instead of newlines.
-        """
+    def _load_private_key(self, raw_key):
         import re
+        key_str = raw_key.strip().strip('"').strip("'")
 
-        if not key_str:
-            raise ValueError("KALSHI_PRIVATE_KEY is not set")
-
-        # 1. Strip surrounding whitespace
-        key_str = key_str.strip()
-
-        # 2. Strip surrounding quotes
-        if len(key_str) >= 2 and key_str[0] in ('"', "'") and key_str[-1] == key_str[0]:
-            key_str = key_str[1:-1].strip()
-
-        # 3. Replace literal backslash-n with real newlines
+        # Replace literal \n with real newlines
         key_str = key_str.replace('\\n', '\n')
 
-        # 4. Reconstruct proper PEM format from the base64 content
-        #    Detect the header type (RSA PRIVATE KEY, EC PRIVATE KEY, PRIVATE KEY)
-        header_match = re.search(r'-----BEGIN ([A-Z ]+)-----', key_str)
-        if header_match:
-            key_type = header_match.group(1)
-            # Extract base64 between BEGIN and END markers
-            pattern = rf'-----BEGIN {re.escape(key_type)}-----(.*?)-----END {re.escape(key_type)}-----'
-            body_match = re.search(pattern, key_str, re.DOTALL)
-            if body_match:
-                b64 = body_match.group(1)
-                # Remove all whitespace/newlines from the base64 content
-                b64_clean = re.sub(r'\s+', '', b64)
-                # Split into 64-character lines (PEM standard)
-                lines = [b64_clean[i:i+64] for i in range(0, len(b64_clean), 64)]
-                key_str = f"-----BEGIN {key_type}-----\n" + '\n'.join(lines) + f"\n-----END {key_type}-----"
-        else:
-            # No PEM headers — treat entire string as base64, wrap as RSA
-            b64_clean = re.sub(r'\s+', '', key_str)
-            lines = [b64_clean[i:i+64] for i in range(0, len(b64_clean), 64)]
-            key_str = "-----BEGIN RSA PRIVATE KEY-----\n" + '\n'.join(lines) + "\n-----END RSA PRIVATE KEY-----"
+        # Remove any stray backslashes
+        key_str = key_str.replace('\\', '')
 
-        # 5. Log first 40 chars so we can verify in Railway logs
-        logger.info(f"Private key starts with: {repr(key_str[:40])}")
+        # Extract just the base64 content between BEGIN and END
+        match = re.search(r'-----BEGIN [A-Z ]+-----(.+?)-----END [A-Z ]+-----', key_str, re.DOTALL)
+        if not match:
+            raise ValueError("Could not find PEM header/footer in key")
 
-        return serialization.load_pem_private_key(key_str.encode('utf-8'), password=None)
+        header = "-----BEGIN RSA PRIVATE KEY-----"
+        footer = "-----END RSA PRIVATE KEY-----"
+        base64_content = match.group(1)
+
+        # Remove ALL whitespace and non-base64 characters from the middle
+        base64_clean = re.sub(r'[^A-Za-z0-9+/=]', '', base64_content)
+
+        # Rebuild proper PEM with 64-char lines
+        lines = [base64_clean[i:i+64] for i in range(0, len(base64_clean), 64)]
+        pem_key = header + "\n" + "\n".join(lines) + "\n" + footer
+
+        return serialization.load_pem_private_key(pem_key.encode('utf-8'), password=None)
 
     def _sign_request(self, method, path):
         """Create auth headers with RSA-PSS signature for a request."""
