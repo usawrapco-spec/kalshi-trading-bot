@@ -17,6 +17,7 @@ from utils.supabase_db import SupabaseDB
 from strategies.arbitrage import ArbitrageStrategy
 from strategies.momentum import MomentumStrategy
 from strategies.value_betting import ValueBettingStrategy
+from dashboard import start_dashboard
 
 logger = setup_logger('main')
 
@@ -214,6 +215,9 @@ def main():
         Config.KALSHI_API_HOST = 'https://demo-api.kalshi.co'
         logger.info("🧪 Demo mode enabled - using demo API")
     
+    # Start web dashboard on a separate thread
+    start_dashboard()
+
     # Create and run bot
     bot = KalshiBot(dry_run=args.dry_run or args.demo)
     bot.run()
