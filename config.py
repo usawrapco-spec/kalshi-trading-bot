@@ -43,9 +43,9 @@ class Config:
         
         # Check if using demo API
         if 'demo' in cls.KALSHI_API_HOST:
-            print("⚠️  Using DEMO API - No real money at risk")
+            print("[DEMO] Using DEMO API - No real money at risk")
         else:
-            print("🔴 Using LIVE API - Real money trading enabled!")
+            print("[LIVE] Using LIVE API - Real money trading enabled!")
         
         return True
     

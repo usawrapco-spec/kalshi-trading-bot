@@ -16,14 +16,18 @@ class ArbitrageStrategy(BaseStrategy):
     3. Large bid-ask spreads
     """
     
-    def __init__(self, client, risk_manager, min_edge=0.02):
+    def __init__(self, client, risk_manager, db, min_edge=0.02):
         """
         Initialize arbitrage strategy.
         
         Args:
+            client: Trading client
+            risk_manager: Risk management instance
+            db: Database instance for logging trades
             min_edge: Minimum price edge required (e.g., 0.02 = 2 cents)
         """
         super().__init__(client, risk_manager)
+        self.db = db  # Store database instance
         self.min_edge = min_edge
         logger.info(f"Arbitrage strategy initialized (min edge: {min_edge})")
     

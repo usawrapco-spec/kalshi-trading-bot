@@ -20,8 +20,11 @@ def setup_logger(name='kalshi_bot'):
     if logger.handlers:
         return logger
     
-    # Console handler
-    console_handler = logging.StreamHandler()
+    # Console handler with UTF-8 encoding
+    import sys
+    console_handler = logging.StreamHandler(
+        stream=open(sys.stdout.fileno(), mode='w', encoding='utf-8', closefd=False)
+    )
     console_handler.setLevel(logging.INFO)
     console_format = logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s',
@@ -34,7 +37,7 @@ def setup_logger(name='kalshi_bot'):
         Config.LOGS_DIR,
         f'bot_{datetime.now().strftime("%Y%m%d")}.log'
     )
-    file_handler = logging.FileHandler(log_file)
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
     file_format = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'

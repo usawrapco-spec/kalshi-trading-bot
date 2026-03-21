@@ -64,11 +64,11 @@ class KalshiBot:
         logger.info("Loading strategies...")
         
         if Config.ENABLE_ARBITRAGE:
-            self.strategies.append(ArbitrageStrategy(self.client, self.risk_manager, min_edge=0.02))
+            self.strategies.append(ArbitrageStrategy(self.client, self.risk_manager, self.db, min_edge=0.02))
             logger.info("✅ Arbitrage strategy enabled")
-        
+
         if Config.ENABLE_MOMENTUM:
-            self.strategies.append(MomentumStrategy(self.client, self.risk_manager, threshold=0.05))
+            self.strategies.append(MomentumStrategy(self.client, self.risk_manager, self.db, price_change_threshold=0.05))
             logger.info("✅ Momentum strategy enabled")
         
         if not self.strategies:

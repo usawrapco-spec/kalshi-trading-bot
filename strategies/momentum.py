@@ -17,14 +17,18 @@ class MomentumStrategy(BaseStrategy):
     3. Strong directional movement
     """
     
-    def __init__(self, client, risk_manager, price_change_threshold=0.05):
+    def __init__(self, client, risk_manager, db, price_change_threshold=0.05):
         """
         Initialize momentum strategy.
-        
+
         Args:
+            client: Trading client
+            risk_manager: Risk management instance
+            db: Database instance for logging trades
             price_change_threshold: Minimum price change % to trigger (e.g., 0.05 = 5%)
         """
         super().__init__(client, risk_manager)
+        self.db = db
         self.price_change_threshold = price_change_threshold
         self.price_history = {}  # Track price changes over time
         logger.info(f"Momentum strategy initialized (threshold: {price_change_threshold})")
