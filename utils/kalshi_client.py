@@ -28,22 +28,38 @@ class KalshiAPIClient:
     def _load_private_key(self, key_str):
         """Load an RSA private key from a PEM string.
 
-        Handles Railway env vars where newlines are stored as literal
-        backslash-n (\\n) instead of real newline characters.
+        Handles Railway env vars where the key may be quoted and newlines
+        are stored as literal backslash-n characters.
         """
         if not key_str:
             raise ValueError("KALSHI_PRIVATE_KEY is not set")
-        # Replace literal \n (the two chars backslash + n) with real newlines.
-        # Do this regardless of whether real newlines are also present.
-        if '\\n' in key_str:
-            key_str = key_str.replace('\\n', '\n')
-        # Also handle double-escaped \\\\n just in case
-        if '\\n' in key_str:
-            key_str = key_str.replace('\\n', '\n')
-        # Strip whitespace that may surround the key
+
+        # 1. Strip surrounding quotes (Railway may wrap value in quotes)
         key_str = key_str.strip()
+        if (key_str.startswith('"') and key_str.endswith('"')) or \
+           (key_str.startswith("'") and key_str.endswith("'")):
+            key_str = key_str[1:-1]
+
+        # 2. Replace literal two-char sequence backslash+n with real newlines
+        key_str = key_str.replace('\\n', '\n')
+
+        # 3. If still no real newlines, try unicode_escape as fallback
+        if '\n' not in key_str and '\\' in key_str:
+            try:
+                key_str = bytes(key_str, 'utf-8').decode('unicode_escape')
+            except Exception:
+                pass
+
+        # 4. Strip whitespace again after all transformations
+        key_str = key_str.strip()
+
+        # 5. Ensure PEM headers are present
         if not key_str.startswith('-----'):
             key_str = f"-----BEGIN RSA PRIVATE KEY-----\n{key_str}\n-----END RSA PRIVATE KEY-----"
+
+        # Log first 30 chars so we can verify format in Railway logs
+        logger.info(f"Private key starts with: {repr(key_str[:30])}")
+
         return serialization.load_pem_private_key(key_str.encode('utf-8'), password=None)
 
     def _sign_request(self, method, path):
