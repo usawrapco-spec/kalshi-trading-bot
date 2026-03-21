@@ -17,6 +17,7 @@ import json
 import requests
 from utils.logger import setup_logger
 from utils.api_resilience import APIResilience
+from utils.gemini_client import ask_gemini
 
 logger = setup_logger('ai_debate')
 
@@ -102,9 +103,29 @@ def _ask_claude(title, price, side, edge, grok_prob, grok_reasoning, api_key):
     return APIResilience.claude_call(api_call)
 
 
-def run_debate(signal, market_price):
-    """Grok-primary debate. Grok decides, Claude adjusts sizing.
+def _ask_gemini_vote(title, price, side, edge):
+    """Ask Gemini for third opinion vote."""
+    gemini_key = os.getenv('GEMINI_API_KEY')
+    if not gemini_key:
+        return None
 
+    prompt = (
+        f"Market: \"{title}\". Current YES price: ${price:.2f} (implying {price*100:.0f}% probability). "
+        f"Strategy says BUY {side.upper()} with {edge*100:.0f}% edge. "
+        f"What is the true probability this resolves YES? "
+        f"Reply with ONLY a JSON object: "
+        f'{{"probability": 0.XX, "confidence": 0-100, "reasoning": "one sentence"}}'
+    )
+    text = ask_gemini(prompt, max_tokens=200)
+    if text:
+        return _parse_json_response(text)
+    return None
+
+
+def run_debate(signal, market_price):
+    """Three-brain debate: Grok + Claude + Gemini (optional).
+
+    Voting: 3/3 = full size, 2/3 = 75%, 1/3 = 25%, 0/3 = skip.
     Returns: (should_trade: bool, adjusted_signal: dict, debate_log: str)
     """
     grok_key = os.getenv('XAI_API_KEY')
@@ -132,67 +153,79 @@ def run_debate(signal, market_price):
     else:
         grok_edge = (1 - grok_prob) - (1 - market_price)
 
-    # GROK VETO: if Grok sees no edge, always skip
-    if grok_edge < 0.03:
-        debate_log = (
-            f"GROK DECIDES: {grok_prob:.0%} prob, edge={grok_edge:+.0%} -> NO TRADE (veto). "
-            f"Reason: {grok_reason}"
-        )
-        logger.info(debate_log)
-        return False, signal, debate_log
+    # Count votes: does each AI see positive edge?
+    votes = 0
+    voters = []
 
-    # Grok says TRADE - update signal with Grok's probability
+    if grok_edge > 0.03:
+        votes += 1
+        voters.append(f"Grok={grok_prob:.0%} YES")
+    else:
+        voters.append(f"Grok={grok_prob:.0%} NO")
+
+    # Update signal with Grok's probability
     signal['model_prob'] = grok_prob if side == 'yes' else (1 - grok_prob)
     signal['edge'] = grok_edge
-    logger.info(f"GROK DECIDES: {grok_prob:.0%} prob, edge={grok_edge:+.0%} -> TRADE. Reason: {grok_reason}")
+    logger.info(f"GROK VOTE: {grok_prob:.0%} prob, edge={grok_edge:+.0%}. Reason: {grok_reason}")
 
     # Step 2: Ask Claude for second opinion (if available)
-    if not claude_key:
-        debate_log = (
-            f"GROK DECIDES: {grok_prob:.0%} prob -> TRADE. Claude unavailable -> FULL SIZE"
+    if claude_key:
+        claude_result = _ask_claude(
+            title, market_price, side, edge,
+            grok_prob, grok_reason, claude_key
         )
+        if claude_result:
+            claude_prob = claude_result.get('probability', 0.5)
+            claude_reason = claude_result.get('reasoning', '')[:80]
+            if side == 'yes':
+                claude_edge = claude_prob - market_price
+            else:
+                claude_edge = (1 - claude_prob) - (1 - market_price)
+
+            if claude_edge > 0.03:
+                votes += 1
+                voters.append(f"Claude={claude_prob:.0%} YES")
+            else:
+                voters.append(f"Claude={claude_prob:.0%} NO")
+            logger.info(f"CLAUDE VOTE: {claude_prob:.0%} prob, edge={claude_edge:+.0%}. Reason: {claude_reason}")
+
+    # Step 3: Ask Gemini for third opinion (if GEMINI_API_KEY set)
+    gemini_result = _ask_gemini_vote(title, market_price, side, edge)
+    if gemini_result:
+        gemini_prob = gemini_result.get('probability', 0.5)
+        gemini_reason = gemini_result.get('reasoning', '')[:80]
+        if side == 'yes':
+            gemini_edge = gemini_prob - market_price
+        else:
+            gemini_edge = (1 - gemini_prob) - (1 - market_price)
+
+        if gemini_edge > 0.03:
+            votes += 1
+            voters.append(f"Gemini={gemini_prob:.0%} YES")
+        else:
+            voters.append(f"Gemini={gemini_prob:.0%} NO")
+        logger.info(f"GEMINI VOTE: {gemini_prob:.0%} prob, edge={gemini_edge:+.0%}. Reason: {gemini_reason}")
+
+    # Voting decision: 3/3=full, 2/3=75%, 1/3=25%, 0/3=skip
+    voter_str = ', '.join(voters)
+    if votes == 0:
+        debate_log = f"DEBATE {votes}/3: {voter_str} -> NO TRADE (unanimous reject)"
+        logger.info(debate_log)
+        return False, signal, debate_log
+    elif votes == 1:
+        original_count = signal.get('count', 1)
+        signal['count'] = max(1, int(original_count * 0.25))
+        debate_log = f"DEBATE {votes}/3: {voter_str} -> 25% SIZE (count={signal['count']})"
         logger.info(debate_log)
         return True, signal, debate_log
-
-    claude_result = _ask_claude(
-        title, market_price, side, edge,
-        grok_prob, grok_reason, claude_key
-    )
-
-    if not claude_result:
-        debate_log = (
-            f"GROK DECIDES: {grok_prob:.0%} prob -> TRADE. Claude error -> FULL SIZE"
-        )
+    elif votes == 2:
+        original_count = signal.get('count', 1)
+        signal['count'] = max(1, int(original_count * 0.75))
+        debate_log = f"DEBATE {votes}/3: {voter_str} -> 75% SIZE (count={signal['count']})"
         logger.info(debate_log)
         return True, signal, debate_log
-
-    claude_prob = claude_result.get('probability', 0.5)
-    claude_reason = claude_result.get('reasoning', '')[:80]
-
-    # Does Claude agree with the trade direction?
-    if side == 'yes':
-        claude_edge = claude_prob - market_price
-    else:
-        claude_edge = (1 - claude_prob) - (1 - market_price)
-
-    claude_agrees = claude_edge > 0.03  # Claude also sees positive edge
-
-    if claude_agrees:
-        # Both agree: FULL SIZE, boost confidence
+    else:  # votes == 3
         signal['confidence'] = min(signal.get('confidence', 50) + 15, 100)
-        debate_log = (
-            f"GROK DECIDES: {grok_prob:.0%} prob -> TRADE. "
-            f"Claude confirms: {claude_prob:.0%} -> FULL SIZE"
-        )
-        logger.info(debate_log)
-        return True, signal, debate_log
-    else:
-        # Grok says trade, Claude disagrees: HALF SIZE
-        signal['count'] = max(1, signal.get('count', 1) // 2)
-        debate_log = (
-            f"GROK DECIDES: {grok_prob:.0%} prob -> TRADE. "
-            f"Claude disagrees: {claude_prob:.0%} -> HALF SIZE (count={signal['count']}). "
-            f"Claude: {claude_reason}"
-        )
+        debate_log = f"DEBATE {votes}/3: {voter_str} -> FULL SIZE (unanimous)"
         logger.info(debate_log)
         return True, signal, debate_log

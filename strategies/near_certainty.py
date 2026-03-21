@@ -13,6 +13,8 @@ from utils.market_helpers import get_yes_cents, get_no_cents, get_volume
 
 logger = setup_logger('near_certainty')
 
+MAX_ENTRY_PRICE = 0.50  # NEVER buy contracts above 50 cents
+
 
 class NearCertaintyStrategy(BaseStrategy):
     """Markets closing <24h: buy 85-97c side or cheap 3-15c contrarian."""
@@ -93,6 +95,10 @@ class NearCertaintyStrategy(BaseStrategy):
         elif 80 <= no_c <= 99:
             side, price = 'no', no_c
         else:
+            return None
+
+        # QUANT RULE: Skip contracts above max entry price
+        if price / 100.0 > MAX_ENTRY_PRICE:
             return None
 
         profit = 100 - price

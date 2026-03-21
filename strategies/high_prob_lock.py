@@ -32,6 +32,9 @@ class HighProbLockStrategy(BaseStrategy):
         logger.info(f"HighProbLock initialized (YES {LOCK_MIN:.0%}-{LOCK_MAX:.0%}, bond-like returns)")
 
     def analyze(self, markets):
+        return []  # Disabled - buying 92-98c contracts is mathematically terrible
+
+    def _analyze_disabled(self, markets):
         signals = []
         now = datetime.now(timezone.utc)
         checked = 0

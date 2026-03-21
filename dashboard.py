@@ -1102,9 +1102,118 @@ HTML_TEMPLATE = """
 </html>
 """
 
+
+def get_db():
+    """Helper to get a SupabaseDB instance."""
+    return SupabaseDB()
+
+
 @app.route('/')
 def dashboard():
     return render_template_string(HTML_TEMPLATE)
+
+
+@app.route('/api/status')
+def api_status():
+    try:
+        db = get_db()
+        result = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
+        if result.data:
+            row = result.data[0]
+            bal = row.get('balance', 100)
+            return jsonify({
+                'is_running': row.get('is_running', False),
+                'balance': bal,
+                'daily_pnl': row.get('daily_pnl', 0),
+                'trades_today': row.get('trades_today', 0),
+                'active_positions': row.get('active_positions', 0),
+                'last_check': row.get('last_check'),
+                'roi_percent': ((bal - 100) / 100 * 100),
+            })
+        return jsonify({'is_running': False, 'balance': 100, 'daily_pnl': 0, 'trades_today': 0, 'active_positions': 0, 'roi_percent': 0})
+    except Exception as e:
+        return jsonify({'is_running': False, 'balance': 100, 'daily_pnl': 0, 'error': str(e)})
+
+
+@app.route('/api/trades')
+def get_trades():
+    try:
+        limit = int(request.args.get('limit', 50))
+        db = get_db()
+        result = db.client.table('kalshi_trades').select('*').order('id', desc=True).limit(limit).execute()
+        return jsonify(result.data or [])
+    except Exception as e:
+        logger.error(f"Failed to get trades: {e}")
+        return jsonify([])
+
+
+@app.route('/api/strategies')
+def get_strategies():
+    try:
+        db = get_db()
+        result = db.client.table('kalshi_trades').select('*').execute()
+        trades = result.data or []
+        by_strat = defaultdict(lambda: {'trades': 0, 'wins': 0, 'losses': 0})
+        for t in trades:
+            s = t.get('strategy', 'unknown')
+            by_strat[s]['trades'] += 1
+            reason = (t.get('reason') or '').upper()
+            if 'WIN' in reason:
+                by_strat[s]['wins'] += 1
+            elif 'LOSS' in reason:
+                by_strat[s]['losses'] += 1
+        out = []
+        for name, stats in by_strat.items():
+            total = stats['wins'] + stats['losses']
+            out.append({
+                'strategy': name,
+                'trades': stats['trades'],
+                'wins': stats['wins'],
+                'losses': stats['losses'],
+                'win_rate': (stats['wins'] / total * 100) if total > 0 else 0,
+            })
+        return jsonify(out)
+    except Exception as e:
+        logger.error(f"Failed to get strategies: {e}")
+        return jsonify([])
+
+
+@app.route('/api/equity')
+def get_equity():
+    try:
+        db = get_db()
+        result = db.client.table('equity_snapshots').select('*').order('id', desc=True).limit(200).execute()
+        if result.data:
+            return jsonify(result.data)
+        # Fallback to bot status balance
+        result = db.client.table('kalshi_bot_status').select('balance, last_check').order('id', desc=True).limit(100).execute()
+        return jsonify(result.data or [])
+    except Exception as e:
+        logger.error(f"Failed to get equity: {e}")
+        return jsonify([])
+
+
+@app.route('/api/signals')
+def get_signals():
+    try:
+        db = get_db()
+        result = db.client.table('signal_evaluations').select('*').order('id', desc=True).limit(100).execute()
+        return jsonify(result.data or [])
+    except Exception as e:
+        logger.error(f"Failed to get signals: {e}")
+        return jsonify([])
+
+
+@app.route('/api/debates')
+def get_debates():
+    try:
+        db = get_db()
+        result = db.client.table('debate_log').select('*').order('id', desc=True).limit(20).execute()
+        return jsonify(result.data or [])
+    except Exception as e:
+        logger.error(f"Failed to get debates: {e}")
+        return jsonify([])
+
 
 @app.route('/api/start', methods=['POST'])
 def start_bot():
@@ -1118,6 +1227,7 @@ def start_bot():
         logger.error(f"Failed to start bot: {e}")
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/stop', methods=['POST'])
 def stop_bot():
     global bot_instance
@@ -1129,20 +1239,22 @@ def stop_bot():
         logger.error(f"Failed to stop bot: {e}")
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/kill-switch', methods=['POST'])
 def kill_switch():
     try:
-        db = SupabaseDB()
+        db = get_db()
         db.client.table('kill_switch').insert({'active': True, 'timestamp': datetime.utcnow().isoformat()}).execute()
         return jsonify({'message': 'Kill switch activated'})
     except Exception as e:
         logger.error(f"Failed to activate kill switch: {e}")
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/kill-switch-status')
 def kill_switch_status():
     try:
-        db = SupabaseDB()
+        db = get_db()
         result = db.client.table('kill_switch').select('*').eq('active', True).order('timestamp', desc=True).limit(1).execute()
         active = len(result.data) > 0
         return jsonify({'active': active})
@@ -1150,202 +1262,137 @@ def kill_switch_status():
         logger.error(f"Failed to get kill switch status: {e}")
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/portfolio')
 def get_portfolio():
     try:
-        db = SupabaseDB()
+        db = get_db()
+        status = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
+        bal = 100.0
+        daily_pnl = 0
+        trades_today = 0
+        active_positions = 0
+        if status.data:
+            row = status.data[0]
+            bal = row.get('balance', 100)
+            daily_pnl = row.get('daily_pnl', 0)
+            trades_today = row.get('trades_today', 0)
+            active_positions = row.get('active_positions', 0)
 
-        # Get positions
-        positions = db.client.table('positions').select('*').eq('status', 'open').execute()
-        open_positions = len(positions.data) if positions.data else 0
-
-        # Calculate P&L
-        total_pnl = sum(p.get('pnl', 0) for p in (positions.data or []))
-        total_invested = sum(p.get('stake_usd', 0) for p in (positions.data or []))
-        realized_pnl = sum(p.get('realized_pnl', 0) for p in (positions.data or []))
-        unrealized_pnl = total_pnl - realized_pnl
-
-        # Get trade count
-        trades = db.client.table('trades').select('id, is_paper').execute()
+        trades = db.client.table('kalshi_trades').select('id').execute()
         total_trades = len(trades.data) if trades.data else 0
-        live_trades = sum(1 for t in (trades.data or []) if not t.get('is_paper', False))
-        paper_trades = total_trades - live_trades
-
-        # Get today's trades
-        today = datetime.utcnow().date()
-        today_trades = db.client.table('trades').select('stake_usd').gte('opened_at', today.isoformat()).execute()
-        today_trades_count = len(today_trades.data) if today_trades.data else 0
-        daily_volume = sum(t.get('stake_usd', 0) for t in (today_trades.data or []))
-
-        # Get average edge and evidence quality from recent signal evaluations
-        recent_signals = db.client.table('signal_evaluations').select('edge, evidence_quality').gte('timestamp', (datetime.utcnow() - timedelta(days=7)).isoformat()).execute()
-        if recent_signals.data:
-            avg_edge = sum(s.get('edge', 0) for s in recent_signals.data) / len(recent_signals.data)
-            avg_evidence_quality = sum(s.get('evidence_quality', 0) for s in recent_signals.data) / len(recent_signals.data)
-        else:
-            avg_edge = 0
-            avg_evidence_quality = 0
-
-        # Check trading mode
-        live_trading = os.getenv('ENABLE_LIVE_TRADING', 'false').lower() == 'true'
-        dry_run = os.getenv('DRY_RUN', 'true').lower() == 'true'
 
         return jsonify({
-            'bankroll': 10000.0,  # Placeholder - should come from config
-            'available_capital': 10000.0 - total_invested,  # Placeholder
-            'total_pnl': total_pnl,
-            'realized_pnl': realized_pnl,
-            'unrealized_pnl': unrealized_pnl,
-            'open_positions': open_positions,
-            'total_invested': total_invested,
+            'bankroll': bal,
+            'available_capital': bal,
+            'total_pnl': daily_pnl,
+            'realized_pnl': daily_pnl,
+            'unrealized_pnl': 0,
+            'open_positions': active_positions,
+            'total_invested': 0,
             'total_trades': total_trades,
-            'live_trades': live_trades,
-            'paper_trades': paper_trades,
-            'avg_edge': avg_edge,
-            'avg_evidence_quality': avg_evidence_quality,
-            'today_trades': today_trades_count,
-            'daily_volume': daily_volume,
-            'live_trading_enabled': live_trading,
-            'dry_run': dry_run
+            'live_trades': 0,
+            'paper_trades': total_trades,
+            'avg_edge': 0,
+            'avg_evidence_quality': 0,
+            'today_trades': trades_today,
+            'daily_volume': 0,
+            'live_trading_enabled': False,
+            'dry_run': True,
+            'roi_percent': ((bal - 100) / 100 * 100),
         })
     except Exception as e:
         logger.error(f"Failed to get portfolio: {e}")
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/engine-status')
 def get_engine_status():
     try:
-        # Simplified - in real implementation, check if bot process is running
-        running = True  # Placeholder
-        live_trading = os.getenv('ENABLE_LIVE_TRADING', 'false').lower() == 'true'
-        paper_mode = os.getenv('DRY_RUN', 'true').lower() == 'true'
+        db = get_db()
+        status = db.client.table('kalshi_bot_status').select('is_running').order('id', desc=True).limit(1).execute()
+        running = status.data[0].get('is_running', False) if status.data else False
         return jsonify({
             'running': running,
-            'live_trading': live_trading,
-            'paper_mode': paper_mode,
-            'cycles': 0  # Placeholder
+            'live_trading': False,
+            'paper_mode': True,
+            'cycles': 0,
         })
     except Exception as e:
         logger.error(f"Failed to get engine status: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'running': False, 'live_trading': False, 'paper_mode': True, 'cycles': 0})
+
 
 @app.route('/api/positions')
 def get_positions():
     try:
-        db = SupabaseDB()
-        positions = db.client.table('positions').select('*').eq('status', 'open').execute()
-
-        # Enhance with current market data (simplified)
-        for pos in positions.data or []:
-            # Calculate P&L based on current price (placeholder)
-            current_price = pos.get('current_price', pos.get('entry_price', 0))
-            entry_price = pos.get('entry_price', 0)
-            pos['price_change'] = current_price - entry_price
-            pos['price_change_pct'] = (pos['price_change'] / entry_price * 100) if entry_price > 0 else 0
-            pos['pnl'] = pos.get('pnl', 0)  # Would be calculated properly
-            pos['pnl_pct'] = pos.get('pnl_pct', 0)
-
-        return jsonify({
-            'positions': positions.data or []
-        })
+        db = get_db()
+        positions = db.client.table('kalshi_positions').select('*').execute()
+        return jsonify({'positions': positions.data or []})
     except Exception as e:
         logger.error(f"Failed to get positions: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'positions': []})
 
-@app.route('/api/trades')
-def get_trades():
-    try:
-        limit = int(request.args.get('limit', 50))
-        db = SupabaseDB()
-        trades = db.client.table('trades').select('*').order('opened_at', desc=True).limit(limit).execute()
-        return jsonify({
-            'trades': trades.data or []
-        })
-    except Exception as e:
-        logger.error(f"Failed to get trades: {e}")
-        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/activity')
 def get_activity():
     try:
         limit = int(request.args.get('limit', 20))
-        db = SupabaseDB()
-
-        # Get recent trades and positions as activity
-        trades = db.client.table('trades').select('*').order('opened_at', desc=True).limit(limit//2).execute()
-        positions = db.client.table('positions').select('*').order('opened_at', desc=True).limit(limit//2).execute()
+        db = get_db()
+        trades = db.client.table('kalshi_trades').select('*').order('id', desc=True).limit(limit).execute()
 
         entries = []
-
-        # Add trade entries
         for trade in trades.data or []:
             entries.append({
-                'timestamp': trade.get('opened_at'),
-                'action': 'Trade Executed',
-                'market_id': trade.get('market_id'),
-                'details': f"{trade.get('direction')} {trade.get('size', 0)} shares at ${trade.get('entry_price', 0):.3f}",
-                'status': 'success'
+                'timestamp': trade.get('timestamp'),
+                'action': trade.get('action', 'trade'),
+                'market_id': trade.get('ticker', ''),
+                'details': f"{trade.get('side', '')} x{trade.get('count', 0)} @ ${trade.get('price', 0):.2f} [{trade.get('strategy', '')}]",
+                'status': 'success',
             })
 
-        # Add position entries
-        for pos in positions.data or []:
-            entries.append({
-                'timestamp': pos.get('opened_at'),
-                'action': 'Position Opened',
-                'market_id': pos.get('market_id'),
-                'details': f"{pos.get('direction')} {pos.get('size', 0)} shares",
-                'status': 'success'
-            })
-
-        # Sort by timestamp
-        entries.sort(key=lambda x: x['timestamp'] or '', reverse=True)
-        entries = entries[:limit]
-
-        return jsonify({
-            'entries': entries
-        })
+        return jsonify({'entries': entries})
     except Exception as e:
         logger.error(f"Failed to get activity: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'entries': []})
+
 
 @app.route('/api/system-status')
 def get_system_status():
     try:
-        import psutil
-        import platform
-
-        return jsonify({
-            'hostname': platform.node(),
-            'platform': platform.system(),
-            'python_version': platform.python_version(),
-            'cpu_count': psutil.cpu_count(),
-            'memory_usage': f"{psutil.virtual_memory().percent:.1f}%",
-            'disk_usage': f"{psutil.disk_usage('/').percent:.1f}%" if platform.system() != 'Windows' else 'N/A',
-            'process_uptime': 'N/A',  # Would need to track process start time
-        })
+        db = get_db()
+        status = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
+        if status.data:
+            row = status.data[0]
+            return jsonify({
+                'bot_running': row.get('is_running', False),
+                'last_check': row.get('last_check', 'Never'),
+                'balance': f"${row.get('balance', 0):.2f}",
+                'daily_pnl': f"${row.get('daily_pnl', 0):.2f}",
+                'trades_today': row.get('trades_today', 0),
+                'active_positions': row.get('active_positions', 0),
+            })
+        return jsonify({'bot_running': False, 'last_check': 'Never'})
     except Exception as e:
         logger.error(f"Failed to get system status: {e}")
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/export/<table>')
-def export_table(table):
-    try:
-        db = SupabaseDB()
-        if table == 'positions':
-            data = db.client.table('positions').select('*').execute()
-        elif table == 'trades':
-            data = db.client.table('trades').select('*').execute()
-        else:
-            return jsonify({'error': 'Invalid table'}), 400
 
-        return jsonify({
-            'rows': data.data or []
-        })
+@app.route('/api/export/<table>')
+def export_data(table):
+    allowed = ['kalshi_trades', 'signal_evaluations', 'kalshi_bot_status', 'equity_snapshots', 'debate_log']
+    if table not in allowed:
+        return jsonify({'error': 'Table not allowed'}), 400
+
+    try:
+        db = get_db()
+        data = db.client.table(table).select('*').order('id', desc=True).limit(1000).execute()
+        return jsonify({'rows': data.data or []})
     except Exception as e:
         logger.error(f"Failed to export {table}: {e}")
         return jsonify({'error': str(e)}), 500
 
-# Learning Lab endpoints
+
 @app.route('/api/learning/run-analysis', methods=['POST'])
 def run_self_analysis():
     try:
@@ -1357,10 +1404,11 @@ def run_self_analysis():
         logger.error(f"Failed to run analysis: {e}")
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/api/learning/latest-analysis')
 def get_latest_analysis():
     try:
-        db = SupabaseDB()
+        db = get_db()
         result = db.client.table('improvement_logs').select('*').order('timestamp', desc=True).limit(1).execute()
         if result.data and len(result.data) > 0:
             return jsonify(result.data[0].get('analysis_json', {}))
@@ -1369,7 +1417,12 @@ def get_latest_analysis():
         logger.error(f"Failed to get latest analysis: {e}")
         return jsonify({'error': str(e)}), 500
 
+
+def start_dashboard():
+    """Start the dashboard web server."""
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
-+++++++ REPLACE</diff>
-</replace_in_file>

@@ -590,6 +590,25 @@ class KalshiBot:
                         'price': price_for_side,
                     })
 
+            # Log ALL signal evaluations (both traded and skipped) for learning
+            if self.db:
+                for sig in all_signals:
+                    try:
+                        was_traded = any(
+                            sig.get('ticker') == t.get('ticker')
+                            for t in [s for s in all_signals[:trades_placed]]
+                        )
+                        self.db.client.table('signal_evaluations').insert({
+                            'strategy': sig.get('strategy_type', 'unknown'),
+                            'ticker': sig.get('ticker', ''),
+                            'side': sig.get('side', ''),
+                            'edge': sig.get('edge', 0),
+                            'confidence': sig.get('confidence', 0),
+                            'action': 'TRADE' if was_traded else 'SKIP',
+                        }).execute()
+                    except Exception:
+                        pass  # Never crash the bot over logging
+
             logger.info(f"Cycle done: {trades_placed} trades, ${cycle_spent:.2f} spent")
 
         # Forced paper trade if nothing fired
@@ -811,6 +830,14 @@ class KalshiBot:
                 'balance': status['paper_balance'],
                 'active_positions': len(status['positions']),
             })
+            # Log equity snapshot
+            try:
+                self.db.client.table('equity_snapshots').insert({
+                    'balance': self.risk.paper_balance,
+                    'open_positions': len(self.risk.positions),
+                }).execute()
+            except Exception:
+                pass  # Never crash the bot over logging
 
     def run(self):
         logger.info("Bot running. Ctrl+C to stop.")

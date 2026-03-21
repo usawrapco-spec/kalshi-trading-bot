@@ -1,5 +1,6 @@
 """Risk management with Kelly Criterion position sizing and paper trading."""
 
+import os
 import math
 from datetime import datetime
 from config import Config
@@ -21,7 +22,7 @@ class RiskManager:
     """Manages risk, Kelly sizing, and paper balance."""
 
     def __init__(self):
-        self.paper_balance = 100.00  # Hardcoded $100 starting balance
+        self.paper_balance = float(os.environ.get('PAPER_BALANCE', 100))
         self.daily_pnl = 0.0
         self.positions = {}  # ticker -> {side, count, entry_price, strategy}
         self.daily_reset = datetime.now().date()

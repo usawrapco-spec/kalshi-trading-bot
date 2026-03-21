@@ -30,6 +30,8 @@ WEATHER_KEYWORDS = [
 
 OPEN_METEO_URL = 'https://ensemble-api.open-meteo.com/v1/ensemble'
 MIN_EDGE = 0.05
+MAX_ENTRY_PRICE = 0.15       # NEVER buy contracts above 15 cents
+MIN_MODEL_CONFIDENCE = 0.85  # Only trade when model is 85%+ confident
 
 
 class WeatherEdgeStrategy(BaseStrategy):
@@ -183,6 +185,15 @@ class WeatherEdgeStrategy(BaseStrategy):
             side, edge, prob = 'no', no_edge, 1 - our_prob
         else:
             logger.debug(f"WeatherEdge SKIP {ticker}: forecast_prob={our_prob:.2f} market={mkt_yes:.2f} edge={yes_edge:+.2f}")
+            return None
+
+        # QUANT RULE: Only buy cheap contracts with high model confidence
+        entry_price = mkt_yes if side == 'yes' else (1 - mkt_yes)
+        if entry_price > MAX_ENTRY_PRICE:
+            logger.info(f"WeatherEdge SKIP {ticker}: entry {entry_price:.2f} > max {MAX_ENTRY_PRICE} (too expensive)")
+            return None
+        if prob < MIN_MODEL_CONFIDENCE:
+            logger.info(f"WeatherEdge SKIP {ticker}: model prob {prob:.2f} < min {MIN_MODEL_CONFIDENCE}")
             return None
 
         agreement = max(our_prob, 1 - our_prob)
