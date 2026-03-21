@@ -66,22 +66,24 @@ class KalshiBot:
 
     def _init_strategies(self):
         logger.info("Loading strategies...")
-        if Config.ENABLE_WEATHER:
-            self.strategies.append(WeatherEdgeStrategy(self.client, self.risk, self.db))
+        # Order matters: run scarce-signal strategies first so they get position slots
+        # before WeatherEdge floods with 30+ signals
         if Config.ENABLE_GROK:
             self.strategies.append(GrokNewsStrategy(self.client, self.risk, self.db))
-        if Config.ENABLE_PROB_ARB:
-            self.strategies.append(ProbabilityArbStrategy(self.client, self.risk, self.db))
-        if Config.ENABLE_SPORTS_NO:
-            self.strategies.append(SportsNOStrategy(self.client, self.risk, self.db))
-        if Config.ENABLE_NEAR_CERTAINTY:
-            self.strategies.append(NearCertaintyStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_MENTION:
             self.strategies.append(MentionMarketsStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_HIGH_PROB:
             self.strategies.append(HighProbLockStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_ORDERBOOK:
             self.strategies.append(OrderBookEdgeStrategy(self.client, self.risk, self.db))
+        if Config.ENABLE_PROB_ARB:
+            self.strategies.append(ProbabilityArbStrategy(self.client, self.risk, self.db))
+        if Config.ENABLE_SPORTS_NO:
+            self.strategies.append(SportsNOStrategy(self.client, self.risk, self.db))
+        if Config.ENABLE_NEAR_CERTAINTY:
+            self.strategies.append(NearCertaintyStrategy(self.client, self.risk, self.db))
+        if Config.ENABLE_WEATHER:
+            self.strategies.append(WeatherEdgeStrategy(self.client, self.risk, self.db))
         logger.info(f"{len(self.strategies)} strategies loaded")
 
     def _check_balance(self):
@@ -194,8 +196,9 @@ class KalshiBot:
                 continue
 
             signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
+            signals = signals[:10]  # Cap per strategy so no single one hogs all slots
             total_signals += len(signals)
-            logger.info(f"{strategy.name}: {len(signals)} signals")
+            logger.info(f"{strategy.name}: {len(signals)} signals (top 10)")
 
             for sig in signals:
                 # Kelly sizing

@@ -10,7 +10,7 @@ logger = setup_logger('risk_manager')
 MIN_CONFIDENCE = 30
 MAX_OPEN_POSITIONS = 50
 MAX_BALANCE_PCT = 0.20  # Max 20% of balance per trade
-DAILY_LOSS_STOP = -12.50  # 50% of $25 paper balance
+DAILY_LOSS_STOP = -25.0  # 50% of $50 paper balance
 KELLY_FRACTION = 0.25   # Quarter-Kelly for conservative sizing
 MIN_VOLUME = 10         # Skip illiquid markets
 
