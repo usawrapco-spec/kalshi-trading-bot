@@ -1,10 +1,14 @@
-"""Multi-model debate system: Grok + Claude must agree before any trade executes.
+"""Multi-model debate: Grok is primary decision maker, Claude is second opinion.
+
+Grok has 75% accuracy on prediction markets (highest of any AI) so it has
+VETO power. Claude provides a second opinion that affects position sizing.
 
 Flow:
-1. Ask Grok for probability assessment
-2. Ask Claude, sharing Grok's answer for a second opinion
-3. Decision: AGREE (within 10%) -> TRADE, DISAGREE (>20%) -> SKIP,
-   MIXED (10-20%) -> average and check edge
+1. Ask Grok for probability + trade/no-trade decision
+2. If Grok says NO TRADE: always skip (Grok has veto)
+3. If Grok says TRADE: ask Claude for second opinion
+4. If Claude agrees: FULL SIZE trade
+5. If Claude disagrees: HALF SIZE trade (Grok overrides but we're cautious)
 """
 
 import os
@@ -29,7 +33,6 @@ def _parse_json_response(text):
     try:
         return json.loads(clean)
     except json.JSONDecodeError:
-        # Fallback: regex extract
         prob = re.search(r'"probability"\s*:\s*([\d.]+)', text)
         conf = re.search(r'"confidence"\s*:\s*([\d.]+)', text)
         reason = re.search(r'"reasoning"\s*:\s*"([^"]*)"', text)
@@ -99,7 +102,7 @@ def _ask_claude(title, price, side, edge, grok_prob, grok_reasoning, api_key):
 
 
 def run_debate(signal, market_price):
-    """Run Grok vs Claude debate on a trade signal.
+    """Grok-primary debate. Grok decides, Claude adjusts sizing.
 
     Returns: (should_trade: bool, adjusted_signal: dict, debate_log: str)
     """
@@ -110,83 +113,85 @@ def run_debate(signal, market_price):
     side = signal.get('side', 'yes')
     edge = signal.get('edge', 0)
 
-    # If no API keys, skip debate and allow trade
-    if not grok_key and not claude_key:
-        return True, signal, "DEBATE: no API keys, skipped"
+    if not grok_key:
+        return True, signal, "DEBATE: no Grok API key, skipped"
 
-    # Step 1: Ask Grok
-    grok_result = _ask_grok(title, market_price, side, edge, grok_key) if grok_key else None
+    # Step 1: Grok decides (primary decision maker, 75% accuracy)
+    grok_result = _ask_grok(title, market_price, side, edge, grok_key)
     if not grok_result:
-        # Grok unavailable - trade with original signal
-        return True, signal, "DEBATE: Grok unavailable, proceeding"
+        return True, signal, "DEBATE: Grok unavailable, proceeding without debate"
 
     grok_prob = grok_result.get('probability', 0.5)
     grok_conf = grok_result.get('confidence', 50)
     grok_reason = grok_result.get('reasoning', '')[:80]
 
-    # Step 2: Ask Claude (with Grok's answer)
-    claude_result = _ask_claude(
-        title, market_price, side, edge,
-        grok_prob, grok_reason, claude_key
-    ) if claude_key else None
+    # Grok's trade decision: does the edge hold?
+    if side == 'yes':
+        grok_edge = grok_prob - market_price
+    else:
+        grok_edge = (1 - grok_prob) - (1 - market_price)
 
-    if not claude_result:
-        # Claude unavailable - use Grok's assessment alone
-        debate_log = f"DEBATE: Grok={grok_prob:.0%} (Claude unavailable) -> TRADE"
-        logger.info(debate_log)
-        return True, signal, debate_log
-
-    claude_prob = claude_result.get('probability', 0.5)
-    claude_conf = claude_result.get('confidence', 50)
-    claude_reason = claude_result.get('reasoning', '')[:80]
-
-    # Step 3: Decision logic
-    disagreement = abs(grok_prob - claude_prob)
-
-    if disagreement <= 0.10:
-        # AGREE: both within 10%
-        avg_prob = (grok_prob + claude_prob) / 2
-        # Boost confidence when both models agree
-        boosted_conf = min(signal.get('confidence', 50) + 15, 100)
-        signal['confidence'] = boosted_conf
-        signal['model_prob'] = avg_prob
+    # GROK VETO: if Grok sees no edge, always skip
+    if grok_edge < 0.03:
         debate_log = (
-            f"DEBATE: Grok={grok_prob:.0%} Claude={claude_prob:.0%} -> AGREE -> TRADE "
-            f"(avg={avg_prob:.0%}, conf boosted to {boosted_conf:.0f})"
-        )
-        logger.info(debate_log)
-        return True, signal, debate_log
-
-    elif disagreement > 0.20:
-        # DISAGREE: skip trade
-        debate_log = (
-            f"DEBATE: Grok={grok_prob:.0%} Claude={claude_prob:.0%} -> DISAGREE ({disagreement:.0%} gap) -> SKIP "
-            f"[Grok: {grok_reason}] [Claude: {claude_reason}]"
+            f"GROK DECIDES: {grok_prob:.0%} prob, edge={grok_edge:+.0%} -> NO TRADE (veto). "
+            f"Reason: {grok_reason}"
         )
         logger.info(debate_log)
         return False, signal, debate_log
 
-    else:
-        # MIXED (10-20% disagreement): average and check edge
-        avg_prob = (grok_prob + claude_prob) / 2
-        if side == 'yes':
-            new_edge = avg_prob - market_price
-        else:
-            new_edge = (1 - avg_prob) - (1 - market_price)
+    # Grok says TRADE - update signal with Grok's probability
+    signal['model_prob'] = grok_prob if side == 'yes' else (1 - grok_prob)
+    signal['edge'] = grok_edge
+    logger.info(f"GROK DECIDES: {grok_prob:.0%} prob, edge={grok_edge:+.0%} -> TRADE. Reason: {grok_reason}")
 
-        if new_edge > 0.05:
-            signal['model_prob'] = avg_prob
-            signal['edge'] = new_edge
-            debate_log = (
-                f"DEBATE: Grok={grok_prob:.0%} Claude={claude_prob:.0%} -> MIXED ({disagreement:.0%} gap) "
-                f"-> avg={avg_prob:.0%}, new_edge={new_edge:.0%} > 5% -> TRADE"
-            )
-            logger.info(debate_log)
-            return True, signal, debate_log
-        else:
-            debate_log = (
-                f"DEBATE: Grok={grok_prob:.0%} Claude={claude_prob:.0%} -> MIXED ({disagreement:.0%} gap) "
-                f"-> avg={avg_prob:.0%}, new_edge={new_edge:.0%} < 5% -> SKIP"
-            )
-            logger.info(debate_log)
-            return False, signal, debate_log
+    # Step 2: Ask Claude for second opinion (if available)
+    if not claude_key:
+        debate_log = (
+            f"GROK DECIDES: {grok_prob:.0%} prob -> TRADE. Claude unavailable -> FULL SIZE"
+        )
+        logger.info(debate_log)
+        return True, signal, debate_log
+
+    claude_result = _ask_claude(
+        title, market_price, side, edge,
+        grok_prob, grok_reason, claude_key
+    )
+
+    if not claude_result:
+        debate_log = (
+            f"GROK DECIDES: {grok_prob:.0%} prob -> TRADE. Claude error -> FULL SIZE"
+        )
+        logger.info(debate_log)
+        return True, signal, debate_log
+
+    claude_prob = claude_result.get('probability', 0.5)
+    claude_reason = claude_result.get('reasoning', '')[:80]
+
+    # Does Claude agree with the trade direction?
+    if side == 'yes':
+        claude_edge = claude_prob - market_price
+    else:
+        claude_edge = (1 - claude_prob) - (1 - market_price)
+
+    claude_agrees = claude_edge > 0.03  # Claude also sees positive edge
+
+    if claude_agrees:
+        # Both agree: FULL SIZE, boost confidence
+        signal['confidence'] = min(signal.get('confidence', 50) + 15, 100)
+        debate_log = (
+            f"GROK DECIDES: {grok_prob:.0%} prob -> TRADE. "
+            f"Claude confirms: {claude_prob:.0%} -> FULL SIZE"
+        )
+        logger.info(debate_log)
+        return True, signal, debate_log
+    else:
+        # Grok says trade, Claude disagrees: HALF SIZE
+        signal['count'] = max(1, signal.get('count', 1) // 2)
+        debate_log = (
+            f"GROK DECIDES: {grok_prob:.0%} prob -> TRADE. "
+            f"Claude disagrees: {claude_prob:.0%} -> HALF SIZE (count={signal['count']}). "
+            f"Claude: {claude_reason}"
+        )
+        logger.info(debate_log)
+        return True, signal, debate_log
