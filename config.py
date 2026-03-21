@@ -1,11 +1,9 @@
 """Configuration management for Kalshi trading bot."""
-
 import os
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
-
 
 class Config:
     """Bot configuration."""
@@ -14,6 +12,10 @@ class Config:
     KALSHI_API_KEY_ID = os.getenv('KALSHI_API_KEY_ID')
     KALSHI_PRIVATE_KEY = os.getenv('KALSHI_PRIVATE_KEY')
     KALSHI_API_HOST = os.getenv('KALSHI_API_HOST', 'https://demo-api.kalshi.com')
+    
+    # Supabase Configuration
+    SUPABASE_URL = os.getenv('SUPABASE_URL')
+    SUPABASE_SERVICE_KEY = os.getenv('SUPABASE_SERVICE_KEY')
     
     # Risk Management
     MAX_POSITION_SIZE = int(os.getenv('MAX_POSITION_SIZE', 100))
