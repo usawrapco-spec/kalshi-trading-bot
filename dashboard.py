@@ -1,6 +1,6 @@
 """
-Kalshi Trading Bot Dashboard
-Serves a web interface for monitoring and controlling the bot.
+Kalshi Trading Bot Dashboard - BADASS EDITION
+Ultimate professional trading dashboard inspired by TradingView, Binance Pro, and Material Dashboard 3
 """
 
 import os
@@ -22,7 +22,7 @@ CORS(app)
 # Global bot instance
 bot_instance = None
 
-# HTML template with embedded CSS/JS (adapted from Polymarket dashboard)
+# ULTIMATE BADASS DASHBOARD TEMPLATE
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -30,6 +30,8 @@ HTML_TEMPLATE = """
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Kalshi Trading Bot Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
     <style>
         /* ─── Reset & Base ─────────────────────────────────────────────── */
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
