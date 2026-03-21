@@ -30,6 +30,7 @@ class Config:
     ENABLE_WEATHER = os.getenv('ENABLE_WEATHER', 'true').lower() == 'true'
     ENABLE_GROK = os.getenv('ENABLE_GROK', 'true').lower() == 'true'
     ENABLE_NEAR_CERTAINTY = os.getenv('ENABLE_NEAR_CERTAINTY', 'true').lower() == 'true'
+    ENABLE_SPORTS_NO = os.getenv('ENABLE_SPORTS_NO', 'true').lower() == 'true'
     
     # Monitoring
     CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', 30))

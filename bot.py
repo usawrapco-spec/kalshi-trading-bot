@@ -6,7 +6,8 @@ Main entry point for the automated trading system.
 Strategies:
   - WeatherEdge: Open-Meteo ensemble vs KXHIGH temperature markets
   - GrokNewsAnalysis: xAI Grok evaluates market mispricings
-  - NearCertainty: 90-97c markets settling <24h + cheap 3-10c contrarian
+  - NearCertainty: 85-99c markets settling <24h + cheap 1-15c contrarian
+  - SportsNO: fade sports favorites (YES 60-85c) by buying NO side
   - ForcedPaperTrade: best available opportunity if nothing else fires
 """
 
@@ -23,6 +24,7 @@ from utils.supabase_db import SupabaseDB
 from strategies.weather_edge import WeatherEdgeStrategy
 from strategies.ai_analysis import GrokNewsAnalysisStrategy
 from strategies.near_certainty import NearCertaintyStrategy
+from strategies.sports_no import SportsNOStrategy
 from dashboard import start_dashboard
 
 logger = setup_logger('main')
@@ -71,7 +73,11 @@ class KalshiBot:
 
         if Config.ENABLE_NEAR_CERTAINTY:
             self.strategies.append(NearCertaintyStrategy(self.client, self.risk_manager, self.db))
-            logger.info("NearCertainty strategy enabled (90-97c <24h + 3-10c contrarian)")
+            logger.info("NearCertainty strategy enabled (85-99c <24h + 1-15c contrarian)")
+
+        if Config.ENABLE_SPORTS_NO:
+            self.strategies.append(SportsNOStrategy(self.client, self.risk_manager, self.db))
+            logger.info("SportsNO strategy enabled (fade favorites YES 60-85c, buy NO)")
 
         if not self.strategies:
             logger.warning("No strategies enabled!")
