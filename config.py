@@ -22,10 +22,14 @@ class Config:
     MAX_DAILY_LOSS = int(os.getenv('MAX_DAILY_LOSS', 500))
     MAX_ORDER_SIZE = int(os.getenv('MAX_ORDER_SIZE', 50))
     
+    # AI API Keys
+    XAI_API_KEY = os.getenv('XAI_API_KEY')
+    ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+
     # Strategy Settings
-    ENABLE_ARBITRAGE = os.getenv('ENABLE_ARBITRAGE', 'true').lower() == 'true'
-    ENABLE_MOMENTUM = os.getenv('ENABLE_MOMENTUM', 'true').lower() == 'true'
-    ENABLE_EVENT_BASED = os.getenv('ENABLE_EVENT_BASED', 'false').lower() == 'true'
+    ENABLE_WEATHER = os.getenv('ENABLE_WEATHER', 'true').lower() == 'true'
+    ENABLE_GROK = os.getenv('ENABLE_GROK', 'true').lower() == 'true'
+    ENABLE_NEAR_CERTAINTY = os.getenv('ENABLE_NEAR_CERTAINTY', 'true').lower() == 'true'
     
     # Monitoring
     CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', 30))
