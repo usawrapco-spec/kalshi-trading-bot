@@ -1,6 +1,6 @@
 """Kalshi API client wrapper with error handling and retry logic."""
 
-from kalshi_python import ApiClient
+from kalshi_python import ApiClient, Configuration
 import time
 from config import Config
 from utils.logger import setup_logger
@@ -20,11 +20,12 @@ class KalshiAPIClient:
         logger.info(f"Initializing Kalshi client for {self.host}")
         
         try:
-            self.client = ApiClient(
-                key_id=self.key_id,
-                private_key=self.private_key,
-                host=self.host
-            )
+            configuration = Configuration()
+            configuration.host = self.host
+            configuration.username = self.key_id
+            configuration.password = self.private_key
+            
+            self.client = ApiClient(configuration)
             logger.info("✅ Kalshi client initialized successfully")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Kalshi client: {e}")
