@@ -198,8 +198,10 @@ class KalshiBot:
         if markets:
             logger.info(f"  Keys: {list(markets[0].keys())}")
 
-        # Run strategies
+        # Run strategies - max 5 trades per cycle total
         total_signals = 0
+        trades_this_cycle = 0
+        MAX_TRADES_PER_CYCLE = 5
         for strategy in self.strategies:
             logger.info(f"--- Running {strategy.name} ---")
             try:
@@ -212,10 +214,14 @@ class KalshiBot:
                 logger.info(f"{strategy.name}: 0 signals")
                 continue
 
+            if trades_this_cycle >= MAX_TRADES_PER_CYCLE:
+                logger.info(f"{strategy.name}: {len(signals)} signals but cycle limit ({MAX_TRADES_PER_CYCLE}) reached")
+                continue
+
             signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
-            signals = signals[:10]  # Cap per strategy so no single one hogs all slots
+            signals = signals[:10]
             total_signals += len(signals)
-            logger.info(f"{strategy.name}: {len(signals)} signals (top 10)")
+            logger.info(f"{strategy.name}: {len(signals)} signals")
 
             for sig in signals:
                 # Kelly sizing
@@ -247,6 +253,11 @@ class KalshiBot:
 
                 if not traded:
                     continue  # blocked by position/balance/duplicate check
+
+                trades_this_cycle += 1
+                if trades_this_cycle >= MAX_TRADES_PER_CYCLE:
+                    logger.info(f"Cycle trade limit ({MAX_TRADES_PER_CYCLE}) reached")
+                    break
 
                 # Log to Supabase
                 if self.db:

@@ -9,19 +9,19 @@ logger = setup_logger('risk_manager')
 
 MIN_CONFIDENCE = 30
 MAX_OPEN_POSITIONS = 50
-MAX_TRADE_PCT = 0.10       # Max 10% of starting balance per single trade ($1)
-MAX_STRATEGY_PCT = 0.20    # Max 20% of starting balance per strategy per cycle ($2)
-CASH_RESERVE_PCT = 0.30    # Never go below 30% of starting balance ($3)
-DAILY_LOSS_STOP = -5.0     # 50% of $10 paper balance
+MAX_TRADE_PCT = 0.10       # Max 10% of starting balance per single trade ($10)
+MAX_STRATEGY_PCT = 0.20    # Max 20% of starting balance per strategy per cycle ($20)
+CASH_RESERVE_PCT = 0.30    # Never go below 30% of starting balance ($30)
+DAILY_LOSS_STOP = -50.0    # 50% of $100 paper balance
 KELLY_FRACTION = 0.25      # Quarter-Kelly for conservative sizing
-STARTING_BALANCE = 10.0    # Reference for percentage calculations
+STARTING_BALANCE = 100.0   # Reference for percentage calculations
 
 
 class RiskManager:
     """Manages risk, Kelly sizing, and paper balance."""
 
     def __init__(self):
-        self.paper_balance = 10.00  # Hardcoded $10 starting balance
+        self.paper_balance = 100.00  # Hardcoded $100 starting balance
         self.daily_pnl = 0.0
         self.positions = {}  # ticker -> {side, count, entry_price, strategy}
         self.daily_reset = datetime.now().date()
