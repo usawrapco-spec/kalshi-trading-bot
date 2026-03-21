@@ -21,7 +21,7 @@ from utils.api_resilience import APIResilience
 logger = setup_logger('ai_debate')
 
 GROK_URL = 'https://api.x.ai/v1/chat/completions'
-GROK_MODEL = 'grok-4.1-fast'
+GROK_MODEL = 'grok-4-1-fast-non-reasoning'
 CLAUDE_URL = 'https://api.anthropic.com/v1/messages'
 CLAUDE_MODEL = 'claude-sonnet-4-20250514'
 

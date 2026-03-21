@@ -16,7 +16,7 @@ from utils.api_resilience import APIResilience, resilient_strategy
 logger = setup_logger('grok_news')
 
 XAI_URL = 'https://api.x.ai/v1/chat/completions'
-MODEL = 'grok-4.1-fast'
+MODEL = 'grok-4-1-fast-non-reasoning'
 MAX_PER_CYCLE = 20
 MIN_EDGE = 0.10
 MIN_CONFIDENCE = 0.70

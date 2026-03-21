@@ -72,7 +72,7 @@ class SelfImprover:
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
 
         # Query settled signals grouped by strategy
-        settled = self.db.table('signal_evaluations') \
+        settled = self.db.client.table('signal_evaluations') \
             .select('strategy, was_correct, virtual_pnl, r_multiple, edge, confidence, ticker') \
             .eq('settled', True) \
             .eq('action', 'VIRTUAL_TRADE') \
@@ -135,7 +135,7 @@ class SelfImprover:
         """What minimum edge actually produces profitable trades?"""
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
 
-        settled = self.db.table('signal_evaluations') \
+        settled = self.db.client.table('signal_evaluations') \
             .select('strategy, edge, was_correct, virtual_pnl') \
             .eq('settled', True) \
             .gte('timestamp', cutoff) \
@@ -181,7 +181,7 @@ class SelfImprover:
         """Same as edge but for confidence levels."""
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
 
-        settled = self.db.table('signal_evaluations') \
+        settled = self.db.client.table('signal_evaluations') \
             .select('strategy, confidence, was_correct, virtual_pnl') \
             .eq('settled', True) \
             .gte('timestamp', cutoff) \
@@ -226,7 +226,7 @@ class SelfImprover:
         """Are certain hours more profitable? (timezone arb)"""
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
 
-        settled = self.db.table('signal_evaluations') \
+        settled = self.db.client.table('signal_evaluations') \
             .select('timestamp, was_correct, virtual_pnl, strategy') \
             .eq('settled', True) \
             .gte('timestamp', cutoff) \
@@ -267,7 +267,7 @@ class SelfImprover:
         """Do higher volume markets produce better results?"""
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
 
-        settled = self.db.table('signal_evaluations') \
+        settled = self.db.client.table('signal_evaluations') \
             .select('volume_24h, was_correct, virtual_pnl, strategy') \
             .eq('settled', True) \
             .gte('timestamp', cutoff) \
@@ -329,7 +329,7 @@ class SelfImprover:
         """Is the Grok+Claude debate actually helping?"""
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
 
-        settled = self.db.table('signal_evaluations') \
+        settled = self.db.client.table('signal_evaluations') \
             .select('grok_recommendation, claude_recommendation, debate_agreement, was_correct, virtual_pnl, strategy') \
             .eq('settled', True) \
             .gte('timestamp', cutoff) \
@@ -397,7 +397,7 @@ class SelfImprover:
         """What R:R ratio actually produces winners?"""
         cutoff = (datetime.utcnow() - timedelta(days=lookback_days)).isoformat()
 
-        settled = self.db.table('signal_evaluations') \
+        settled = self.db.client.table('signal_evaluations') \
             .select('reward_to_risk, was_correct, virtual_pnl, strategy') \
             .eq('settled', True) \
             .gte('timestamp', cutoff) \
@@ -554,7 +554,7 @@ class SelfImprover:
     def log_analysis(self, results):
         """Save analysis results to Supabase for dashboard display."""
         try:
-            self.db.table('improvement_logs').insert({
+            self.db.client.table('improvement_logs').insert({
                 'timestamp': datetime.utcnow().isoformat(),
                 'analysis_json': json.dumps(results, default=str),
                 'strategy_verdicts': json.dumps({
@@ -574,7 +574,7 @@ class SelfImprover:
         """
         try:
             # Save to active_parameters table
-            self.db.table('active_parameters').upsert({
+            self.db.client.table('active_parameters').upsert({
                 'id': 'current',
                 'parameters': json.dumps(params),
                 'updated_at': datetime.utcnow().isoformat()
