@@ -1,6 +1,6 @@
 """Kalshi API client wrapper with error handling and retry logic."""
 
-from kalshi_python.client import KalshiClient
+from kalshi_python import KalshiClient
 import time
 from config import Config
 from utils.logger import setup_logger
