@@ -16,6 +16,7 @@ from utils.risk_manager import RiskManager
 from utils.supabase_db import SupabaseDB
 from strategies.arbitrage import ArbitrageStrategy
 from strategies.momentum import MomentumStrategy
+from strategies.value_betting import ValueBettingStrategy
 
 logger = setup_logger('main')
 
@@ -62,17 +63,21 @@ class KalshiBot:
     def _initialize_strategies(self):
         """Initialize enabled trading strategies."""
         logger.info("Loading strategies...")
-        
+
         if Config.ENABLE_ARBITRAGE:
-            self.strategies.append(ArbitrageStrategy(self.client, self.risk_manager, self.db, min_edge=0.02))
-            logger.info("✅ Arbitrage strategy enabled")
+            self.strategies.append(ArbitrageStrategy(self.client, self.risk_manager, self.db, min_edge=0.03))
+            logger.info("Arbitrage strategy enabled (3% min edge, 2 confirmations)")
 
         if Config.ENABLE_MOMENTUM:
             self.strategies.append(MomentumStrategy(self.client, self.risk_manager, self.db, price_change_threshold=0.05))
-            logger.info("✅ Momentum strategy enabled")
-        
+            logger.info("Momentum strategy enabled (5% threshold, 3 confirming points)")
+
+        # Value betting is always enabled - conservative high win-rate strategy
+        self.strategies.append(ValueBettingStrategy(self.client, self.risk_manager, self.db))
+        logger.info("Value betting strategy enabled (90-97c range)")
+
         if not self.strategies:
-            logger.warning("⚠️  No strategies enabled!")
+            logger.warning("No strategies enabled!")
     
     def _check_balance(self):
         """Check and log current account balance."""
@@ -85,58 +90,77 @@ class KalshiBot:
     
     def run_cycle(self):
         """Run one iteration of the trading cycle."""
-        logger.info("🔄 Starting trading cycle...")
-        
+        logger.info("Starting trading cycle...")
+
+        # Update balance for risk calculations
+        balance_data = self.client.get_balance()
+        balance_cents = balance_data.get('balance', 0) if balance_data else 0
+        balance = balance_cents / 100
+        self.risk_manager.set_balance(balance_cents)
+
         # Check if we can still trade today
         if not self.risk_manager.check_daily_loss_limit():
-            logger.warning("Daily loss limit reached - pausing trading")
+            logger.warning("Trading stopped for the day")
+            self._log_status(balance)
             return
-        
+
         # Get open markets
         logger.info("Fetching markets...")
         markets_data = self.client.get_markets(status='open', limit=100)
         markets = markets_data.get('markets', [])
-        
+
         if not markets:
             logger.warning("No open markets found")
+            self._log_status(balance)
             return
-        
+
         logger.info(f"Analyzing {len(markets)} markets...")
-        
+
         # Run each strategy
         total_signals = 0
+        executed = 0
         for strategy in self.strategies:
             logger.info(f"Running {strategy.name}...")
             signals = strategy.analyze(markets)
-            
+
             if signals:
                 logger.info(f"Found {len(signals)} signals from {strategy.name}")
                 total_signals += len(signals)
-                
-                # Execute signals
+
+                # Sort by confidence descending - execute best opportunities first
+                signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
+
                 for signal in signals:
+                    conf = signal.get('confidence', 0)
+                    logger.info(
+                        f"Signal: {signal['ticker']} {signal['action']} {signal['side']} "
+                        f"confidence={conf:.0f} - {signal.get('reason', '')}"
+                    )
                     if self.dry_run:
-                        logger.info(f"[DRY RUN] Would execute: {signal}")
+                        logger.info(f"[DRY RUN] Would execute: {signal['ticker']} (conf={conf:.0f})")
                     else:
-                        strategy.execute(signal, dry_run=self.dry_run)
-        
+                        result = strategy.execute(signal, dry_run=self.dry_run)
+                        if result:
+                            executed += 1
+
         if total_signals == 0:
             logger.info("No trading opportunities found this cycle")
-        
-        # Log risk status
+        else:
+            logger.info(f"Cycle complete: {total_signals} signals, {executed} executed")
+
+        self._log_status(balance)
+
+    def _log_status(self, balance):
+        """Log risk status and bot status to Supabase."""
         self.risk_manager.log_status()
-        
-        # Log bot status to Supabase
-        balance_data = self.client.get_balance()
-        balance = balance_data.get('balance', 0) / 100 if balance_data else 0
-        
         status = self.risk_manager.get_status()
+        active = sum(1 for v in status['positions'].values() if v != 0)
         self.db.log_bot_status({
             'is_running': True,
             'daily_pnl': status['daily_pnl'],
             'trades_today': status['trades_today'],
             'balance': balance,
-            'active_positions': len(status['positions'])
+            'active_positions': active,
         })
     
     def run(self):
