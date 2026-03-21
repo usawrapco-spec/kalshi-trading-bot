@@ -284,7 +284,7 @@ class KalshiBot:
         logger.info(f"Cycle done: {trades_placed} trades, ${cycle_spent:.2f} spent")
 
         # Forced paper trade if nothing fired
-        if total_signals == 0:
+        if len(all_signals) == 0:
             logger.info("No signals from any strategy - forcing paper trade")
             self._forced_paper_trade(markets)
 

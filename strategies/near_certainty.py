@@ -66,15 +66,15 @@ class NearCertaintyStrategy(BaseStrategy):
             if sig:
                 signals.append(sig)
 
-        # Limit cheap signals to top 20 by confidence to avoid log spam
-        if len(signals) > 20:
-            signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
-            signals = signals[:20]
+        # Keep top 5 only
+        total_found = len(signals)
+        signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
+        signals = signals[:5]
 
         logger.info(
             f"NearCertainty: {closing_soon} closing <24h, "
-            f"{nc_count} in 85-97c ({nc_wide} in 80-99c), "
-            f"{cheap_count} in 3-15c, {len(signals)} signals (capped at 20)"
+            f"{nc_count} in 85-97c, {cheap_count} in 3-15c, "
+            f"found {total_found}, returning {len(signals)}"
         )
         return signals
 

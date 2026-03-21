@@ -71,10 +71,9 @@ class SportsNOStrategy(BaseStrategy):
             est_no_prob = min(0.55 + (yes_cents - FADE_MIN) * 0.005, 0.74)
             edge = est_no_prob - implied_no
 
-            logger.info(
+            logger.debug(
                 f"SportsNO: {ticker} YES={yes_cents}c -> buy NO={no_cents}c, "
-                f"est_win={est_no_prob:.0%} vs implied={implied_no:.0%}, edge={edge:+.0%} "
-                f"-> PAPER BUY NO"
+                f"est_win={est_no_prob:.0%} vs implied={implied_no:.0%}, edge={edge:+.0%}"
             )
 
             signals.append({
@@ -85,10 +84,13 @@ class SportsNOStrategy(BaseStrategy):
                 'reason': f"SportsNO: fade YES={yes_cents}c, buy NO={no_cents}c, est_win={est_no_prob:.0%}, edge={edge:+.0%}",
             })
 
-        reject_str = ', '.join(f"{v}x {k}" for k, v in sorted(rejects.items(), key=lambda x: -x[1])[:5])
+        # Keep top 5 by confidence
+        signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
+        top_edge = f"{signals[0]['edge']:+.0%}" if signals else '0'
+        signals = signals[:5]
         logger.info(
-            f"SportsNO: {sports_count} sports markets, {in_range} in {FADE_MIN}-{FADE_MAX}c range, "
-            f"{len(signals)} signals. Rejects: {reject_str or 'none'}"
+            f"SportsNO: {sports_count} sports markets, {in_range} in range, "
+            f"top edge={top_edge}, returning {len(signals)} signals"
         )
         return signals
 

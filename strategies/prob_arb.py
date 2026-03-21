@@ -45,63 +45,48 @@ class ProbabilityArbStrategy(BaseStrategy):
             if yes_price > 0 and no_price > 0:
                 arb_checked += 1
                 total = yes_price + no_price
-                if total < 0.98:  # Meaningful gap (>2 cents after fees)
+                if total < 0.98:
                     gap = 1.0 - total
-                    # Check if gap exceeds fees for buying both sides
                     fee_yes = kalshi_fee(1, yes_price)
                     fee_no = kalshi_fee(1, no_price)
                     net_profit = gap - fee_yes - fee_no
                     if net_profit > 0:
                         arb_found += 1
                         ticker = m.get('ticker', '')
-                        logger.info(
-                            f"ProbArb: {ticker} YES={yes_price:.2f}+NO={no_price:.2f}={total:.2f}, "
-                            f"gap={gap:.3f}, fees={fee_yes+fee_no:.3f}, net={net_profit:.3f} -> PAPER BUY BOTH"
-                        )
                         signals.append({
                             'ticker': ticker, 'title': m.get('title', ''), 'action': 'buy',
-                            'side': 'yes',  # We'd buy both, but log as YES for tracking
-                            'count': 10, 'confidence': 95,  # Near-certain profit
+                            'side': 'yes', 'count': 1, 'confidence': 95,
                             'strategy_type': 'prob_arb',
                             'edge': net_profit, 'model_prob': 0.99,
-                            'reason': f"ProbArb: YES={yes_price:.2f}+NO={no_price:.2f}={total:.2f}, net_profit={net_profit:.3f}/contract",
+                            'reason': f"ProbArb: YES={yes_price:.2f}+NO={no_price:.2f}={total:.2f}, net={net_profit:.3f}",
                         })
 
-            # Also check: is YES ask significantly below (1 - NO bid)? Spread opportunity
+            # Spread opportunity
             yes_ask = get_price(m, ['yes_ask', 'yes_ask_dollars'])
             no_bid = get_price(m, ['no_bid', 'no_bid_dollars'])
             if yes_ask > 0 and no_bid > 0:
                 implied_yes_from_no = 1.0 - no_bid
                 spread = implied_yes_from_no - yes_ask
-                if spread > 0.03:  # 3 cent spread minimum
+                if spread > 0.03:
                     arb_found += 1
                     ticker = m.get('ticker', '')
-                    logger.info(
-                        f"ProbArb spread: {ticker} yes_ask={yes_ask:.2f} < 1-no_bid={implied_yes_from_no:.2f}, "
-                        f"spread={spread:.3f} -> PAPER BUY YES"
-                    )
                     signals.append({
                         'ticker': ticker, 'title': m.get('title', ''), 'action': 'buy',
-                        'side': 'yes', 'count': 5, 'confidence': 85,
+                        'side': 'yes', 'count': 1, 'confidence': 85,
                         'strategy_type': 'prob_arb',
                         'edge': spread, 'model_prob': implied_yes_from_no,
                         'reason': f"ProbArb spread: yes_ask={yes_ask:.2f} vs 1-no_bid={implied_yes_from_no:.2f}, spread={spread:.3f}",
                     })
 
-            # Group by event for multi-market analysis
             evt = m.get('event_ticker')
             if evt:
                 events.setdefault(evt, []).append(m)
 
-        # Check multi-market events: probabilities within an event should sum to ~1
-        for evt, evt_markets in events.items():
-            if len(evt_markets) < 2:
-                continue
-            total_yes = sum(get_price(em, ['yes_bid', 'yes_bid_dollars', 'last_price', 'last_price_dollars']) for em in evt_markets)
-            if total_yes > 0 and abs(total_yes - 1.0) > 0.10:
-                logger.info(f"ProbArb event: {evt} has {len(evt_markets)} markets summing to {total_yes:.2f} (should be ~1.0)")
-
-        logger.info(f"ProbArb: checked {arb_checked} markets, found {arb_found} opportunities, {len(signals)} signals")
+        # Sort by edge, keep top 5 only
+        signals.sort(key=lambda s: s.get('edge', 0), reverse=True)
+        top_edge = signals[0]['edge'] if signals else 0
+        signals = signals[:5]
+        logger.info(f"ProbArb: checked {arb_checked}, found {arb_found} opportunities, top edge={top_edge:.1%}, returning {len(signals)} signals")
         return signals
 
     def execute(self, signal, dry_run=False):
