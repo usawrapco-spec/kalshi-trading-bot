@@ -1,6 +1,6 @@
 """Kalshi API client wrapper with error handling and retry logic."""
 
-from kalshi_python import ApiClient, Configuration
+from kalshi_python import ApiClient, Configuration, MarketApi, PortfolioApi, ExchangeApi
 import time
 from config import Config
 from utils.logger import setup_logger
@@ -25,7 +25,13 @@ class KalshiAPIClient:
             configuration.username = self.key_id
             configuration.password = self.private_key
             
-            self.client = ApiClient(configuration)
+            api_client = ApiClient(configuration)
+            
+            # Initialize API instances
+            self.market_api = MarketApi(api_client)
+            self.portfolio_api = PortfolioApi(api_client)
+            self.exchange_api = ExchangeApi(api_client)
+            
             logger.info("✅ Kalshi client initialized successfully")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Kalshi client: {e}")
@@ -34,11 +40,12 @@ class KalshiAPIClient:
     def get_markets(self, status='open', limit=100, **kwargs):
         """Get markets with error handling."""
         try:
-            markets = self.client.get_markets(
+            response = self.market_api.get_markets(
                 status=status,
                 limit=limit,
                 **kwargs
             )
+            markets = response.to_dict() if hasattr(response, 'to_dict') else response
             logger.debug(f"Retrieved {len(markets.get('markets', []))} markets")
             return markets
         except Exception as e:
@@ -48,7 +55,8 @@ class KalshiAPIClient:
     def get_market(self, ticker):
         """Get specific market by ticker."""
         try:
-            market = self.client.get_market(ticker=ticker)
+            response = self.market_api.get_market(ticker=ticker)
+            market = response.to_dict() if hasattr(response, 'to_dict') else response
             logger.debug(f"Retrieved market: {ticker}")
             return market
         except Exception as e:
@@ -58,7 +66,8 @@ class KalshiAPIClient:
     def get_orderbook(self, ticker):
         """Get orderbook for a market."""
         try:
-            orderbook = self.client.get_orderbook(ticker=ticker)
+            response = self.market_api.get_market_orderbook(ticker=ticker)
+            orderbook = response.to_dict() if hasattr(response, 'to_dict') else response
             return orderbook
         except Exception as e:
             logger.error(f"Error getting orderbook for {ticker}: {e}")
@@ -93,7 +102,8 @@ class KalshiAPIClient:
             return {'status': 'dry_run', 'params': order_params}
         
         try:
-            order = self.client.create_order(**order_params)
+            response = self.exchange_api.create_order(**order_params)
+            order = response.to_dict() if hasattr(response, 'to_dict') else response
             logger.info(f"✅ Order created: {order.get('order_id')}")
             return order
         except Exception as e:
@@ -103,7 +113,8 @@ class KalshiAPIClient:
     def get_portfolio(self):
         """Get current portfolio/positions."""
         try:
-            portfolio = self.client.get_portfolio()
+            response = self.portfolio_api.get_portfolio()
+            portfolio = response.to_dict() if hasattr(response, 'to_dict') else response
             return portfolio
         except Exception as e:
             logger.error(f"Error getting portfolio: {e}")
@@ -112,7 +123,8 @@ class KalshiAPIClient:
     def get_balance(self):
         """Get account balance."""
         try:
-            balance = self.client.get_balance()
+            response = self.portfolio_api.get_balance()
+            balance = response.to_dict() if hasattr(response, 'to_dict') else response
             logger.debug(f"Balance: ${balance.get('balance', 0)/100:.2f}")
             return balance
         except Exception as e:
@@ -125,7 +137,8 @@ class KalshiAPIClient:
             params = {}
             if ticker:
                 params['ticker'] = ticker
-            fills = self.client.get_fills(**params)
+            response = self.portfolio_api.get_fills(**params)
+            fills = response.to_dict() if hasattr(response, 'to_dict') else response
             return fills
         except Exception as e:
             logger.error(f"Error getting fills: {e}")
