@@ -63,6 +63,26 @@ def api_status():
         status_result = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
         r = status_result.data[0] if status_result.data else {}
 
+        # FETCH REAL KALSHI BALANCE DIRECTLY FROM API
+        real_balance = None
+        try:
+            from utils.kalshi_client import KalshiAPIClient
+            kalshi_client = KalshiAPIClient()
+            balance_response = kalshi_client.get_balance()
+            if balance_response and 'balance' in balance_response:
+                real_balance = balance_response['balance'] / 100.0  # Convert cents to dollars
+        except Exception as e:
+            print(f"Failed to fetch real Kalshi balance: {e}")
+            # Fallback to database value
+            real_balance = r.get('real_balance')
+
+        # Calculate live Daily P&L: (real_balance + value_of_open_positions - starting_balance)
+        # Starting balance is $10.00
+        starting_balance = 10.00
+        live_daily_pnl = None
+        if real_balance is not None:
+            live_daily_pnl = real_balance + live_cost - starting_balance
+
         return jsonify({
             'is_running': r.get('is_running', False),
             'last_check': r.get('last_check'),
@@ -76,7 +96,8 @@ def api_status():
                 'losses': paper_losses,
             },
             'live': {
-                'balance': r.get('real_balance'),
+                'balance': real_balance,
+                'daily_pnl': live_daily_pnl,
                 'positions': live_positions,
                 'wins': live_wins,
                 'losses': live_losses,
@@ -88,7 +109,7 @@ def api_status():
         return jsonify({
             'is_running': False, 'last_check': None, 'error': str(e),
             'paper': {'balance': 100, 'daily_pnl': 0, 'positions': 0, 'roi_percent': 0, 'trades_today': 0, 'wins': 0, 'losses': 0},
-            'live': {'balance': None, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 5.00},
+            'live': {'balance': None, 'daily_pnl': None, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 5.00},
         })
 
 @app.route('/api/trades')
@@ -645,7 +666,10 @@ async function refreshAll(){
     // LIVE TRADING
     const live=status.live||{};
     const lb=live.balance||0;
+    const lpnl=live.daily_pnl||0;
     document.getElementById('live-balance').textContent=lb!==null?'$'+lb.toFixed(2):'—';
+    document.getElementById('live-pnl').textContent=lpnl!==null?(lpnl>=0?'+$':'-$')+Math.abs(lpnl).toFixed(2):'—';
+    document.getElementById('live-pnl').className='metric-value '+(lpnl>=0?'profit':'loss');
     document.getElementById('live-positions').textContent=live.positions||0;
     const lwr=(live.wins+live.losses)>0?((live.wins/(live.wins+live.losses))*100).toFixed(0):'—';
     document.getElementById('live-win-rate').textContent=lwr+'%';
