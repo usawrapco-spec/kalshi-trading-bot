@@ -76,13 +76,40 @@ def api_status():
             print(f"Failed to fetch Kalshi balance: {e}")
             real_cash = r.get('real_balance')
 
-        # Portfolio value = cash + open position cost basis
+        # Portfolio value = cash + MARKET VALUE of open positions
+        # Fetch current prices for each open live position
+        positions_market_value = 0.0
+        if real_cash is not None and live_open:
+            try:
+                for t in live_open:
+                    ticker = t.get('ticker', '')
+                    cost_basis = t.get('price', 0) * t.get('count', 0)
+                    try:
+                        market_data = kalshi_client.get_market(ticker)
+                        market = market_data.get('market', market_data) if market_data else {}
+                        if t.get('side') == 'yes':
+                            current_price = float(market.get('yes_bid', market.get('yes_bid_dollars', t.get('price', 0))))
+                        else:
+                            current_price = float(market.get('no_bid', market.get('no_bid_dollars', 1.0 - t.get('price', 0))))
+                        # Kalshi may return cents — normalize to dollars
+                        if current_price > 1.0:
+                            current_price = current_price / 100.0
+                        market_val = current_price * t.get('count', 0)
+                        print(f"Position {ticker}: cost=${cost_basis:.2f} market=${market_val:.2f}")
+                        positions_market_value += market_val
+                    except Exception:
+                        print(f"Position {ticker}: cost=${cost_basis:.2f} market=FALLBACK")
+                        positions_market_value += cost_basis
+            except Exception as e:
+                print(f"Market value fetch failed, using cost basis: {e}")
+                positions_market_value = live_open_cost
+
         portfolio_value = None
         live_daily_pnl = None
         starting_balance = 10.00
         if real_cash is not None:
-            portfolio_value = real_cash + live_open_cost
-            live_daily_pnl = portfolio_value - starting_balance
+            portfolio_value = round(real_cash + positions_market_value, 2)
+            live_daily_pnl = round(portfolio_value - starting_balance, 2)
 
         return jsonify({
             'is_running': r.get('is_running', False),
@@ -99,7 +126,7 @@ def api_status():
             'live': {
                 'balance': portfolio_value,
                 'cash': real_cash,
-                'positions_value': round(live_open_cost, 2),
+                'positions_value': round(positions_market_value, 2),
                 'daily_pnl': live_daily_pnl,
                 'realized_pnl': round(live_realized_pnl, 2),
                 'positions': len(live_open),
