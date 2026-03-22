@@ -35,44 +35,52 @@ def health():
 def api_status():
     try:
         db = get_db()
-        # Bot status row
-        result = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
-        r = result.data[0] if result.data else {}
-        paper_bal = r.get('balance', 100)
-        real_bal = r.get('real_balance')
-        live_pos = r.get('live_positions', 0)
 
-        # Fetch all trades to split live/paper stats
-        trades_result = db.client.table('kalshi_trades').select('reason,is_live,order_id').execute()
-        all_trades = trades_result.data or []
+        # LIVE TRADES: From Supabase (order_id != 'paper')
+        live_trades_result = db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').execute()
+        live_trades = live_trades_result.data or []
 
-        def _stats(trade_list):
-            settled = [t for t in trade_list if any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS'))]
-            wins = sum(1 for t in settled if 'WIN' in (t.get('reason') or '').upper())
-            losses = sum(1 for t in settled if 'LOSS' in (t.get('reason') or '').upper())
-            return wins, losses
+        # Calculate live stats
+        live_positions = len([t for t in live_trades if not any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS', 'SETTLED'))])
+        live_cost = sum(t.get('price', 0) * t.get('count', 0) for t in live_trades if not any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS', 'SETTLED')))
+        live_settled = [t for t in live_trades if any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS'))]
+        live_wins = sum(1 for t in live_settled if 'WIN' in (t.get('reason') or '').upper())
+        live_losses = sum(1 for t in live_settled if 'LOSS' in (t.get('reason') or '').upper())
 
-        live_trades = [t for t in all_trades if t.get('is_live') or (t.get('order_id') and t['order_id'] != 'paper' and t['order_id'] != 'forced_paper')]
-        paper_trades = [t for t in all_trades if t not in live_trades]
-        lw, ll = _stats(live_trades)
-        pw, pl = _stats(paper_trades)
+        # PAPER TRADES: From Supabase (order_id == 'paper')
+        paper_trades_result = db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').execute()
+        paper_trades = paper_trades_result.data or []
+
+        # Calculate paper stats
+        paper_positions = len([t for t in paper_trades if not any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS', 'SETTLED'))])
+        paper_cost = sum(t.get('price', 0) * t.get('count', 0) for t in paper_trades if not any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS', 'SETTLED')))
+        paper_balance = 100.0 - paper_cost  # Started with $100
+        paper_settled = [t for t in paper_trades if any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS'))]
+        paper_wins = sum(1 for t in paper_settled if 'WIN' in (t.get('reason') or '').upper())
+        paper_losses = sum(1 for t in paper_settled if 'LOSS' in (t.get('reason') or '').upper())
+
+        # Get latest bot status for additional info
+        status_result = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
+        r = status_result.data[0] if status_result.data else {}
 
         return jsonify({
             'is_running': r.get('is_running', False),
             'last_check': r.get('last_check'),
             'paper': {
-                'balance': paper_bal,
+                'balance': paper_balance,
                 'daily_pnl': r.get('daily_pnl', 0),
-                'positions': r.get('active_positions', 0),
-                'roi_percent': round(((paper_bal - 100) / 100) * 100, 2),
-                'trades_today': r.get('trades_today', 0),
-                'wins': pw, 'losses': pl,
+                'positions': paper_positions,
+                'roi_percent': round(((paper_balance - 100) / 100) * 100, 2),
+                'trades_today': len(paper_trades),
+                'wins': paper_wins,
+                'losses': paper_losses,
             },
             'live': {
-                'balance': real_bal,
-                'positions': live_pos,
-                'wins': lw, 'losses': ll,
-                'total_exposure': 0,
+                'balance': r.get('real_balance'),
+                'positions': live_positions,
+                'wins': live_wins,
+                'losses': live_losses,
+                'total_exposure': live_cost,
                 'max_exposure': 5.00,
             },
         })
@@ -96,26 +104,38 @@ def api_trades():
 def api_strategies():
     try:
         db = get_db()
+
+        # Get all trades
         result = db.client.table('kalshi_trades').select('*').execute()
-        strats = {}
-        for t in (result.data or []):
-            s = t.get('strategy', 'unknown')
-            if s not in strats:
-                strats[s] = {'strategy': s, 'live_trades': 0, 'paper_trades': 0, 'wins': 0, 'losses': 0, 'total_pnl': 0.0}
+        all_trades = result.data or []
 
-            # Determine if live or paper trade
-            is_live = t.get('is_live') or (t.get('order_id') and t['order_id'] != 'paper' and t['order_id'] != 'forced_paper')
-            if is_live:
-                strats[s]['live_trades'] += 1
-            else:
-                strats[s]['paper_trades'] += 1
+        # Separate live and paper trades
+        live_trades = [t for t in all_trades if t.get('order_id') and t['order_id'] != 'paper' and t['order_id'] != 'forced_paper']
+        paper_trades = [t for t in all_trades if t not in live_trades]
 
-            reason = (t.get('reason') or '').upper()
-            if 'WIN' in reason: strats[s]['wins'] += 1
-            elif 'LOSS' in reason: strats[s]['losses'] += 1
+        # Count by strategy
+        strategies = {}
 
-        return jsonify(list(strats.values()))
-    except:
+        def count_trades(trades, trade_type):
+            for t in trades:
+                s = t.get('strategy', 'unknown')
+                if s not in strategies:
+                    strategies[s] = {'strategy': s, 'live_trades': 0, 'paper_trades': 0, 'wins': 0, 'losses': 0}
+
+                if trade_type == 'live':
+                    strategies[s]['live_trades'] += 1
+                else:
+                    strategies[s]['paper_trades'] += 1
+
+                reason = (t.get('reason') or '').upper()
+                if 'WIN' in reason: strategies[s]['wins'] += 1
+                elif 'LOSS' in reason: strategies[s]['losses'] += 1
+
+        count_trades(live_trades, 'live')
+        count_trades(paper_trades, 'paper')
+
+        return jsonify(list(strategies.values()))
+    except Exception as e:
         return jsonify([])
 
 @app.route('/api/equity')

@@ -160,12 +160,28 @@ class KalshiBot:
         except Exception as e:
             logger.error(f"Failed to fetch real balance: {e}")
 
+    def _has_open_live_position(self, ticker, side):
+        """Check if we already have an open live position on this ticker+side."""
+        if not self.db:
+            return False
+        try:
+            result = self.db.client.table('kalshi_trades').select('*').eq('ticker', ticker).neq('order_id', 'paper').execute()
+            return len(result.data) > 0
+        except Exception as e:
+            logger.error(f"Failed to check open live positions: {e}")
+            return False
+
     def _place_live_order(self, sig, price_for_side, strategy_name):
         """Attempt to place a real order on Kalshi. Returns (success, order_id_or_reason)."""
         ticker = sig['ticker']
         side = sig['side']
         count = sig['count']
         price_cents = int(price_for_side * 100)
+
+        # CHECK FOR DUPLICATE POSITIONS - PREVENT REAL MONEY BLEEDING
+        if self._has_open_live_position(ticker, side):
+            logger.warning(f"SKIP LIVE DUPLICATE: Already have open live position on {ticker} {side.upper()}")
+            return False, "duplicate_position"
 
         logger.info(
             f"LIVE ORDER ATTEMPT: {ticker} {side.upper()} x{count} "
