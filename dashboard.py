@@ -236,6 +236,88 @@ def api_improvements():
     except:
         return jsonify([])
 
+def _classify_market_type(trade):
+    """Classify a trade into a market type for leaderboard tracking."""
+    strategy = (trade.get('strategy') or '')
+    ticker = (trade.get('ticker') or '').upper()
+    if strategy == 'weather_edge' or ticker.startswith('KXHIGH') or ticker.startswith('KXLOWT'):
+        return 'weather'
+    if strategy == 'precip_edge' or 'RAIN' in ticker or 'SNOW' in ticker or 'PRECIP' in ticker:
+        return 'precip'
+    if strategy == 'crypto_momentum' or any(kw in ticker for kw in ['BTC', 'ETH', 'SOL', 'XRP', 'CRYPTO']):
+        return 'crypto'
+    if strategy == 'sports_no' or any(kw in ticker for kw in ['NFL', 'NBA', 'MLB', 'NHL', 'NCAA', 'SPORT']):
+        return 'sports'
+    if strategy == 'prob_arb':
+        return 'arb'
+    if strategy == 'cross_platform':
+        return 'cross_platform'
+    return 'swing'
+
+@app.route('/api/leaderboards')
+def api_leaderboards():
+    """Per-market-type leaderboards with live/paper stats."""
+    try:
+        db = get_db()
+        all_result = db.client.table('kalshi_trades').select('*').execute()
+        boards = {}
+        for trade in (all_result.data or []):
+            mt = _classify_market_type(trade)
+            is_live = trade.get('order_id') not in (None, 'paper', 'forced_paper')
+            if mt not in boards:
+                boards[mt] = {
+                    'name': mt, 'live_trades': 0, 'paper_trades': 0,
+                    'live_open': 0, 'paper_open': 0,
+                    'live_wins': 0, 'live_losses': 0, 'paper_wins': 0, 'paper_losses': 0,
+                    'live_pnl': 0, 'paper_pnl': 0, 'live_cost': 0, 'paper_cost': 0,
+                    'best_trade': None, 'worst_trade': None,
+                }
+            b = boards[mt]
+            price = trade.get('price', 0) or 0
+            count = trade.get('count', 0) or 0
+            if is_live:
+                b['live_trades'] += 1
+                if trade.get('resolved'):
+                    pnl = trade.get('pnl', 0) or 0
+                    b['live_pnl'] += pnl
+                    if pnl > 0:
+                        b['live_wins'] += 1
+                    else:
+                        b['live_losses'] += 1
+                    if b['best_trade'] is None or pnl > (b['best_trade'].get('pnl', 0) or 0):
+                        b['best_trade'] = {'ticker': trade.get('ticker', ''), 'pnl': round(pnl, 2)}
+                    if b['worst_trade'] is None or pnl < (b['worst_trade'].get('pnl', 0) or 0):
+                        b['worst_trade'] = {'ticker': trade.get('ticker', ''), 'pnl': round(pnl, 2)}
+                else:
+                    b['live_open'] += 1
+                    b['live_cost'] += price * count
+            else:
+                b['paper_trades'] += 1
+                if trade.get('resolved'):
+                    pnl = trade.get('pnl', 0) or 0
+                    b['paper_pnl'] += pnl
+                    if pnl > 0:
+                        b['paper_wins'] += 1
+                    else:
+                        b['paper_losses'] += 1
+                    if b['best_trade'] is None or pnl > (b['best_trade'].get('pnl', 0) or 0):
+                        b['best_trade'] = {'ticker': trade.get('ticker', ''), 'pnl': round(pnl, 2)}
+                    if b['worst_trade'] is None or pnl < (b['worst_trade'].get('pnl', 0) or 0):
+                        b['worst_trade'] = {'ticker': trade.get('ticker', ''), 'pnl': round(pnl, 2)}
+                else:
+                    b['paper_open'] += 1
+                    b['paper_cost'] += price * count
+        for b in boards.values():
+            b['live_pnl'] = round(b['live_pnl'], 2)
+            b['paper_pnl'] = round(b['paper_pnl'], 2)
+            b['live_cost'] = round(b['live_cost'], 2)
+            b['paper_cost'] = round(b['paper_cost'], 2)
+            b['live_win_rate'] = round(b['live_wins'] / max(b['live_wins'] + b['live_losses'], 1) * 100, 1)
+            b['paper_win_rate'] = round(b['paper_wins'] / max(b['paper_wins'] + b['paper_losses'], 1) * 100, 1)
+        return jsonify(boards)
+    except Exception as e:
+        return jsonify({'error': str(e)})
+
 @app.route('/api/swing')
 def api_swing():
     """Swing trading data — non-weather paper positions and closed swing trades."""
@@ -244,14 +326,14 @@ def api_swing():
         # Open non-weather paper positions
         open_result = db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').eq('resolved', False).execute()
         non_weather = [t for t in (open_result.data or [])
-                       if t.get('strategy') != 'weather_edge'
+                       if t.get('strategy') not in ('weather_edge', 'precip_edge', 'crypto_momentum')
                        and not (t.get('ticker') or '').startswith('KXHIGH')
                        and not (t.get('ticker') or '').startswith('KXLOWT')]
 
-        # Closed swing trades (resolved paper, non-weather, with SWING in reason)
+        # Closed swing trades (resolved paper, non-weather/crypto, with SWING in reason)
         closed_result = db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').eq('resolved', True).execute()
         swing_closed = [t for t in (closed_result.data or [])
-                        if t.get('strategy') != 'weather_edge'
+                        if t.get('strategy') not in ('weather_edge', 'precip_edge', 'crypto_momentum')
                         and not (t.get('ticker') or '').startswith('KXHIGH')
                         and not (t.get('ticker') or '').startswith('KXLOWT')
                         and 'SWING' in (t.get('reason') or '').upper()]
@@ -424,6 +506,16 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
 .strat-row:hover{background:rgba(0,240,255,0.03)}
 .strat-name{color:rgba(0,240,255,0.7);font-size:.65rem}
 .strat-count{color:rgba(255,255,255,0.3)}
+.lb-card{background:rgba(0,0,0,0.2);border-radius:4px;padding:6px 8px;margin-bottom:6px;border-left:3px solid #888}
+.lb-hdr{display:flex;align-items:center;gap:5px;margin-bottom:4px}
+.lb-rank{font-size:.8rem;font-weight:700;opacity:.4}
+.lb-name{font-weight:700;font-size:.65rem;letter-spacing:.5px}
+.lb-badge-live{background:rgba(255,60,60,0.3);color:#ff3c3c;font-size:.5rem;padding:1px 4px;border-radius:2px}
+.lb-badge-paper{background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.3);font-size:.5rem;padding:1px 4px;border-radius:2px}
+.lb-row{display:flex;justify-content:space-between;padding:1px 0}
+.lb-lbl{color:rgba(255,255,255,0.25);font-size:.6rem}
+.lb-val{font-size:.65rem;font-weight:600}
+.lb-best{margin-top:3px;font-size:.55rem;color:#ffc800;border-top:1px solid rgba(255,255,255,0.04);padding-top:3px}
 
 /* Center */
 .center{padding:0;display:flex;flex-direction:column}
@@ -589,19 +681,13 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
 <!-- MAIN 3-COLUMN -->
 <div class="grid-main">
 
-  <!-- LEFT: Strategy Layers -->
+  <!-- LEFT: Market Leaderboards + Strategy Layers -->
   <div class="sidebar">
-    <div class="panel-title" style="padding:14px 14px 8px">Layer Architecture</div>
+    <div class="panel-title" style="padding:14px 14px 8px">&#x1f3c6; MARKET LEADERBOARDS</div>
+    <div id="leaderboardGrid" style="padding:0 8px 8px;font-size:.68rem"></div>
+    <div class="panel-title" style="padding:10px 14px 6px;border-top:1px solid rgba(0,240,255,0.06)">Strategy Layers</div>
     <div id="stratLayers">
       <div class="strat-row"><span class="strat-name">Loading...</span></div>
-    </div>
-    <div class="panel-title" style="padding:14px 14px 8px;margin-top:8px">Risk Status</div>
-    <div style="padding:4px 14px;font-size:.72rem">
-      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Kelly Fraction</span><span>0.10</span></div>
-      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Max Entry</span><span>$0.15</span></div>
-      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Min Confidence</span><span>85%</span></div>
-      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Daily Stop</span><span>-$30</span></div>
-      <div style="display:flex;justify-content:space-between;padding:4px 0"><span style="color:rgba(255,255,255,0.25)">Cycle Speed</span><span>10s</span></div>
     </div>
   </div>
 
@@ -1041,9 +1127,43 @@ async function refreshAll(){
   }
 }
 
+// === LEADERBOARDS ===
+const LB_CFG={
+  weather:{emoji:'\u{1f321}',label:'WEATHER',color:'#e63946'},
+  crypto:{emoji:'\u{1fa99}',label:'CRYPTO',color:'#a855f7'},
+  precip:{emoji:'\u{1f327}',label:'RAIN/SNOW',color:'#457b9d'},
+  arb:{emoji:'\u{1f512}',label:'ARBITRAGE',color:'#2ecc71'},
+  cross_platform:{emoji:'\u{1f504}',label:'CROSS-PLAT',color:'#9b59b6'},
+  sports:{emoji:'\u26bd',label:'SPORTS',color:'#e67e22'},
+  swing:{emoji:'\u{1f4c8}',label:'SWING',color:'#1abc9c'},
+};
+async function loadLeaderboards(){
+  const boards=await fetchJ('/api/leaderboards');
+  if(!boards||boards.error)return;
+  const grid=document.getElementById('leaderboardGrid');
+  if(!grid)return;
+  const sorted=Object.entries(boards).sort((a,b)=>{
+    const pa=a[1].live_pnl+a[1].paper_pnl,pb=b[1].live_pnl+b[1].paper_pnl;return pb-pa;
+  });
+  grid.innerHTML=sorted.map(([type,b],i)=>{
+    const c=LB_CFG[type]||{emoji:'\u{1f4ca}',label:type.toUpperCase(),color:'#888'};
+    const tp=b.live_pnl+b.paper_pnl;
+    const tw=b.live_wins+b.paper_wins,tl=b.live_losses+b.paper_losses;
+    const wr=tw+tl>0?((tw/(tw+tl))*100).toFixed(0):'--';
+    const pc=tp>=0?'#39ff14':'#ff3333';
+    const ps=tp>=0?'+':'';
+    const isLive=b.live_trades>0;
+    const badge=isLive?'<span class="lb-badge-live">LIVE</span>':'<span class="lb-badge-paper">PAPER</span>';
+    const best=b.best_trade?`<div class="lb-best">\u{1f3c6} ${b.best_trade.ticker.substring(0,20)} +$${b.best_trade.pnl.toFixed(2)}</div>`:'';
+    return`<div class="lb-card" style="border-left-color:${c.color}"><div class="lb-hdr"><span class="lb-rank">#${i+1}</span><span>${c.emoji}</span><span class="lb-name">${c.label}</span>${badge}</div><div class="lb-row"><span class="lb-lbl">P&L</span><span class="lb-val" style="color:${pc}">${ps}$${Math.abs(tp).toFixed(2)}</span></div><div class="lb-row"><span class="lb-lbl">Record</span><span class="lb-val">${tw}W/${tl}L (${wr}%)</span></div><div class="lb-row"><span class="lb-lbl">Open</span><span class="lb-val">${b.live_open+b.paper_open} pos / $${(b.live_cost+b.paper_cost).toFixed(2)}</span></div>${best}</div>`;
+  }).join('');
+}
+
 // Initial + auto-refresh
 refreshAll();
+loadLeaderboards();
 setInterval(refreshAll,12000);
+setInterval(loadLeaderboards,30000);
 </script>
 </body>
 </html>"""
