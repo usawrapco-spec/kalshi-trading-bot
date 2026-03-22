@@ -318,8 +318,9 @@ class KalshiBot:
         try:
             from utils.market_helpers import get_yes_price, get_no_price
 
-            # 1. Get real Kalshi cash balance
+            # 1. Get real Kalshi balance and portfolio value directly from API
             cash = 0.0
+            portfolio_value = 0.0
             try:
                 balance_response = self.client.get_balance()
                 cash = (balance_response or {}).get('balance', 0) / 100.0
@@ -327,42 +328,31 @@ class KalshiBot:
                 if self.real_balance_cents:
                     cash = self.real_balance_cents / 100.0
 
-            # 2. Get open live trades and fetch market prices
-            live_open = self.db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').eq('resolved', False).execute()
+            try:
+                portfolio_response = self.client.get_portfolio()
+                if portfolio_response:
+                    # Kalshi returns portfolio_value in cents
+                    portfolio_value = portfolio_response.get('portfolio_value', 0) / 100.0
+            except Exception:
+                pass
+
+            # 2. Count open live trades and compute cost basis from DB
+            live_open = self.db.client.table('kalshi_trades').select('price,count,side').neq('order_id', 'paper').neq('order_id', 'forced_paper').eq('resolved', False).execute()
             live_trades = live_open.data or []
+            cost_basis = sum((t.get('price', 0) or 0) * (t.get('count', 0) or 0) for t in live_trades)
 
-            cost_basis = 0.0
-            market_value = 0.0
-            checked = 0
-
-            for trade in live_trades:
-                trade_cost = (trade.get('price', 0) or 0) * (trade.get('count', 0) or 0)
-                cost_basis += trade_cost
-                if checked < 20:
-                    try:
-                        checked += 1
-                        market_data = self.client.get_market(trade.get('ticker', ''))
-                        if not market_data:
-                            market_value += trade_cost
-                            continue
-                        market = market_data.get('market', market_data)
-                        if trade.get('side') == 'yes':
-                            current = get_yes_price(market)
-                        else:
-                            current = get_no_price(market)
-                        if current > 0:
-                            market_value += current * (trade.get('count', 0) or 0)
-                        else:
-                            market_value += trade_cost
-                    except Exception:
-                        market_value += trade_cost
-                else:
-                    market_value += trade_cost
+            # Use Kalshi's portfolio value if available, otherwise fall back to cash + cost basis
+            if portfolio_value > 0:
+                total = portfolio_value
+                market_value = portfolio_value - cash
+            else:
+                total = cash + cost_basis
+                market_value = cost_basis
 
             unrealized = market_value - cost_basis
 
             # 3. Realized P&L
-            settled = self.db.client.table('kalshi_trades').select('pnl').neq('order_id', 'paper').eq('resolved', True).execute()
+            settled = self.db.client.table('kalshi_trades').select('pnl').neq('order_id', 'paper').neq('order_id', 'forced_paper').eq('resolved', True).execute()
             realized = sum((t.get('pnl', 0) or 0) for t in (settled.data or []))
 
             # 4. Paper stats (include both 'paper' and 'forced_paper')
@@ -508,7 +498,7 @@ class KalshiBot:
         if not self.db or not self.db.client:
             return 0.0
         try:
-            live_open = self.db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').eq('resolved', False).execute()
+            live_open = self.db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').neq('order_id', 'forced_paper').eq('resolved', False).execute()
             if not live_open.data:
                 return 0.0
 
@@ -1443,7 +1433,7 @@ class KalshiBot:
                     tier_count = size_by_tier(tier, price_for_side, balance_dollars)
 
                     try:
-                        open_live = self.db.client.table('kalshi_trades').select('price,count').neq('order_id', 'paper').eq('resolved', False).execute()
+                        open_live = self.db.client.table('kalshi_trades').select('price,count').neq('order_id', 'paper').neq('order_id', 'forced_paper').eq('resolved', False).execute()
                         current_exposure = sum(t.get('price', 0) * t.get('count', 0) for t in (open_live.data or []))
                     except Exception:
                         current_exposure = sum(p.get('cost', 0) for p in self.open_live_positions)

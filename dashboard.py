@@ -81,7 +81,7 @@ def api_status():
             # Fix 6: Proper paper balance calculation - never goes negative
             paper_cost = sum(t.get('price', 0) * t.get('count', 0) for t in paper_open)
             paper_realized = sum(t.get('pnl', 0) or 0 for t in paper_settled)
-            paper_bal = 10000 - paper_cost + paper_realized  # Start with $100k
+            paper_bal = 10000 - paper_cost + paper_realized  # Start with $10k
 
             # Auto-refill if too low
             if paper_bal < 1000:
@@ -95,7 +95,7 @@ def api_status():
         live_wins = sum(1 for t in live_settled_data if (t.get('pnl', 0) or 0) > 0)
         live_losses = sum(1 for t in live_settled_data if (t.get('pnl', 0) or 0) <= 0) if live_settled_data else 0
 
-        paper_settled_result = db.client.table('kalshi_trades').select('pnl').eq('order_id', 'paper').eq('resolved', True).execute()
+        paper_settled_result = db.client.table('kalshi_trades').select('pnl').in_('order_id', ['paper', 'forced_paper']).eq('resolved', True).execute()
         paper_settled_data = paper_settled_result.data or []
         paper_wins = sum(1 for t in paper_settled_data if (t.get('pnl', 0) or 0) > 0)
         paper_losses = sum(1 for t in paper_settled_data if (t.get('pnl', 0) or 0) <= 0) if paper_settled_data else 0
