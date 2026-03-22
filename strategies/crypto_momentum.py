@@ -17,11 +17,17 @@ from utils.api_resilience import resilient_strategy
 logger = setup_logger('crypto_momentum')
 
 CRYPTO_KEYWORDS = ['bitcoin', 'btc', 'ethereum', 'eth', 'solana', 'sol', 'crypto', 'xrp']
-SHORT_TERM_KEYWORDS = ['higher', 'lower', '15 min', '15-min', 'next', 'close above', 'close below',
-                       'above', 'below', 'price', 'up', 'down']
-# Ticker prefixes that are always crypto (no keyword matching needed)
-CRYPTO_TICKER_PREFIXES = ['KXBTC', 'KXETH', 'KXSOL', 'KXXRP', 'KXCRYPTO',
-                          'INXBTC', 'INXETH', 'INXSOL']
+
+# Fetch by series ticker directly — same pattern as weather markets.
+# These don't show up in the general market list.
+CRYPTO_SERIES = {
+    'KXBTC15M': 'BTC',   # Bitcoin 15-minute up/down
+    'KXETH15M': 'ETH',   # Ethereum 15-minute up/down
+    'KXSOL15M': 'SOL',   # Solana 15-minute up/down
+    'KXBTC': 'BTC',      # Bitcoin hourly/daily
+    'KXETH': 'ETH',      # Ethereum hourly/daily
+    'KXSOL': 'SOL',      # Solana hourly/daily
+}
 
 MIN_MOMENTUM = 0.003     # 0.3% minimum move to generate signal
 MIN_EDGE = 0.08          # 8% edge over market price
@@ -56,8 +62,8 @@ class CryptoMomentumStrategy(BaseStrategy):
         # Reset per-cycle debate counter
         self._crypto_debates_this_cycle = 0
 
-        # Find crypto markets from the full market list
-        crypto_markets = self._find_crypto_markets(markets)
+        # Fetch crypto markets by series ticker (they don't appear in general market list)
+        crypto_markets = self._fetch_crypto_markets()
 
         m5 = self.monitor.get_momentum('BTC', 5)
         m15 = self.monitor.get_momentum('BTC', 15)
@@ -116,47 +122,47 @@ class CryptoMomentumStrategy(BaseStrategy):
             logger.info(f"CryptoMomentum: {len(signals)} signals, best edge={signals[0]['edge']:.0%}")
         return signals
 
-    def _find_crypto_markets(self, markets):
-        """Filter markets to crypto short-term contracts."""
+    def _fetch_crypto_markets(self):
+        """Fetch crypto markets by series ticker — they don't appear in general list."""
         crypto_markets = []
-        for m in markets:
-            title = (m.get('title') or '').lower()
-            ticker = (m.get('ticker') or '').upper()
-            series = (m.get('series_ticker') or '').upper()
+        seen = set()
 
-            # Match by ticker prefix (always crypto, no keyword needed)
-            ticker_match = any(ticker.startswith(p) or series.startswith(p) for p in CRYPTO_TICKER_PREFIXES)
+        for series_ticker, coin in CRYPTO_SERIES.items():
+            try:
+                batch = self.client.get_markets_by_series(series_ticker, status='open')
+                added = 0
+                for m in batch:
+                    ticker = m.get('ticker', '')
+                    if ticker in seen:
+                        continue
+                    seen.add(ticker)
 
-            # Match by title keywords (need both crypto + short-term)
-            is_crypto = any(kw in title for kw in CRYPTO_KEYWORDS)
-            is_short = any(kw in title for kw in SHORT_TERM_KEYWORDS)
-            keyword_match = is_crypto and is_short
+                    # Skip already-resolved
+                    if m.get('result'):
+                        continue
 
-            if not (ticker_match or keyword_match):
-                continue
+                    yes_p = get_yes_price(m)
+                    no_p = get_no_price(m)
+                    volume = safe_float(m.get('volume_24h_fp', m.get('volume_24h', m.get('volume', 0))))
 
-            coin = None
-            if 'bitcoin' in title or 'btc' in title or 'BTC' in ticker:
-                coin = 'BTC'
-            elif 'ethereum' in title or 'eth' in title or 'ETH' in ticker:
-                coin = 'ETH'
-            elif 'solana' in title or 'sol' in title or 'SOL' in ticker:
-                coin = 'SOL'
+                    crypto_markets.append({
+                        'ticker': ticker,
+                        'title': m.get('title', ''),
+                        'coin': coin,
+                        'yes_price': yes_p,
+                        'no_price': no_p,
+                        'volume': volume,
+                        'close_time': m.get('close_time', ''),
+                        'market': m,
+                    })
+                    added += 1
 
-            yes_p = get_yes_price(m)
-            no_p = get_no_price(m)
-            volume = safe_float(m.get('volume_24h_fp', m.get('volume_24h', m.get('volume', 0))))
-
-            crypto_markets.append({
-                'ticker': ticker,
-                'title': m.get('title', ''),
-                'coin': coin,
-                'yes_price': yes_p,
-                'no_price': no_p,
-                'volume': volume,
-                'close_time': m.get('close_time', ''),
-                'market': m,
-            })
+                if batch:
+                    logger.info(f"CryptoMomentum: {series_ticker} -> {added} open markets (of {len(batch)} fetched)")
+                else:
+                    logger.debug(f"CryptoMomentum: {series_ticker} -> 0 markets")
+            except Exception as e:
+                logger.debug(f"CryptoMomentum: {series_ticker} fetch failed: {e}")
 
         crypto_markets.sort(key=lambda x: x['volume'], reverse=True)
         return crypto_markets
