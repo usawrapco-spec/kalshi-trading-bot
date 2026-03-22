@@ -17,7 +17,11 @@ from utils.api_resilience import resilient_strategy
 logger = setup_logger('crypto_momentum')
 
 CRYPTO_KEYWORDS = ['bitcoin', 'btc', 'ethereum', 'eth', 'solana', 'sol', 'crypto', 'xrp']
-SHORT_TERM_KEYWORDS = ['higher', 'lower', '15 min', '15-min', 'next', 'close above', 'close below']
+SHORT_TERM_KEYWORDS = ['higher', 'lower', '15 min', '15-min', 'next', 'close above', 'close below',
+                       'above', 'below', 'price', 'up', 'down']
+# Ticker prefixes that are always crypto (no keyword matching needed)
+CRYPTO_TICKER_PREFIXES = ['KXBTC', 'KXETH', 'KXSOL', 'KXXRP', 'KXCRYPTO',
+                          'INXBTC', 'INXETH', 'INXSOL']
 
 MIN_MOMENTUM = 0.003     # 0.3% minimum move to generate signal
 MIN_EDGE = 0.08          # 8% edge over market price
@@ -46,6 +50,7 @@ class CryptoMomentumStrategy(BaseStrategy):
         # Always fetch prices to build history (throttled internally)
         prices = self.monitor.fetch_prices()
         if not prices:
+            logger.info("CryptoMomentum: price fetch returned None, skipping")
             return signals
 
         # Reset per-cycle debate counter
@@ -53,10 +58,17 @@ class CryptoMomentumStrategy(BaseStrategy):
 
         # Find crypto markets from the full market list
         crypto_markets = self._find_crypto_markets(markets)
+
+        m5 = self.monitor.get_momentum('BTC', 5)
+        m15 = self.monitor.get_momentum('BTC', 15)
+        hist_len = len(self.monitor.price_history.get('BTC', []))
+        logger.info(
+            f"CryptoMomentum: prices={{BTC=${prices.get('BTC', 0):,.0f} ETH=${prices.get('ETH', 0):,.0f} SOL=${prices.get('SOL', 0):,.0f}}} "
+            f"markets_found={len(crypto_markets)} history={hist_len}pts BTC_mom5m={m5:+.3%} BTC_mom15m={m15:+.3%}"
+        )
+
         if not crypto_markets:
             return signals
-
-        logger.info(f"CryptoMomentum: {len(crypto_markets)} crypto markets, BTC=${prices.get('BTC', 0):,.0f}")
 
         for cm in crypto_markets[:10]:
             coin = cm['coin']
@@ -109,20 +121,26 @@ class CryptoMomentumStrategy(BaseStrategy):
         crypto_markets = []
         for m in markets:
             title = (m.get('title') or '').lower()
-            ticker = m.get('ticker', '')
+            ticker = (m.get('ticker') or '').upper()
+            series = (m.get('series_ticker') or '').upper()
 
+            # Match by ticker prefix (always crypto, no keyword needed)
+            ticker_match = any(ticker.startswith(p) or series.startswith(p) for p in CRYPTO_TICKER_PREFIXES)
+
+            # Match by title keywords (need both crypto + short-term)
             is_crypto = any(kw in title for kw in CRYPTO_KEYWORDS)
             is_short = any(kw in title for kw in SHORT_TERM_KEYWORDS)
+            keyword_match = is_crypto and is_short
 
-            if not (is_crypto and is_short):
+            if not (ticker_match or keyword_match):
                 continue
 
             coin = None
-            if 'bitcoin' in title or 'btc' in title:
+            if 'bitcoin' in title or 'btc' in title or 'BTC' in ticker:
                 coin = 'BTC'
-            elif 'ethereum' in title or 'eth' in title:
+            elif 'ethereum' in title or 'eth' in title or 'ETH' in ticker:
                 coin = 'ETH'
-            elif 'solana' in title or 'sol' in title:
+            elif 'solana' in title or 'sol' in title or 'SOL' in ticker:
                 coin = 'SOL'
 
             yes_p = get_yes_price(m)
