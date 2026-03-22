@@ -418,14 +418,14 @@ class KalshiBot:
                         exit_price = 1.0 if market_result == trade.get('side') else 0.0
                         pnl = (exit_price - entry) * count
 
+                        won = "WIN" if pnl > 0 else "LOSS"
                         self.db.client.table('kalshi_trades').update({
                             'resolved': True,
                             'exit_price': exit_price,
                             'pnl': round(pnl, 4),
                             'resolved_at': datetime.now(timezone.utc).isoformat(),
+                            'reason': f"[LIVE] {won} settled={market_result} side={trade.get('side')} pnl=${pnl:+.2f}",
                         }).eq('id', trade['id']).execute()
-
-                        won = "WIN" if pnl > 0 else "LOSS"
                         logger.info(f"LIVE SETTLED: {trade['ticker']} {trade.get('side')} "
                                     f"-> {market_result} | {won} PnL=${pnl:+.4f}")
                         settled += 1
@@ -1359,10 +1359,19 @@ class KalshiBot:
                 market_match = next((m for m in markets if m.get('ticker') == sig['ticker']), {})
                 price = get_yes_price_dollars(market_match) if market_match else 0
                 if not price or price <= 0:
-                    # Crypto/series markets aren't in the main markets list — use signal's price
-                    price = sig.get('model_prob', 0) or sig.get('buy_price', 0) or 0.50
-                price_for_side = price if sig['side'] == 'yes' else (1 - price)
-                price_for_side = max(0.01, min(0.99, price_for_side))
+                    # Crypto/series markets aren't in the main markets list
+                    # Use buy_price from signal (actual market price), NOT model_prob (a probability)
+                    price = sig.get('buy_price', 0) or sig.get('entry_price', 0) or 0
+                if not price or price <= 0:
+                    # Last resort: use the yes/no price the strategy already computed
+                    if sig['side'] == 'yes':
+                        price_for_side = sig.get('yes_price', 0.50)
+                    else:
+                        price_for_side = sig.get('no_price', 0.50)
+                    price_for_side = max(0.01, min(0.99, price_for_side))
+                else:
+                    price_for_side = price if sig['side'] == 'yes' else (1 - price)
+                    price_for_side = max(0.01, min(0.99, price_for_side))
 
                 # Position sizing
                 if edge > 0 and prob > 0:
