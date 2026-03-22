@@ -177,7 +177,7 @@ class KalshiAPIClient:
         if dry_run:
             return {'status': 'dry_run', 'params': order_data}
         try:
-            order = self._request('POST', '/trade-api/v2/orders', json=order_data)
+            order = self._request('POST', '/trade-api/v2/portfolio/orders', json=order_data)
             logger.info(f"Order created: {order.get('order_id')}")
             return order
         except Exception as e:
