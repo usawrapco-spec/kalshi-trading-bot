@@ -40,6 +40,7 @@ from dashboard import start_dashboard
 from utils.market_helpers import get_yes_price as get_yes_price_dollars, get_volume
 from utils.ai_debate import run_debate
 from utils.live_validator import is_live_strategy, validate_live_trade
+from utils.signal_tier import rate_signal, size_by_tier, check_portfolio_limits, hours_until_close, TIER_CONFIG, MAX_LIVE_TRADES_PER_CYCLE
 from self_improver import SelfImprover
 
 logger = setup_logger('main')
@@ -259,9 +260,78 @@ class KalshiBot:
             logger.error(f"LIVE ORDER FAILED: {e}")
             return False, str(e)
 
+    def _check_settlements(self):
+        """Check unresolved trades for settlement. Max 20 API calls per cycle."""
+        if not self.db or not self.db.client:
+            return
+        try:
+            unresolved = self.db.client.table('kalshi_trades').select('*').eq('resolved', False).execute()
+            if not unresolved.data:
+                return
+
+            settled_count = 0
+            checked = 0
+            for trade in unresolved.data:
+                if checked >= 20:
+                    break
+                ticker = trade.get('ticker', '')
+                if not ticker:
+                    continue
+
+                try:
+                    checked += 1
+                    market_data = self.client.get_market(ticker)
+                    if not market_data:
+                        continue
+                    market = market_data.get('market', market_data)
+                    result = market.get('result', '')
+                    if not result or result == '':
+                        continue
+
+                    trade_side = trade.get('side', 'yes')
+                    won = (trade_side == 'yes' and result == 'yes') or \
+                          (trade_side == 'no' and result == 'no')
+
+                    entry_price = trade.get('price', 0)
+                    count = trade.get('count', 1)
+                    if won:
+                        exit_price = 1.00
+                        pnl = (1.00 - entry_price) * count
+                    else:
+                        exit_price = 0.00
+                        pnl = -(entry_price * count)
+
+                    self.db.client.table('kalshi_trades').update({
+                        'resolved': True,
+                        'exit_price': exit_price,
+                        'pnl': round(pnl, 4),
+                        'resolved_at': datetime.utcnow().isoformat(),
+                        'reason': f"{'WIN' if won else 'LOSS'} settled={result} pnl=${pnl:+.2f}",
+                    }).eq('id', trade['id']).execute()
+
+                    is_live = trade.get('order_id') not in (None, 'paper', 'forced_paper')
+                    trade_type = "LIVE" if is_live else "PAPER"
+                    result_emoji = "WIN" if won else "LOSS"
+                    logger.info(
+                        f"{trade_type} SETTLED: {ticker} {result_emoji} "
+                        f"P&L=${pnl:+.2f} ({count}x @ ${entry_price:.2f})"
+                    )
+                    settled_count += 1
+                except Exception as e:
+                    logger.debug(f"Settlement check failed for {ticker}: {e}")
+                    continue
+
+            if settled_count > 0:
+                logger.info(f"Settled {settled_count} trades this cycle (checked {checked})")
+        except Exception as e:
+            logger.error(f"Settlement check failed: {e}")
+
     def run_cycle(self):
         logger.info("=" * 40)
         logger.info(f"Cycle at {datetime.now().isoformat()}")
+
+        # Check settlements FIRST, before generating new signals
+        self._check_settlements()
 
         if not self.risk.check_daily_loss_limit():
             logger.warning("Daily loss stop - halting")
@@ -697,16 +767,58 @@ class KalshiBot:
                 raw_strategy = sig.get('strategy_type', 'unknown')
                 go_live = is_live_strategy(raw_strategy)
                 order_id_or_reason = None
+                tier = None
 
                 if go_live:
-                    # REAL ORDER PATH
+                    # TIERED SIZING for live trades
                     self._refresh_real_balance()
-                    success, order_id_or_reason = self._place_live_order(
-                        sig, price_for_side, strategy_name,
-                    )
-                    if not success:
-                        logger.info(f"  Live order rejected, falling back to paper: {order_id_or_reason}")
-                        go_live = False  # fall through to paper
+                    balance_dollars = self.real_balance_cents / 100.0
+
+                    # Calculate hours to close for tier scoring
+                    market_obj = next((m for m in markets if m.get('ticker') == sig['ticker']), {})
+                    htc = hours_until_close(market_obj.get('close_time') or market_obj.get('expiration_time'))
+
+                    tier_signal = {
+                        'model_prob': sig.get('model_prob', 0.5),
+                        'edge': sig.get('edge', 0),
+                        'confidence': sig.get('confidence', 0),
+                        'entry_price': price_for_side,
+                    }
+                    tier, tier_score, tier_reasons = rate_signal(tier_signal, htc)
+                    tier_count = size_by_tier(tier, price_for_side, balance_dollars)
+
+                    # Check portfolio-level limits
+                    try:
+                        open_live = self.db.client.table('kalshi_trades').select('price,count').neq('order_id', 'paper').eq('resolved', False).execute()
+                        current_exposure = sum(t.get('price', 0) * t.get('count', 0) for t in (open_live.data or []))
+                    except Exception:
+                        current_exposure = sum(p.get('cost', 0) for p in self.open_live_positions)
+
+                    tier_cost = tier_count * price_for_side
+                    allowed, max_cost, limit_reason = check_portfolio_limits(tier_cost, balance_dollars, current_exposure)
+
+                    if not allowed:
+                        logger.info(f"  SKIP LIVE {sig['ticker']}: {limit_reason}")
+                        go_live = False
+                    else:
+                        if max_cost < tier_cost:
+                            tier_count = max(1, int(max_cost / price_for_side))
+                        sig['count'] = tier_count
+                        cost = sig['count'] * price_for_side
+
+                        cfg_label = TIER_CONFIG[tier]['label']
+                        logger.info(
+                            f"  {cfg_label} LIVE: {sig['ticker']} {sig['side'].upper()} "
+                            f"x{sig['count']} @ ${price_for_side:.2f} = ${cost:.2f} "
+                            f"[score={tier_score}, {', '.join(tier_reasons)}]"
+                        )
+
+                        success, order_id_or_reason = self._place_live_order(
+                            sig, price_for_side, strategy_name,
+                        )
+                        if not success:
+                            logger.info(f"  Live order rejected, falling back to paper: {order_id_or_reason}")
+                            go_live = False
 
                 if not go_live:
                     # PAPER ORDER PATH (default, or live fallback)
@@ -731,8 +843,9 @@ class KalshiBot:
 
                 if self.db:
                     reason = sig.get('reason', '')
+                    tier_tag = f"[{tier}] " if tier else ""
                     if go_live:
-                        reason = f"[LIVE] {reason}"
+                        reason = f"[LIVE] {tier_tag}{reason}"
                     elif not is_learning_trade and debates_used > 0:
                         reason = f"[DEBATED] {reason}"
                     elif is_learning_trade:
