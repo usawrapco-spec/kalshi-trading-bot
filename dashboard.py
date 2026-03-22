@@ -35,6 +35,8 @@ def health():
 def api_status():
     try:
         db = get_db()
+        if not db or not db.client:
+            raise Exception("Database not connected")
 
         # Get latest bot status for is_running / last_check
         status_result = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
@@ -133,7 +135,7 @@ def api_status():
         return jsonify({
             'is_running': False, 'last_check': None, 'error': str(e),
             'paper': {'balance': 10000, 'daily_pnl': 0, 'positions': 0, 'roi_percent': 0, 'trades_today': 0, 'wins': 0, 'losses': 0},
-            'live': {'balance': None, 'daily_pnl': None, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 5.00, 'unrealized_pnl': 0},
+            'live': {'balance': 0, 'cash': 0, 'positions_value': 0, 'daily_pnl': 0, 'realized_pnl': 0, 'unrealized_pnl': 0, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 5.00},
         })
 
 @app.route('/api/trades')

@@ -185,26 +185,7 @@ class KalshiBot:
             ]
             if live_trades:
                 logger.info(f"Reconstructed {len(self.open_live_positions)} open live positions")
-
-            # Clean up old paper trades in background (don't block startup)
-            import threading
-            def _cleanup_paper():
-                try:
-                    for oid in ['paper', 'forced_paper']:
-                        # Delete in batches to avoid timeout
-                        while True:
-                            batch = self.db.client.table('kalshi_trades').select('id').eq(
-                                'order_id', oid).limit(100).execute()
-                            if not batch.data:
-                                break
-                            ids = [r['id'] for r in batch.data]
-                            for rid in ids:
-                                self.db.client.table('kalshi_trades').delete().eq('id', rid).execute()
-                            logger.info(f"Paper cleanup: deleted {len(ids)} {oid} trades")
-                except Exception as e:
-                    logger.error(f"Paper cleanup failed: {e}")
-            threading.Thread(target=_cleanup_paper, daemon=True).start()
-            logger.info("Paper balance: $10,000.00 (cleanup running in background)")
+            logger.info("Paper balance: $10,000.00 (fresh start)")
         except Exception as e:
             logger.error(f"Failed to reconstruct state from DB: {e}")
 
