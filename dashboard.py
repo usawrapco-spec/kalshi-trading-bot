@@ -35,22 +35,53 @@ def health():
 def api_status():
     try:
         db = get_db()
+        # Bot status row
         result = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
-        if result.data:
-            r = result.data[0]
-            bal = r.get('balance', 100)
-            return jsonify({
-                'is_running': r.get('is_running', False),
-                'balance': bal,
+        r = result.data[0] if result.data else {}
+        paper_bal = r.get('balance', 100)
+        real_bal = r.get('real_balance')
+        live_pos = r.get('live_positions', 0)
+
+        # Fetch all trades to split live/paper stats
+        trades_result = db.client.table('kalshi_trades').select('reason,is_live,order_id').execute()
+        all_trades = trades_result.data or []
+
+        def _stats(trade_list):
+            settled = [t for t in trade_list if any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS'))]
+            wins = sum(1 for t in settled if 'WIN' in (t.get('reason') or '').upper())
+            losses = sum(1 for t in settled if 'LOSS' in (t.get('reason') or '').upper())
+            return wins, losses
+
+        live_trades = [t for t in all_trades if t.get('is_live') or (t.get('order_id') and t['order_id'] != 'paper' and t['order_id'] != 'forced_paper')]
+        paper_trades = [t for t in all_trades if t not in live_trades]
+        lw, ll = _stats(live_trades)
+        pw, pl = _stats(paper_trades)
+
+        return jsonify({
+            'is_running': r.get('is_running', False),
+            'last_check': r.get('last_check'),
+            'paper': {
+                'balance': paper_bal,
                 'daily_pnl': r.get('daily_pnl', 0),
+                'positions': r.get('active_positions', 0),
+                'roi_percent': round(((paper_bal - 100) / 100) * 100, 2),
                 'trades_today': r.get('trades_today', 0),
-                'active_positions': r.get('active_positions', 0),
-                'last_check': r.get('last_check'),
-                'roi_percent': round(((bal - 100) / 100) * 100, 2),
-            })
-        return jsonify({'is_running': False, 'balance': 100, 'daily_pnl': 0, 'trades_today': 0, 'active_positions': 0, 'roi_percent': 0})
+                'wins': pw, 'losses': pl,
+            },
+            'live': {
+                'balance': real_bal,
+                'positions': live_pos,
+                'wins': lw, 'losses': ll,
+                'total_exposure': 0,
+                'max_exposure': 5.00,
+            },
+        })
     except Exception as e:
-        return jsonify({'is_running': False, 'balance': 100, 'daily_pnl': 0, 'trades_today': 0, 'active_positions': 0, 'error': str(e)})
+        return jsonify({
+            'is_running': False, 'last_check': None, 'error': str(e),
+            'paper': {'balance': 100, 'daily_pnl': 0, 'positions': 0, 'roi_percent': 0, 'trades_today': 0, 'wins': 0, 'losses': 0},
+            'live': {'balance': None, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 5.00},
+        })
 
 @app.route('/api/trades')
 def api_trades():
@@ -70,11 +101,19 @@ def api_strategies():
         for t in (result.data or []):
             s = t.get('strategy', 'unknown')
             if s not in strats:
-                strats[s] = {'strategy': s, 'trades': 0, 'wins': 0, 'losses': 0, 'total_pnl': 0.0}
-            strats[s]['trades'] += 1
+                strats[s] = {'strategy': s, 'live_trades': 0, 'paper_trades': 0, 'wins': 0, 'losses': 0, 'total_pnl': 0.0}
+
+            # Determine if live or paper trade
+            is_live = t.get('is_live') or (t.get('order_id') and t['order_id'] != 'paper' and t['order_id'] != 'forced_paper')
+            if is_live:
+                strats[s]['live_trades'] += 1
+            else:
+                strats[s]['paper_trades'] += 1
+
             reason = (t.get('reason') or '').upper()
             if 'WIN' in reason: strats[s]['wins'] += 1
             elif 'LOSS' in reason: strats[s]['losses'] += 1
+
         return jsonify(list(strats.values()))
     except:
         return jsonify([])
@@ -193,7 +232,8 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
 .panel-title::before{content:'◆ ';color:rgba(0,240,255,0.3)}
 
 /* Grid */
-.grid-top{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;border-bottom:1px solid rgba(0,240,255,0.06)}
+.grid-top{display:grid;grid-template-columns:1fr 1fr;border-bottom:1px solid rgba(0,240,255,0.06)}
+.grid-live-paper{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
 .grid-main{display:grid;grid-template-columns:220px 1fr 320px;min-height:420px}
 .grid-bottom{border-top:1px solid rgba(0,240,255,0.06)}
 @media(max-width:1000px){.grid-top{grid-template-columns:1fr 1fr}.grid-main{grid-template-columns:1fr}}
@@ -276,27 +316,60 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
   </div>
 </div>
 
-<!-- METRICS ROW -->
-<div class="grid-top">
-  <div class="metric">
-    <div class="metric-label">Balance</div>
-    <div class="metric-value" data-field="balance">$—</div>
-    <div class="metric-sub" data-field="roi">—% ROI</div>
+<!-- LIVE vs PAPER PANELS -->
+<div class="grid-live-paper">
+  <!-- LIVE TRADING PANEL -->
+  <div class="panel" style="border-color:rgba(255,60,60,0.3);background:rgba(255,60,60,0.02)">
+    <div class="panel-title" style="color:#ff3c3c">🔴 LIVE TRADING</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="metric" style="border-right:1px solid rgba(255,60,60,0.1)">
+        <div class="metric-label">Balance</div>
+        <div class="metric-value" id="live-balance" style="color:#ff3c3c;text-shadow:0 0 8px rgba(255,60,60,0.3)">$—</div>
+        <div class="metric-sub" id="live-exposure">— / $5.00 max</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Daily P&L</div>
+        <div class="metric-value" id="live-pnl" style="color:#ff3c3c">$—</div>
+        <div class="metric-sub" id="live-trades">— trades today</div>
+      </div>
+      <div class="metric" style="border-right:1px solid rgba(255,60,60,0.1)">
+        <div class="metric-label">Positions</div>
+        <div class="metric-value" id="live-positions">—</div>
+        <div class="metric-sub">open contracts</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Win Rate</div>
+        <div class="metric-value" id="live-win-rate">—%</div>
+        <div class="metric-sub" id="live-wl-record">—W / —L</div>
+      </div>
+    </div>
   </div>
-  <div class="metric">
-    <div class="metric-label">Daily P&L</div>
-    <div class="metric-value" data-field="daily_pnl">$—</div>
-    <div class="metric-sub" data-field="trades_today">— trades today</div>
-  </div>
-  <div class="metric">
-    <div class="metric-label">Positions</div>
-    <div class="metric-value" data-field="positions">—</div>
-    <div class="metric-sub">open contracts</div>
-  </div>
-  <div class="metric">
-    <div class="metric-label">Win Rate</div>
-    <div class="metric-value" data-field="win_rate">—%</div>
-    <div class="metric-sub" data-field="wl_record">—W / —L</div>
+
+  <!-- PAPER TRADING PANEL -->
+  <div class="panel" style="border-color:rgba(0,240,255,0.3);background:rgba(0,240,255,0.02)">
+    <div class="panel-title" style="color:#00f0ff">📝 PAPER TRADING</div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="metric" style="border-right:1px solid rgba(0,240,255,0.1)">
+        <div class="metric-label">Balance</div>
+        <div class="metric-value" id="paper-balance" style="color:#00f0ff;text-shadow:0 0 8px rgba(0,240,255,0.3)">$—</div>
+        <div class="metric-sub" id="paper-roi">—% ROI</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Daily P&L</div>
+        <div class="metric-value" id="paper-pnl" style="color:#00f0ff">$—</div>
+        <div class="metric-sub" id="paper-trades">— trades today</div>
+      </div>
+      <div class="metric" style="border-right:1px solid rgba(0,240,255,0.1)">
+        <div class="metric-label">Positions</div>
+        <div class="metric-value" id="paper-positions">—</div>
+        <div class="metric-sub">open contracts</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Win Rate</div>
+        <div class="metric-value" id="paper-win-rate">—%</div>
+        <div class="metric-sub" id="paper-wl-record">—W / —L</div>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -533,21 +606,41 @@ async function refreshAll(){
     }
   }
 
-  // STATUS
+  // STATUS - Now separated into live/paper
   if(status){
-    const b=status.balance||0,pnl=status.daily_pnl||0,roi=status.roi_percent||0;
-    document.querySelectorAll('[data-field="balance"]').forEach(el=>{el.textContent='$'+b.toFixed(2);el.style.color='#00f0ff'});
-    document.querySelectorAll('[data-field="daily_pnl"]').forEach(el=>{el.textContent=(pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(2);el.className='metric-value '+(pnl>=0?'profit':'loss')});
-    document.querySelectorAll('[data-field="roi"]').forEach(el=>{el.textContent=(roi>=0?'+':'')+roi.toFixed(1)+'%';el.className='metric-sub '+(roi>=0?'profit':'loss')});
-    document.querySelectorAll('[data-field="trades_today"]').forEach(el=>{el.textContent=(status.trades_today||0)+' trades today'});
-    document.querySelectorAll('[data-field="positions"]').forEach(el=>{el.textContent=status.active_positions||0});
-    document.querySelectorAll('[data-field="last_scan"]').forEach(el=>{el.textContent=fmt(status.last_check)});
-    document.title='$'+(b).toFixed(0)+' | KALSHI ALPHA';
+    // PAPER TRADING
+    const paper=status.paper||{};
+    const pb=paper.balance||0,ppnl=paper.daily_pnl||0,proi=paper.roi_percent||0;
+    document.getElementById('paper-balance').textContent='$'+pb.toFixed(2);
+    document.getElementById('paper-pnl').textContent=(ppnl>=0?'+$':'-$')+Math.abs(ppnl).toFixed(2);
+    document.getElementById('paper-pnl').className='metric-value '+(ppnl>=0?'profit':'loss');
+    document.getElementById('paper-roi').textContent=(proi>=0?'+':'')+proi.toFixed(1)+'%';
+    document.getElementById('paper-roi').className='metric-sub '+(proi>=0?'profit':'loss');
+    document.getElementById('paper-trades').textContent=(paper.trades_today||0)+' trades today';
+    document.getElementById('paper-positions').textContent=paper.positions||0;
+    const pwr=(paper.wins+paper.losses)>0?((paper.wins/(paper.wins+paper.losses))*100).toFixed(0):'—';
+    document.getElementById('paper-win-rate').textContent=pwr+'%';
+    document.getElementById('paper-wl-record').textContent=(paper.wins||0)+'W / '+(paper.losses||0)+'L';
 
-    if(prevBal!==null&&Math.abs(b-prevBal)>.01){
-      if(b>prevBal)burstWin(b-prevBal);else burstLoss(prevBal-b);
+    // LIVE TRADING
+    const live=status.live||{};
+    const lb=live.balance||0;
+    document.getElementById('live-balance').textContent=lb!==null?'$'+lb.toFixed(2):'—';
+    document.getElementById('live-positions').textContent=live.positions||0;
+    const lwr=(live.wins+live.losses)>0?((live.wins/(live.wins+live.losses))*100).toFixed(0):'—';
+    document.getElementById('live-win-rate').textContent=lwr+'%';
+    document.getElementById('live-wl-record').textContent=(live.wins||0)+'W / '+(live.losses||0)+'L';
+    document.getElementById('live-exposure').textContent='$'+(live.total_exposure||0).toFixed(2)+' / $'+(live.max_exposure||5.00).toFixed(2)+' max';
+
+    // Header balance (paper)
+    document.querySelectorAll('[data-field="balance"]').forEach(el=>{el.textContent='$'+pb.toFixed(2);el.style.color='#00f0ff'});
+    document.querySelectorAll('[data-field="last_scan"]').forEach(el=>{el.textContent=fmt(status.last_check)});
+    document.title='$'+pb.toFixed(0)+' | KALSHI ALPHA';
+
+    if(prevBal!==null&&Math.abs(pb-prevBal)>.01){
+      if(pb>prevBal)burstWin(pb-prevBal);else burstLoss(prevBal-pb);
     }
-    prevBal=b;
+    prevBal=pb;
   }
 
   // TRADES
@@ -587,7 +680,11 @@ async function refreshAll(){
       const name=raw.replace(/_/g,' ');
       const isLiveStrat=liveStrats.some(ls=>raw.toLowerCase().includes(ls.toLowerCase()));
       const badge=isLiveStrat?'<span style="color:#ff3c3c;font-size:.55rem;margin-left:4px;border:1px solid rgba(255,60,60,0.4);padding:0 3px;border-radius:1px">LIVE</span>':'';
-      return`<div class="strat-row"><span class="strat-name">${name}${badge}</span><span class="strat-count">${s.trades||0} trades</span></div>`;
+      const liveCount=s.live_trades||0;
+      const paperCount=s.paper_trades||0;
+      const totalCount=liveCount+paperCount;
+      const countText=liveCount>0&&paperCount>0?`${liveCount}L / ${paperCount}P`:`${totalCount} trades`;
+      return`<div class="strat-row"><span class="strat-name">${name}${badge}</span><span class="strat-count">${countText}</span></div>`;
     }).join('');
   }
 
