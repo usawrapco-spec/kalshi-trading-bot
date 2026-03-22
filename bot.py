@@ -269,6 +269,97 @@ class KalshiBot:
             logger.error(f"LIVE ORDER FAILED: {e}")
             return False, str(e)
 
+    def _take_portfolio_snapshot(self):
+        """Record current portfolio state. Throttled to every 5 minutes."""
+        import time as _time
+        now = _time.time()
+        if not hasattr(self, '_last_snapshot_time'):
+            self._last_snapshot_time = 0
+        if now - self._last_snapshot_time < 300:
+            return
+        self._last_snapshot_time = now
+
+        if not self.db or not self.db.client:
+            return
+        try:
+            from utils.market_helpers import get_yes_price, get_no_price
+
+            # 1. Get real Kalshi cash balance
+            cash = 0.0
+            try:
+                balance_response = self.client.get_balance()
+                cash = (balance_response or {}).get('balance', 0) / 100.0
+            except Exception:
+                if self.real_balance_cents:
+                    cash = self.real_balance_cents / 100.0
+
+            # 2. Get open live trades and fetch market prices
+            live_open = self.db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').eq('resolved', False).execute()
+            live_trades = live_open.data or []
+
+            cost_basis = 0.0
+            market_value = 0.0
+            checked = 0
+
+            for trade in live_trades:
+                trade_cost = (trade.get('price', 0) or 0) * (trade.get('count', 0) or 0)
+                cost_basis += trade_cost
+                if checked < 20:
+                    try:
+                        checked += 1
+                        market_data = self.client.get_market(trade.get('ticker', ''))
+                        if not market_data:
+                            market_value += trade_cost
+                            continue
+                        market = market_data.get('market', market_data)
+                        if trade.get('side') == 'yes':
+                            current = get_yes_price(market)
+                        else:
+                            current = get_no_price(market)
+                        if current > 0:
+                            market_value += current * (trade.get('count', 0) or 0)
+                        else:
+                            market_value += trade_cost
+                    except Exception:
+                        market_value += trade_cost
+                else:
+                    market_value += trade_cost
+
+            unrealized = market_value - cost_basis
+
+            # 3. Realized P&L
+            settled = self.db.client.table('kalshi_trades').select('pnl').neq('order_id', 'paper').eq('resolved', True).execute()
+            realized = sum((t.get('pnl', 0) or 0) for t in (settled.data or []))
+
+            # 4. Paper stats
+            paper_open = self.db.client.table('kalshi_trades').select('price,count').eq('order_id', 'paper').eq('resolved', False).execute()
+            paper_cost = sum((t.get('price', 0) or 0) * (t.get('count', 0) or 0) for t in (paper_open.data or []))
+            paper_settled = self.db.client.table('kalshi_trades').select('pnl').eq('order_id', 'paper').eq('resolved', True).execute()
+            paper_realized = sum((t.get('pnl', 0) or 0) for t in (paper_settled.data or []))
+
+            total = cash + market_value
+
+            # 5. Save snapshot
+            self.db.client.table('portfolio_snapshots').insert({
+                'kalshi_total': round(total, 2),
+                'kalshi_cash': round(cash, 2),
+                'kalshi_positions_market_value': round(market_value, 2),
+                'positions_cost_basis': round(cost_basis, 2),
+                'unrealized_pnl': round(unrealized, 2),
+                'realized_pnl': round(realized, 2),
+                'open_live_trades': len(live_trades),
+                'open_paper_trades': len(paper_open.data or []),
+                'paper_balance': round(100.0 - paper_cost + paper_realized, 2),
+            }).execute()
+
+            logger.info(
+                f"SNAPSHOT: Total=${total:.2f} Cash=${cash:.2f} "
+                f"Positions=${market_value:.2f} (cost=${cost_basis:.2f}) "
+                f"Unrealized=${unrealized:+.2f}"
+            )
+        except Exception as e:
+            logger.error(f"Snapshot failed: {e}")
+
     def _check_settlements(self):
         """Check unresolved trades for settlement. Max 20 API calls per cycle."""
         if not self.db or not self.db.client:
@@ -588,6 +679,9 @@ class KalshiBot:
 
         # Check settlements FIRST, before generating new signals
         self._check_settlements()
+
+        # Take portfolio snapshot (throttled to every 5 min)
+        self._take_portfolio_snapshot()
 
         # Evaluate exits on open positions (profit-taking / loss-cutting)
         self._evaluate_exits()

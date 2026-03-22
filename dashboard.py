@@ -36,108 +36,89 @@ def api_status():
     try:
         db = get_db()
 
-        # Fetch ALL trades once, split by live vs paper
-        all_trades_result = db.client.table('kalshi_trades').select('*').execute()
-        all_trades = all_trades_result.data or []
-
-        live_trades = [t for t in all_trades if t.get('order_id') not in (None, 'paper', 'forced_paper')]
-        paper_trades = [t for t in all_trades if t.get('order_id') in (None, 'paper', 'forced_paper')]
-
-        # --- LIVE stats using resolved/pnl columns ---
-        live_open = [t for t in live_trades if not t.get('resolved')]
-        live_settled = [t for t in live_trades if t.get('resolved')]
-        live_open_cost = sum(t.get('price', 0) * t.get('count', 0) for t in live_open)
-        live_realized_pnl = sum(t.get('pnl', 0) or 0 for t in live_settled)
-        live_wins = sum(1 for t in live_settled if (t.get('pnl') or 0) > 0)
-        live_losses = sum(1 for t in live_settled if (t.get('pnl') or 0) <= 0)
-
-        # --- PAPER stats using resolved/pnl columns ---
-        paper_open = [t for t in paper_trades if not t.get('resolved')]
-        paper_settled = [t for t in paper_trades if t.get('resolved')]
-        paper_open_cost = sum(t.get('price', 0) * t.get('count', 0) for t in paper_open)
-        paper_realized_pnl = sum(t.get('pnl', 0) or 0 for t in paper_settled)
-        paper_balance = 100.0 - paper_open_cost + paper_realized_pnl
-        paper_wins = sum(1 for t in paper_settled if (t.get('pnl') or 0) > 0)
-        paper_losses = sum(1 for t in paper_settled if (t.get('pnl') or 0) <= 0)
-
-        # Get latest bot status
+        # Get latest bot status for is_running / last_check
         status_result = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
         r = status_result.data[0] if status_result.data else {}
 
-        # FETCH REAL KALSHI CASH BALANCE FROM API
-        real_cash = None
+        # --- Use latest portfolio snapshot for accurate market-value data ---
+        snapshot = None
         try:
-            from utils.kalshi_client import KalshiAPIClient
-            kalshi_client = KalshiAPIClient()
-            balance_response = kalshi_client.get_balance()
-            if balance_response and 'balance' in balance_response:
-                real_cash = balance_response['balance'] / 100.0
-        except Exception as e:
-            print(f"Failed to fetch Kalshi balance: {e}")
-            real_cash = r.get('real_balance')
+            snap_result = db.client.table('portfolio_snapshots').select('*').order('timestamp', desc=True).limit(1).execute()
+            if snap_result.data:
+                snapshot = snap_result.data[0]
+        except Exception:
+            pass
 
-        # Portfolio value = cash + MARKET VALUE of open positions
-        # Fetch current prices for each open live position
-        from utils.market_helpers import get_yes_price, get_no_price
-        positions_market_value = 0.0
-        if real_cash is not None and live_open:
-            try:
-                for t in live_open:
-                    ticker = t.get('ticker', '')
-                    qty = t.get('count', 0)
-                    cost_per = t.get('price', 0)
-                    cost_basis = cost_per * qty
-                    try:
-                        market_data = kalshi_client.get_market(ticker)
-                        market = market_data.get('market', market_data) if market_data else {}
-                        if t.get('side') == 'yes':
-                            current_price = get_yes_price(market)
-                        else:
-                            current_price = get_no_price(market)
-                        # If market returned 0, fall back to cost basis per contract
-                        if current_price <= 0:
-                            print(f"POSITION: {ticker} side={t.get('side')} cost=${cost_per} market=$0 (no bid) qty={qty} -> FALLBACK to cost_basis=${cost_basis:.4f}")
-                            positions_market_value += cost_basis
-                        else:
-                            market_val = current_price * qty
-                            print(f"POSITION: {ticker} side={t.get('side')} cost=${cost_per} market=${current_price} qty={qty} -> val=${market_val:.4f}")
-                            positions_market_value += market_val
-                    except Exception as e:
-                        print(f"POSITION: {ticker} side={t.get('side')} cost=${cost_per} qty={qty} -> ERROR: {e} -> FALLBACK to cost_basis=${cost_basis:.4f}")
-                        positions_market_value += cost_basis
-            except Exception as e:
-                print(f"Market value fetch failed, using cost basis: {e}")
-                positions_market_value = live_open_cost
+        if snapshot:
+            live_balance = snapshot.get('kalshi_total', 0)
+            live_cash = snapshot.get('kalshi_cash', 0)
+            live_positions_value = snapshot.get('kalshi_positions_market_value', 0)
+            live_unrealized = snapshot.get('unrealized_pnl', 0)
+            live_realized = snapshot.get('realized_pnl', 0)
+            live_count = snapshot.get('open_live_trades', 0)
+            paper_bal = snapshot.get('paper_balance', 100.0)
+            paper_count = snapshot.get('open_paper_trades', 0)
+            cost_basis = snapshot.get('positions_cost_basis', 0)
+        else:
+            # Fallback: compute from trades (cost basis only, no market value)
+            all_trades_result = db.client.table('kalshi_trades').select('*').execute()
+            all_trades = all_trades_result.data or []
+            live_trades = [t for t in all_trades if t.get('order_id') not in (None, 'paper', 'forced_paper')]
+            paper_trades = [t for t in all_trades if t.get('order_id') in (None, 'paper', 'forced_paper')]
+            live_open = [t for t in live_trades if not t.get('resolved')]
+            live_settled = [t for t in live_trades if t.get('resolved')]
+            paper_open = [t for t in paper_trades if not t.get('resolved')]
+            paper_settled = [t for t in paper_trades if t.get('resolved')]
 
-        portfolio_value = None
-        live_daily_pnl = None
-        starting_balance = 10.00
-        if real_cash is not None:
-            portfolio_value = round(real_cash + positions_market_value, 2)
-            live_daily_pnl = round(portfolio_value - starting_balance, 2)
+            cost_basis = sum(t.get('price', 0) * t.get('count', 0) for t in live_open)
+            live_realized = sum(t.get('pnl', 0) or 0 for t in live_settled)
+            live_balance = None
+            live_cash = r.get('real_balance')
+            live_positions_value = cost_basis
+            live_unrealized = 0
+            live_count = len(live_open)
+            paper_cost = sum(t.get('price', 0) * t.get('count', 0) for t in paper_open)
+            paper_realized = sum(t.get('pnl', 0) or 0 for t in paper_settled)
+            paper_bal = 100.0 - paper_cost + paper_realized
+            paper_count = len(paper_open)
+
+        # Win/loss from settled trades (always fresh)
+        live_settled_result = db.client.table('kalshi_trades').select('pnl').neq('order_id', 'paper').neq('order_id', 'forced_paper').eq('resolved', True).execute()
+        live_settled_data = live_settled_result.data or []
+        live_wins = sum(1 for t in live_settled_data if (t.get('pnl', 0) or 0) > 0)
+        live_losses = sum(1 for t in live_settled_data if (t.get('pnl', 0) or 0) <= 0) if live_settled_data else 0
+
+        paper_settled_result = db.client.table('kalshi_trades').select('pnl').eq('order_id', 'paper').eq('resolved', True).execute()
+        paper_settled_data = paper_settled_result.data or []
+        paper_wins = sum(1 for t in paper_settled_data if (t.get('pnl', 0) or 0) > 0)
+        paper_losses = sum(1 for t in paper_settled_data if (t.get('pnl', 0) or 0) <= 0) if paper_settled_data else 0
+        paper_realized_pnl = sum(t.get('pnl', 0) or 0 for t in paper_settled_data)
+
+        live_daily_pnl = round(live_unrealized + live_realized, 2) if live_balance else None
 
         return jsonify({
             'is_running': r.get('is_running', False),
             'last_check': r.get('last_check'),
             'paper': {
-                'balance': round(paper_balance, 2),
+                'balance': round(paper_bal, 2),
                 'daily_pnl': round(paper_realized_pnl, 2),
-                'positions': len(paper_open),
-                'roi_percent': round(((paper_balance - 100) / 100) * 100, 2),
-                'trades_today': len(paper_trades),
+                'positions': paper_count,
+                'roi_percent': round(((paper_bal - 100) / 100) * 100, 2),
+                'trades_today': 0,
                 'wins': paper_wins,
                 'losses': paper_losses,
             },
             'live': {
-                'balance': portfolio_value,
-                'cash': real_cash,
-                'positions_value': round(positions_market_value, 2),
+                'balance': round(live_balance, 2) if live_balance else None,
+                'cash': round(live_cash, 2) if live_cash else None,
+                'positions_value': round(live_positions_value, 2),
+                'unrealized_pnl': round(live_unrealized, 2),
                 'daily_pnl': live_daily_pnl,
-                'realized_pnl': round(live_realized_pnl, 2),
-                'positions': len(live_open),
+                'realized_pnl': round(live_realized, 2),
+                'positions': live_count,
                 'wins': live_wins,
                 'losses': live_losses,
-                'total_exposure': round(live_open_cost, 2),
+                'total_exposure': round(cost_basis, 2) if cost_basis else 0,
                 'max_exposure': 5.00,
             },
         })
@@ -145,7 +126,7 @@ def api_status():
         return jsonify({
             'is_running': False, 'last_check': None, 'error': str(e),
             'paper': {'balance': 100, 'daily_pnl': 0, 'positions': 0, 'roi_percent': 0, 'trades_today': 0, 'wins': 0, 'losses': 0},
-            'live': {'balance': None, 'daily_pnl': None, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 5.00},
+            'live': {'balance': None, 'daily_pnl': None, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 5.00, 'unrealized_pnl': 0},
         })
 
 @app.route('/api/trades')
@@ -304,6 +285,17 @@ def api_swing():
         })
     except Exception:
         return jsonify({'open_positions': 0, 'closed_trades': 0, 'total_pnl': 0, 'wins': 0, 'losses': 0, 'positions': [], 'recent_closes': []})
+
+@app.route('/api/portfolio_history')
+def api_portfolio_history():
+    try:
+        db = get_db()
+        result = db.client.table('portfolio_snapshots').select(
+            'timestamp, kalshi_total, unrealized_pnl, realized_pnl, positions_cost_basis, kalshi_positions_market_value'
+        ).order('timestamp', desc=True).limit(200).execute()
+        return jsonify(result.data or [])
+    except Exception:
+        return jsonify([])
 
 @app.route('/api/live_status')
 def api_live_status():
@@ -792,18 +784,19 @@ async function refreshAll(){
     document.getElementById('paper-win-rate').textContent=pwr+'%';
     document.getElementById('paper-wl-record').textContent=(paper.wins||0)+'W / '+(paper.losses||0)+'L';
 
-    // LIVE TRADING — portfolio value = cash + positions
+    // LIVE TRADING — portfolio value = cash + positions (from snapshot)
     const live_s=status.live||{};
     const lb=live_s.balance||0;
     const lCash=live_s.cash||0;
     const lPos=live_s.positions_value||0;
     const lpnl=live_s.daily_pnl||0;
     const lRpnl=live_s.realized_pnl||0;
+    const lUnreal=live_s.unrealized_pnl||0;
     document.getElementById('live-balance').textContent=lb!==null?'$'+lb.toFixed(2):'—';
-    document.getElementById('live-exposure').textContent='Cash: $'+lCash.toFixed(2)+' | Positions: $'+lPos.toFixed(2);
+    document.getElementById('live-exposure').textContent='Cash: $'+lCash.toFixed(2)+' | Pos: $'+lPos.toFixed(2);
     document.getElementById('live-pnl').textContent=(lRpnl>=0?'+$':'-$')+Math.abs(lRpnl).toFixed(2);
     document.getElementById('live-pnl').className='metric-value '+(lRpnl>=0?'profit':'loss');
-    document.getElementById('live-trades').textContent='P&L: '+(lpnl>=0?'+$':'-$')+Math.abs(lpnl).toFixed(2)+' total';
+    document.getElementById('live-trades').textContent='Unrealized: '+(lUnreal>=0?'+$':'-$')+Math.abs(lUnreal).toFixed(2);
     document.getElementById('live-positions').textContent=live_s.positions||0;
     const lwr=(live_s.wins+live_s.losses)>0?((live_s.wins/(live_s.wins+live_s.losses))*100).toFixed(0):'—';
     document.getElementById('live-win-rate').textContent=lwr+'%';
