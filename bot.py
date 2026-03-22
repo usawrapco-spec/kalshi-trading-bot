@@ -590,8 +590,8 @@ class KalshiBot:
             if not non_weather:
                 return
 
-            # Rotate through positions: check 10 per cycle
-            batch_size = 10
+            # Rotate through positions: check 15 per cycle (was 10)
+            batch_size = 15
             start = self._swing_cycle_offset % max(len(non_weather), 1)
             batch = non_weather[start:start + batch_size]
             if len(batch) < batch_size:
@@ -625,9 +625,16 @@ class KalshiBot:
 
                     action = "HOLD"
                     reason = ""
+                    trade_strategy = trade.get('strategy', '')
 
+                    # CRYPTO SCALPS: Super tight exits (5% take profit, 3% stop loss)
+                    if 'crypto' in trade_strategy.lower() or 'market_making_scalp' in trade_strategy.lower():
+                        if pct_change >= 0.05:
+                            action, reason = "SELL", f"CRYPTO TP: +{pct_change:.0%} (5% target hit)"
+                        elif pct_change <= -0.03:
+                            action, reason = "CUT", f"CRYPTO SL: {pct_change:.0%} (3% stop hit)"
                     # Tiered profit/loss thresholds by contract price
-                    if entry >= 0.70:
+                    elif entry >= 0.70:
                         if pct_change >= 0.07:
                             action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on ${entry:.2f} contract"
                         elif pct_change <= -0.05:
@@ -746,6 +753,136 @@ class KalshiBot:
         except Exception as e:
             logger.error(f"Crypto settlement check failed: {e}")
 
+    def _find_intraday_weather_opportunities(self, markets):
+        """Find weather markets settling today where price moved significantly."""
+        signals = []
+        now = datetime.utcnow()
+
+        for m in markets:
+            ticker = m.get('ticker', '')
+            # Only look at weather markets
+            if not any(prefix in ticker.upper() for prefix in ('KXHIGH', 'KXLOWT')):
+                continue
+
+            # Only markets closing in the next 12 hours
+            close_time_str = m.get('close_time') or m.get('expiration_time') or ''
+            if not close_time_str:
+                continue
+            try:
+                close_dt = datetime.fromisoformat(close_time_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                hours_left = (close_dt - now).total_seconds() / 3600
+            except Exception:
+                continue
+
+            if hours_left <= 0 or hours_left > 12:
+                continue
+
+            yes_price = get_yes_price_dollars(m)
+            if yes_price <= 0.01 or yes_price >= 0.99:
+                continue
+
+            # Look for cheap contracts that could pay off
+            # Price dropped to cheap levels near settlement = possible overreaction
+            if yes_price <= 0.15 and hours_left < 6:
+                signals.append({
+                    'ticker': ticker,
+                    'title': m.get('title', ''),
+                    'action': 'buy',
+                    'side': 'yes',
+                    'count': 3,
+                    'confidence': 55,
+                    'strategy_type': 'weather_intraday',
+                    'edge': 0.05,
+                    'model_prob': 0.20,
+                    'reason': f"[WEATHER INTRADAY] Cheap YES=${yes_price:.2f} settling in {hours_left:.1f}h",
+                })
+
+            # Cheap NO contracts near settlement
+            no_price = 1.0 - yes_price
+            if no_price <= 0.15 and hours_left < 6:
+                signals.append({
+                    'ticker': ticker,
+                    'title': m.get('title', ''),
+                    'action': 'buy',
+                    'side': 'no',
+                    'count': 3,
+                    'confidence': 55,
+                    'strategy_type': 'weather_intraday',
+                    'edge': 0.05,
+                    'model_prob': 0.20,
+                    'reason': f"[WEATHER INTRADAY] Cheap NO=${no_price:.2f} settling in {hours_left:.1f}h",
+                })
+
+        signals.sort(key=lambda s: s.get('edge', 0), reverse=True)
+        return signals[:5]
+
+    def _force_close_stale_crypto(self):
+        """Force-close any crypto paper positions older than 20 minutes."""
+        if not self.db or not self.db.client:
+            return
+        try:
+            open_crypto = self.db.client.table('kalshi_trades').select('*') \
+                .eq('order_id', 'paper').eq('resolved', False) \
+                .eq('strategy', 'crypto_momentum').execute()
+
+            if not open_crypto.data:
+                return
+
+            now = datetime.utcnow()
+            force_closed = 0
+
+            for trade in open_crypto.data:
+                ts_str = trade.get('timestamp') or trade.get('created_at') or ''
+                if not ts_str:
+                    continue
+                try:
+                    trade_time = datetime.fromisoformat(ts_str.replace('Z', '+00:00')).replace(tzinfo=None)
+                    age_minutes = (now - trade_time).total_seconds() / 60
+                except Exception:
+                    continue
+
+                if age_minutes > 20:
+                    # Force close at estimated current price
+                    entry = trade.get('price', 0)
+                    count = trade.get('count', 1)
+                    # Estimate: assume 50/50 outcome for stale positions
+                    exit_price = entry  # Flat close assumption
+                    pnl = 0.0
+
+                    try:
+                        # Try to get actual current price
+                        market_data = self.client.get_market(trade.get('ticker', ''))
+                        if market_data:
+                            market = market_data.get('market', market_data)
+                            if trade.get('side') == 'yes':
+                                bid = market.get('yes_bid', market.get('yes_bid_dollars', 0))
+                            else:
+                                bid = market.get('no_bid', market.get('no_bid_dollars', 0))
+                            current = float(bid) if bid else 0
+                            if current > 1.0:
+                                current = current / 100.0
+                            if current > 0:
+                                exit_price = current
+                                pnl = (current - entry) * count
+                    except Exception:
+                        pass
+
+                    self.db.client.table('kalshi_trades').update({
+                        'resolved': True,
+                        'exit_price': exit_price,
+                        'pnl': round(pnl, 4),
+                        'resolved_at': now.isoformat(),
+                        'reason': f"[FORCE CLOSE] Crypto position aged {age_minutes:.0f}min > 20min limit P&L=${pnl:+.2f}",
+                    }).eq('id', trade['id']).execute()
+
+                    force_closed += 1
+                    logger.info(f"FORCE CLOSE: {trade.get('ticker', '?')} after {age_minutes:.0f}min P&L=${pnl:+.2f}")
+
+            if force_closed > 0:
+                logger.info(f"Force-closed {force_closed} stale crypto positions")
+        except Exception as e:
+            logger.error(f"Force close stale crypto failed: {e}")
+
     def run_cycle(self):
         logger.info("=" * 40)
         logger.info(f"Cycle at {datetime.now().isoformat()}")
@@ -753,11 +890,15 @@ class KalshiBot:
         # Reset HyperThink debate counter each cycle (max 5 per cycle)
         self.hyperthink.reset_cycle()
 
+        # === PHASE 0: Housekeeping ===
         # Check settlements FIRST, before generating new signals
         self._check_settlements()
 
         # Check crypto settlements (15-min markets settle fast)
         self._check_crypto_settlements()
+
+        # Force-close stale crypto positions (>20 min old)
+        self._force_close_stale_crypto()
 
         # Take portfolio snapshot (throttled to every 5 min)
         self._take_portfolio_snapshot()
@@ -962,7 +1103,7 @@ class KalshiBot:
                 logger.error(f"{strategy.name} crashed: {e}", exc_info=True)
                 return strategy.name, []
 
-        logger.info(f"🚀 Running {len(self.strategies)} strategies in parallel...")
+        logger.info(f"Running {len(self.strategies)} strategies in parallel...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(run_strategy, s, markets): s for s in self.strategies}
             for future in concurrent.futures.as_completed(futures):
@@ -972,6 +1113,29 @@ class KalshiBot:
                     all_signals.extend(signals)
                 else:
                     logger.info(f"{name}: 0 signals")
+
+        # === FAST SCALP SIGNALS (no debate, added every cycle) ===
+        # 1. Crypto spread opportunities (market-making scalps)
+        if hasattr(self, 'crypto_monitor') and self.crypto_monitor:
+            for strat in self.strategies:
+                if hasattr(strat, 'find_spread_opportunities'):
+                    try:
+                        spread_signals = strat.find_spread_opportunities()
+                        if spread_signals:
+                            logger.info(f"CryptoSpread: {len(spread_signals)} spread opportunities")
+                            all_signals.extend(spread_signals)
+                    except Exception as e:
+                        logger.debug(f"Spread scan failed: {e}")
+                    break
+
+        # 2. Weather intraday scalps (cheap contracts near settlement)
+        try:
+            intraday_signals = self._find_intraday_weather_opportunities(markets)
+            if intraday_signals:
+                logger.info(f"WeatherIntraday: {len(intraday_signals)} intraday opportunities")
+                all_signals.extend(intraday_signals)
+        except Exception as e:
+            logger.debug(f"Weather intraday scan failed: {e}")
 
         # Phase 2: MODE-SPECIFIC SIGNAL PROCESSING
         if self.operating_mode == 'data_collection':
@@ -1154,11 +1318,22 @@ class KalshiBot:
                 )
 
                 # SPEED OPTIMIZATION: Skip AI debate for speed-sensitive strategies
-                # Only run debate for AI opinion strategies (GrokNews, MentionMarkets)
+                # Scalp strategies skip debate entirely — speed > consensus
                 strategy_name = sig.get('strategy_type', 'unknown')
+                SKIP_DEBATE_STRATEGIES = {
+                    'weather_edge', 'weather_intraday',
+                    'crypto_momentum', 'market_making_scalp',
+                    'prob_arb', 'market_making', 'orderbook_edge',
+                    'near_certainty', 'high_prob_lock', 'sports_no',
+                    'forced_paper', 'precip_edge', 'cross_platform',
+                }
                 DEBATE_STRATEGIES = {'GrokNewsAnalysis', 'grok_news', 'MentionMarkets', 'mention_markets'}
 
-                needs_debate = any(ds.lower() in strategy_name.lower() for ds in DEBATE_STRATEGIES)
+                # Skip debate if this is a scalp/data-driven strategy
+                if strategy_name.lower() in SKIP_DEBATE_STRATEGIES:
+                    needs_debate = False
+                else:
+                    needs_debate = any(ds.lower() in strategy_name.lower() for ds in DEBATE_STRATEGIES)
 
                 if needs_debate and not is_learning_trade and debates_used < MAX_DEBATES:
                     should_trade, sig, debate_log = run_debate(sig, price)

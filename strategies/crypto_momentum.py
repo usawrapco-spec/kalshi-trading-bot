@@ -18,33 +18,40 @@ logger = setup_logger('crypto_momentum')
 
 CRYPTO_KEYWORDS = ['bitcoin', 'btc', 'ethereum', 'eth', 'solana', 'sol', 'crypto', 'xrp']
 
-# Fetch by series ticker directly — same pattern as weather markets.
-# These don't show up in the general market list.
-CRYPTO_SERIES = {
-    'KXBTC15M': 'BTC',   # Bitcoin 15-minute up/down
-    'KXETH15M': 'ETH',   # Ethereum 15-minute up/down
-    'KXSOL15M': 'SOL',   # Solana 15-minute up/down
-    'KXBTC': 'BTC',      # Bitcoin hourly/daily
-    'KXETH': 'ETH',      # Ethereum hourly/daily
-    'KXSOL': 'SOL',      # Solana hourly/daily
+
+MIN_MOMENTUM = 0.0005    # 0.05% — catches micro-moves (was 0.3%)
+MIN_EDGE = 0.03          # 3% edge minimum (was 8%)
+MIN_VOLUME = 10          # Lower volume threshold for more markets
+MAX_SIGNALS = 10         # Max signals per cycle (was 3)
+MAX_CRYPTO_DEBATES = 0   # Skip HyperThink for crypto scalps — speed > consensus
+
+# Timeframe config: series ticker -> (coin, duration_minutes, name)
+CRYPTO_TIMEFRAMES = {
+    'KXBTC15M': {'coin': 'BTC', 'duration': 15,  'name': 'BTC 15-min'},
+    'KXETH15M': {'coin': 'ETH', 'duration': 15,  'name': 'ETH 15-min'},
+    'KXSOL15M': {'coin': 'SOL', 'duration': 15,  'name': 'SOL 15-min'},
+    'KXBTC':    {'coin': 'BTC', 'duration': 60,   'name': 'BTC hourly'},
+    'KXETH':    {'coin': 'ETH', 'duration': 60,   'name': 'ETH hourly'},
+    'KXSOL':    {'coin': 'SOL', 'duration': 60,   'name': 'SOL hourly'},
 }
 
-MIN_MOMENTUM = 0.003     # 0.3% minimum move to generate signal
-MIN_EDGE = 0.08          # 8% edge over market price
-MIN_VOLUME = 100         # Skip illiquid markets
-MAX_SIGNALS = 3          # Max signals per cycle
-MAX_CRYPTO_DEBATES = 3   # HyperThink limit for crypto per cycle
+# Extreme move thresholds for mean reversion
+EXTREME_DIP = -0.005     # -0.5% in momentum window -> bounce play
+EXTREME_SPIKE = 0.005    # +0.5% in momentum window -> pullback play
 
 
 class CryptoMomentumStrategy(BaseStrategy):
-    """15-minute crypto scalping using momentum + HyperThink consensus."""
+    """Multi-timeframe crypto scalping — 15-min + hourly markets, no debate for speed."""
 
     def __init__(self, client, risk_manager, db, crypto_monitor=None, hyperthink=None):
         super().__init__(client, risk_manager, db)
         self.monitor = crypto_monitor
         self.hyperthink = hyperthink
         self._crypto_debates_this_cycle = 0
-        logger.info(f"CryptoMomentum initialized (monitor={'ON' if crypto_monitor else 'OFF'}, HyperThink={'ON' if hyperthink else 'OFF'})")
+        self._cached_markets = []
+        self._market_cache_time = 0
+        self._market_cache_ttl = 30  # Refresh crypto markets every 30 seconds
+        logger.info(f"CryptoMomentum initialized (monitor={'ON' if crypto_monitor else 'OFF'}, timeframes={len(CRYPTO_TIMEFRAMES)})")
 
     @resilient_strategy
     def analyze(self, markets):
@@ -62,8 +69,14 @@ class CryptoMomentumStrategy(BaseStrategy):
         # Reset per-cycle debate counter
         self._crypto_debates_this_cycle = 0
 
-        # Fetch crypto markets by series ticker (they don't appear in general market list)
-        crypto_markets = self._fetch_crypto_markets()
+        # Fetch crypto markets (cached, refreshed every 30s for speed)
+        import time as _time
+        now = _time.time()
+        if now - self._market_cache_time > self._market_cache_ttl or not self._cached_markets:
+            self._cached_markets = self._fetch_crypto_markets()
+            self._market_cache_time = now
+
+        crypto_markets = self._cached_markets
 
         m5 = self.monitor.get_momentum('BTC', 5)
         m15 = self.monitor.get_momentum('BTC', 15)
@@ -76,15 +89,29 @@ class CryptoMomentumStrategy(BaseStrategy):
         if not crypto_markets:
             return signals
 
-        for cm in crypto_markets[:10]:
+        for cm in crypto_markets[:30]:  # Check up to 30 markets per cycle
             coin = cm['coin']
             if not coin or coin not in prices:
                 continue
 
             current_price = prices[coin]
-            m5 = self.monitor.get_momentum(coin, 5)
-            m15 = self.monitor.get_momentum(coin, 15)
-            vol = self.monitor.get_volatility(coin, 15)
+            duration = cm.get('duration', 15)
+
+            # Adaptive momentum windows based on contract duration
+            if duration <= 15:
+                mom_window = 5    # 5-min momentum for 15-min markets
+                vol_window = 15
+            elif duration <= 60:
+                mom_window = 15   # 15-min momentum for hourly markets
+                vol_window = 30
+            else:
+                mom_window = 60   # 60-min momentum for daily markets
+                vol_window = 60
+
+            m_short = self.monitor.get_momentum(coin, mom_window)
+            m_long = self.monitor.get_momentum(coin, vol_window)
+            vol_short = self.monitor.get_volatility(coin, mom_window)
+            vol_long = self.monitor.get_volatility(coin, vol_window)
 
             yes_price = cm['yes_price']
             no_price = cm['no_price']
@@ -92,28 +119,16 @@ class CryptoMomentumStrategy(BaseStrategy):
             if cm['volume'] < MIN_VOLUME:
                 continue
 
-            signal = self._evaluate_momentum(cm, coin, current_price, m5, m15, vol, yes_price, no_price)
-            if not signal:
-                continue
-
-            # HyperThink validation (max 3 per cycle for crypto)
-            if self.hyperthink and self._crypto_debates_this_cycle < MAX_CRYPTO_DEBATES:
-                self._crypto_debates_this_cycle += 1
-                ht = self._run_hyperthink(signal, cm)
-                if ht['consensus'] not in ('UNANIMOUS', 'MAJORITY'):
-                    logger.info(f"CryptoMomentum SKIP {cm['ticker']}: HyperThink={ht['consensus']}")
-                    continue
-                signal['count'] = 5 if ht['consensus'] == 'UNANIMOUS' else 2
-                signal['ht_consensus'] = ht['consensus']
-                signal['ht_grok'] = ht['grok_sentiment']
-                signal['ht_claude'] = ht['claude_sentiment']
-            else:
-                signal['count'] = 2
+            # Try all signal types: momentum, volatility expansion, extreme mean reversion
+            for signal in self._generate_all_signals(cm, coin, current_price,
+                                                      m_short, m_long, vol_short, vol_long,
+                                                      yes_price, no_price, duration):
+                # Skip HyperThink for crypto scalps — speed matters
+                signal['count'] = 3
                 signal['ht_consensus'] = 'SKIPPED'
                 signal['ht_grok'] = ''
                 signal['ht_claude'] = ''
-
-            signals.append(signal)
+                signals.append(signal)
 
         signals.sort(key=lambda s: s.get('edge', 0), reverse=True)
         signals = signals[:MAX_SIGNALS]
@@ -127,7 +142,9 @@ class CryptoMomentumStrategy(BaseStrategy):
         crypto_markets = []
         seen = set()
 
-        for series_ticker, coin in CRYPTO_SERIES.items():
+        for series_ticker, tf_config in CRYPTO_TIMEFRAMES.items():
+            coin = tf_config['coin']
+            duration = tf_config['duration']
             try:
                 batch = self.client.get_markets_by_series(series_ticker, status='open')
                 added = 0
@@ -149,16 +166,20 @@ class CryptoMomentumStrategy(BaseStrategy):
                         'ticker': ticker,
                         'title': m.get('title', ''),
                         'coin': coin,
+                        'duration': duration,
+                        'series': series_ticker,
                         'yes_price': yes_p,
                         'no_price': no_p,
                         'volume': volume,
                         'close_time': m.get('close_time', ''),
+                        'yes_bid': safe_float(m.get('yes_bid', m.get('yes_bid_dollars', 0))),
+                        'yes_ask': safe_float(m.get('yes_ask', m.get('yes_ask_dollars', 0))),
                         'market': m,
                     })
                     added += 1
 
                 if batch:
-                    logger.info(f"CryptoMomentum: {series_ticker} -> {added} open markets (of {len(batch)} fetched)")
+                    logger.info(f"CryptoMomentum: {series_ticker} ({tf_config['name']}) -> {added} open markets (of {len(batch)} fetched)")
                 else:
                     logger.debug(f"CryptoMomentum: {series_ticker} -> 0 markets")
             except Exception as e:
@@ -167,70 +188,126 @@ class CryptoMomentumStrategy(BaseStrategy):
         crypto_markets.sort(key=lambda x: x['volume'], reverse=True)
         return crypto_markets
 
-    def _evaluate_momentum(self, cm, coin, current_price, m5, m15, vol, yes_price, no_price):
-        """Generate signal based on momentum vs market price."""
-        signal_side = None
-        edge = 0
-        reasoning = ""
+    def _generate_all_signals(self, cm, coin, current_price, m_short, m_long, vol_short, vol_long, yes_price, no_price, duration):
+        """Generate ALL signal types: momentum, volatility expansion, extreme mean reversion."""
+        signals = []
 
-        # Strong upward momentum -> buy YES
-        if m5 > MIN_MOMENTUM and m15 > 0:
-            our_prob = 0.50 + min(m5 * 20, 0.30)
-            market_prob = yes_price
-            edge = our_prob - market_prob
-            if edge > MIN_EDGE:
-                signal_side = 'yes'
-                reasoning = f"UP momentum: 5m={m5:+.2%} 15m={m15:+.2%} prob={our_prob:.0%} vs mkt={market_prob:.0%}"
+        # --- SIGNAL TYPE 1: Momentum (lowered thresholds) ---
+        sig = self._check_momentum(cm, coin, current_price, m_short, m_long, yes_price, no_price, duration)
+        if sig:
+            signals.append(sig)
 
-        # Strong downward momentum -> buy NO
-        elif m5 < -MIN_MOMENTUM and m15 < 0:
-            our_prob = 0.50 + min(abs(m5) * 20, 0.30)
-            market_prob = no_price
-            edge = our_prob - market_prob
-            if edge > MIN_EDGE:
-                signal_side = 'no'
-                reasoning = f"DOWN momentum: 5m={m5:+.2%} 15m={m15:+.2%} prob={our_prob:.0%} vs mkt={market_prob:.0%}"
+        # --- SIGNAL TYPE 2: Volatility expansion ---
+        sig = self._check_volatility_expansion(cm, coin, current_price, m_short, vol_short, vol_long, yes_price, no_price, duration)
+        if sig:
+            signals.append(sig)
 
-        # Mean reversion: short dip in uptrend -> buy YES
-        elif m5 < -0.01 and m15 > 0:
-            our_prob = 0.60
-            market_prob = yes_price
-            edge = our_prob - market_prob
-            if edge > MIN_EDGE:
-                signal_side = 'yes'
-                reasoning = f"BOUNCE: 5m dip={m5:+.2%} in 15m uptrend={m15:+.2%}"
+        # --- SIGNAL TYPE 3: Extreme mean reversion ---
+        sig = self._check_extreme_reversion(cm, coin, current_price, m_short, yes_price, no_price, duration)
+        if sig:
+            signals.append(sig)
 
-        # Mean reversion: short spike in downtrend -> buy NO
-        elif m5 > 0.01 and m15 < 0:
-            our_prob = 0.60
-            market_prob = no_price
-            edge = our_prob - market_prob
-            if edge > MIN_EDGE:
-                signal_side = 'no'
-                reasoning = f"PULLBACK: 5m spike={m5:+.2%} in 15m downtrend={m15:+.2%}"
+        return signals
 
-        if not signal_side or edge <= 0:
-            return None
-
-        entry_price = yes_price if signal_side == 'yes' else no_price
-
+    def _make_signal(self, cm, coin, current_price, m_short, m_long, vol, side, edge, our_prob, reasoning, duration):
+        """Build a standard signal dict."""
         return {
             'ticker': cm['ticker'],
             'title': cm['title'],
             'action': 'buy',
-            'side': signal_side,
-            'count': 2,
+            'side': side,
+            'count': 3,
             'confidence': min(50 + edge * 200, 95),
             'strategy_type': 'crypto_momentum',
             'edge': edge,
-            'model_prob': 0.50 + min(abs(m5) * 20, 0.30),
+            'model_prob': our_prob,
             'coin': coin,
             'btc_price': current_price,
-            'momentum_5m': m5,
-            'momentum_15m': m15,
+            'momentum_5m': m_short,
+            'momentum_15m': m_long,
             'volatility': vol,
-            'reason': f"[CRYPTO] {reasoning}",
+            'duration': duration,
+            'reason': f"[CRYPTO {duration}m] {reasoning}",
         }
+
+    def _check_momentum(self, cm, coin, current_price, m_short, m_long, yes_price, no_price, duration):
+        """Standard momentum signal with lowered thresholds."""
+        # Strong upward momentum -> buy YES
+        if m_short > MIN_MOMENTUM and m_long >= 0:
+            our_prob = 0.50 + min(abs(m_short) * 30, 0.35)
+            edge = our_prob - yes_price
+            if edge > MIN_EDGE:
+                return self._make_signal(cm, coin, current_price, m_short, m_long, 0, 'yes', edge, our_prob,
+                    f"UP: short={m_short:+.3%} long={m_long:+.3%} prob={our_prob:.0%} vs mkt={yes_price:.0%}", duration)
+
+        # Strong downward momentum -> buy NO
+        elif m_short < -MIN_MOMENTUM and m_long <= 0:
+            our_prob = 0.50 + min(abs(m_short) * 30, 0.35)
+            edge = our_prob - no_price
+            if edge > MIN_EDGE:
+                return self._make_signal(cm, coin, current_price, m_short, m_long, 0, 'no', edge, our_prob,
+                    f"DOWN: short={m_short:+.3%} long={m_long:+.3%} prob={our_prob:.0%} vs mkt={no_price:.0%}", duration)
+
+        # Mean reversion: short dip in uptrend -> buy YES
+        elif m_short < -0.003 and m_long > 0:
+            our_prob = 0.58
+            edge = our_prob - yes_price
+            if edge > MIN_EDGE:
+                return self._make_signal(cm, coin, current_price, m_short, m_long, 0, 'yes', edge, our_prob,
+                    f"BOUNCE: dip={m_short:+.3%} in uptrend={m_long:+.3%}", duration)
+
+        # Mean reversion: short spike in downtrend -> buy NO
+        elif m_short > 0.003 and m_long < 0:
+            our_prob = 0.58
+            edge = our_prob - no_price
+            if edge > MIN_EDGE:
+                return self._make_signal(cm, coin, current_price, m_short, m_long, 0, 'no', edge, our_prob,
+                    f"PULLBACK: spike={m_short:+.3%} in downtrend={m_long:+.3%}", duration)
+
+        return None
+
+    def _check_volatility_expansion(self, cm, coin, current_price, m_short, vol_short, vol_long, yes_price, no_price, duration):
+        """When volatility suddenly increases, momentum is about to happen."""
+        if vol_long <= 0:
+            return None
+
+        # Volatility expanding: short-term vol > 1.5x long-term vol
+        if vol_short > vol_long * 1.5:
+            # Direction = whatever the short-term momentum is
+            if m_short > 0:
+                our_prob = 0.58
+                edge = our_prob - yes_price
+                if edge > MIN_EDGE:
+                    return self._make_signal(cm, coin, current_price, m_short, 0, vol_short, 'yes', edge, our_prob,
+                        f"VOL EXPANSION: short_vol={vol_short:.4f} > long_vol={vol_long:.4f}, direction=UP", duration)
+            elif m_short < 0:
+                our_prob = 0.58
+                edge = our_prob - no_price
+                if edge > MIN_EDGE:
+                    return self._make_signal(cm, coin, current_price, m_short, 0, vol_short, 'no', edge, our_prob,
+                        f"VOL EXPANSION: short_vol={vol_short:.4f} > long_vol={vol_long:.4f}, direction=DOWN", duration)
+
+        return None
+
+    def _check_extreme_reversion(self, cm, coin, current_price, m_short, yes_price, no_price, duration):
+        """Extreme moves trigger mean reversion bets."""
+        # Extreme dip -> bounce expected, buy YES
+        if m_short < EXTREME_DIP:
+            our_prob = 0.60
+            edge = our_prob - yes_price
+            if edge > MIN_EDGE:
+                return self._make_signal(cm, coin, current_price, m_short, 0, 0, 'yes', edge, our_prob,
+                    f"EXTREME DIP: {m_short:+.2%} -> bounce expected", duration)
+
+        # Extreme spike -> pullback expected, buy NO
+        if m_short > EXTREME_SPIKE:
+            our_prob = 0.60
+            edge = our_prob - no_price
+            if edge > MIN_EDGE:
+                return self._make_signal(cm, coin, current_price, m_short, 0, 0, 'no', edge, our_prob,
+                    f"EXTREME SPIKE: {m_short:+.2%} -> pullback expected", duration)
+
+        return None
 
     def _run_hyperthink(self, signal, cm):
         """Run HyperThink validation for crypto signal."""
@@ -270,6 +347,61 @@ class CryptoMomentumStrategy(BaseStrategy):
             'grok_sentiment': '',
             'claude_sentiment': '',
         }
+
+    def get_cached_markets(self):
+        """Return cached crypto markets for use by other strategies (e.g., spread scalper)."""
+        return self._cached_markets
+
+    def find_spread_opportunities(self):
+        """Find crypto markets with wide enough spreads for market-making scalps."""
+        signals = []
+        for market in self._cached_markets[:20]:
+            yes_bid = market.get('yes_bid', 0)
+            yes_ask = market.get('yes_ask', 0)
+
+            # Normalize to dollar values
+            if yes_bid > 1.0:
+                yes_bid = yes_bid / 100.0
+            if yes_ask > 1.0:
+                yes_ask = yes_ask / 100.0
+
+            if yes_bid <= 0 or yes_ask <= 0:
+                continue
+
+            spread = yes_ask - yes_bid
+
+            # Need at least 3c spread to cover fees on both sides
+            if spread >= 0.03 and yes_bid > 0.05 and yes_ask < 0.95:
+                buy_price = yes_bid + 0.01
+                sell_price = yes_ask - 0.01
+                net_spread = sell_price - buy_price
+
+                # Fee estimate: 7% of price * (1-price)
+                buy_fee = 0.07 * buy_price * (1 - buy_price)
+                sell_fee = 0.07 * sell_price * (1 - sell_price)
+                net_profit = net_spread - buy_fee - sell_fee
+
+                if net_profit > 0.005:  # At least half a cent profit
+                    signals.append({
+                        'ticker': market['ticker'],
+                        'title': market.get('title', ''),
+                        'action': 'buy',
+                        'side': 'yes',
+                        'count': 2,
+                        'confidence': 65,
+                        'strategy_type': 'market_making_scalp',
+                        'edge': net_profit,
+                        'model_prob': (yes_bid + yes_ask) / 2,
+                        'buy_price': buy_price,
+                        'sell_price': sell_price,
+                        'spread': spread,
+                        'net_profit': net_profit,
+                        'reason': f"[SPREAD] {market['ticker']} bid=${yes_bid:.2f} ask=${yes_ask:.2f} spread={spread:.2f} net=${net_profit:.3f}",
+                    })
+                    logger.info(f"SPREAD: {market['ticker']} bid=${yes_bid:.2f} ask=${yes_ask:.2f} spread={spread:.2f} net_profit=${net_profit:.3f}")
+
+        signals.sort(key=lambda x: x['net_profit'], reverse=True)
+        return signals[:5]
 
     def execute(self, signal, dry_run=False):
         """Execute crypto trade — paper only, also log to crypto_signals."""
