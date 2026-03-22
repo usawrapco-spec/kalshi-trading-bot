@@ -463,7 +463,7 @@ class KalshiBot:
             learning_budget = self.risk.paper_balance * LEARNING_ALLOCATION
             production_budget = self.risk.paper_balance * PRODUCTION_ALLOCATION
 
-            MAX_TRADES = 5
+            MAX_TRADES = int(os.environ.get("MAX_TRADES_PER_CYCLE", 50))
             MAX_CYCLE_SPEND = min(10.00, production_budget)  # Cap at production budget
             all_signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
             logger.info(f"Total signals across all strategies: {len(all_signals)}")
