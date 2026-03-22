@@ -975,7 +975,7 @@ class KalshiBot:
             # Paginate through all markets
             cursor = None
             page_count = 0
-            while page_count < 10:  # Limit to 10 pages to avoid infinite loops
+            while page_count < 20:  # Up to 20 pages = ~2000 markets
                 try:
                     data = self.client.get_markets(limit=100, cursor=cursor)
                     markets_batch = data.get('markets', [])
@@ -1269,9 +1269,20 @@ class KalshiBot:
                 ) or 0.50
                 price_for_side = price if sig['side'] == 'yes' else (1 - price)
 
-                # Kelly sizing
+                # Position sizing
                 if edge > 0 and prob > 0:
                     sig['count'] = self.risk.kelly_size(edge, prob, int(price_for_side * 100))
+
+                # Aggressive paper sizing: override with price-based quantities
+                if _aggressive_paper:
+                    if price_for_side < 0.10:
+                        sig['count'] = max(sig['count'], 50)
+                    elif price_for_side < 0.30:
+                        sig['count'] = max(sig['count'], 20)
+                    elif price_for_side < 0.50:
+                        sig['count'] = max(sig['count'], 10)
+                    else:
+                        sig['count'] = max(sig['count'], 5)
 
                 cost = sig['count'] * price_for_side
 
@@ -1446,18 +1457,10 @@ class KalshiBot:
         if not markets:
             return
 
-        # Get tickers we already have positions on
-        existing_tickers = set(self.risk.positions.keys())
-        # Also get tickers from DB to avoid recently traded
-        recent_tickers = set()
-        if self.db and self.db.client:
-            try:
-                recent = self.db.client.table('kalshi_trades').select('ticker').eq('order_id', 'paper').limit(500).execute()
-                recent_tickers = {t.get('ticker', '') for t in (recent.data or [])}
-            except Exception:
-                pass
-
-        all_traded = existing_tickers | recent_tickers
+        # Only skip markets we have current open positions on (not historical)
+        all_traded = set()
+        for key, pos in self.risk.positions.items():
+            all_traded.add(pos.get('ticker', key))
 
         # Filter to untouched open markets with valid prices
         untouched = []
@@ -1476,7 +1479,7 @@ class KalshiBot:
             return
 
         random.shuffle(untouched)
-        explore_count = min(10, len(untouched))  # 10 random trades per cycle
+        explore_count = min(25, len(untouched))  # 25 random trades per cycle
         explored = 0
 
         for m in untouched[:explore_count]:
@@ -1485,26 +1488,38 @@ class KalshiBot:
             yes_price = get_yes_price_dollars(m) or 0.50
             no_price = 1.0 - yes_price
 
-            # Buy the cheaper side
-            side = 'yes' if yes_price < no_price else 'no'
-            entry = yes_price if side == 'yes' else no_price
-            entry = max(entry, 0.01)
+            # Trade BOTH sides for maximum data collection
+            for side in ['yes', 'no']:
+                entry = yes_price if side == 'yes' else no_price
+                entry = max(entry, 0.01)
+                if entry >= 0.99:
+                    continue
 
-            traded = self.risk.record_paper_trade(
-                ticker=ticker, side=side, count=1,
-                entry_price=entry, strategy='exploration', title=title,
-            )
-            if not traded:
-                continue
+                # Aggressive sizing by price
+                if entry < 0.10:
+                    qty = 20
+                elif entry < 0.30:
+                    qty = 10
+                elif entry < 0.50:
+                    qty = 5
+                else:
+                    qty = 3
 
-            explored += 1
-            if self.db:
-                self.db.log_trade({
-                    'ticker': ticker, 'action': 'buy', 'side': side,
-                    'count': 1, 'strategy': 'exploration',
-                    'reason': f"[EXPLORE] Random market, {side.upper()} @ ${entry:.2f}",
-                    'confidence': 0, 'order_id': 'paper', 'price': entry,
-                })
+                traded = self.risk.record_paper_trade(
+                    ticker=ticker, side=side, count=qty,
+                    entry_price=entry, strategy='exploration', title=title,
+                )
+                if not traded:
+                    continue
+
+                explored += 1
+                if self.db:
+                    self.db.log_trade({
+                        'ticker': ticker, 'action': 'buy', 'side': side,
+                        'count': qty, 'strategy': 'exploration',
+                        'reason': f"[EXPLORE] Random market, {side.upper()} x{qty} @ ${entry:.2f}",
+                        'confidence': 0, 'order_id': 'paper', 'price': entry,
+                    })
 
         if explored > 0:
             logger.info(f"EXPLORATION: {explored} random paper trades from {len(untouched)} untouched markets")

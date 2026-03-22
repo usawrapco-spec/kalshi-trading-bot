@@ -20,9 +20,9 @@ CRYPTO_KEYWORDS = ['bitcoin', 'btc', 'ethereum', 'eth', 'solana', 'sol', 'crypto
 
 
 MIN_MOMENTUM = 0.0005    # 0.05% — catches micro-moves (was 0.3%)
-MIN_EDGE = 0.03          # 3% edge minimum (was 8%)
-MIN_VOLUME = 10          # Lower volume threshold for more markets
-MAX_SIGNALS = 10         # Max signals per cycle (was 3)
+MIN_EDGE = 0.01          # 1% edge minimum (was 8%, then 3%) — paper wants volume
+MIN_VOLUME = 0           # Trade ALL markets (was 10)
+MAX_SIGNALS = 100        # Max signals per cycle — go ham
 MAX_CRYPTO_DEBATES = 0   # Skip HyperThink for crypto scalps — speed > consensus
 
 # Timeframe config: series ticker -> (coin, duration_minutes, name)
@@ -89,7 +89,7 @@ class CryptoMomentumStrategy(BaseStrategy):
         if not crypto_markets:
             return signals
 
-        for cm in crypto_markets[:30]:  # Check up to 30 markets per cycle
+        for cm in crypto_markets:  # Check ALL markets — no cap
             coin = cm['coin']
             if not coin or coin not in prices:
                 continue
@@ -115,9 +115,6 @@ class CryptoMomentumStrategy(BaseStrategy):
 
             yes_price = cm['yes_price']
             no_price = cm['no_price']
-
-            if cm['volume'] < MIN_VOLUME:
-                continue
 
             # Try all signal types: momentum, volatility expansion, extreme mean reversion
             for signal in self._generate_all_signals(cm, coin, current_price,
@@ -189,8 +186,13 @@ class CryptoMomentumStrategy(BaseStrategy):
         return crypto_markets
 
     def _generate_all_signals(self, cm, coin, current_price, m_short, m_long, vol_short, vol_long, yes_price, no_price, duration):
-        """Generate ALL signal types: momentum, volatility expansion, extreme mean reversion."""
+        """Generate ALL signal types: bracket, momentum, volatility expansion, mean reversion."""
         signals = []
+
+        # --- SIGNAL TYPE 0: Bracket-based direct price comparison (highest volume) ---
+        sig = self._check_bracket(cm, coin, current_price, yes_price, no_price, duration)
+        if sig:
+            signals.append(sig)
 
         # --- SIGNAL TYPE 1: Momentum (lowered thresholds) ---
         sig = self._check_momentum(cm, coin, current_price, m_short, m_long, yes_price, no_price, duration)
@@ -208,6 +210,115 @@ class CryptoMomentumStrategy(BaseStrategy):
             signals.append(sig)
 
         return signals
+
+    def _check_bracket(self, cm, coin, current_price, yes_price, no_price, duration):
+        """Parse bracket threshold from ticker and compare to current price."""
+        ticker = cm['ticker']
+        title = cm.get('title', '')
+
+        # Try to extract threshold from title (e.g., "Will BTC be above $85,000 at ...")
+        threshold = self._parse_threshold(ticker, title, coin)
+        if not threshold or threshold <= 0:
+            return None
+
+        # Calculate distance from bracket
+        distance_pct = (current_price - threshold) / threshold
+
+        # Determine if this is an "above" or "below" market
+        title_lower = title.lower()
+        is_above = 'above' in title_lower or 'higher' in title_lower or 'over' in title_lower or 'up' in title_lower
+        is_below = 'below' in title_lower or 'lower' in title_lower or 'under' in title_lower or 'down' in title_lower
+
+        # Default to "above" if we can't tell
+        if not is_above and not is_below:
+            is_above = True
+
+        if is_above:
+            if distance_pct > 0.02:  # Price well above threshold → YES likely
+                our_prob = min(0.55 + distance_pct * 3, 0.95)
+                edge = our_prob - yes_price
+                if edge > MIN_EDGE and yes_price < 0.95:
+                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'yes', edge, our_prob,
+                        f"BRACKET: {coin}=${current_price:,.0f} is {distance_pct:+.1%} above ${threshold:,.0f}", duration)
+            elif distance_pct < -0.02:  # Price well below threshold → NO likely
+                our_prob = min(0.55 + abs(distance_pct) * 3, 0.95)
+                edge = our_prob - no_price
+                if edge > MIN_EDGE and no_price < 0.95:
+                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'no', edge, our_prob,
+                        f"BRACKET: {coin}=${current_price:,.0f} is {distance_pct:+.1%} below ${threshold:,.0f}", duration)
+            else:
+                # Near boundary — buy the cheaper side for exploration
+                if yes_price < no_price and yes_price < 0.50:
+                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'yes', 0.02, 0.52,
+                        f"BRACKET NEAR: {coin}=${current_price:,.0f} near ${threshold:,.0f}, exploring YES", duration)
+                elif no_price < 0.50:
+                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'no', 0.02, 0.52,
+                        f"BRACKET NEAR: {coin}=${current_price:,.0f} near ${threshold:,.0f}, exploring NO", duration)
+        elif is_below:
+            if distance_pct < -0.02:  # Price below threshold → YES for "below" market
+                our_prob = min(0.55 + abs(distance_pct) * 3, 0.95)
+                edge = our_prob - yes_price
+                if edge > MIN_EDGE and yes_price < 0.95:
+                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'yes', edge, our_prob,
+                        f"BRACKET BELOW: {coin}=${current_price:,.0f} below ${threshold:,.0f}", duration)
+            elif distance_pct > 0.02:
+                our_prob = min(0.55 + distance_pct * 3, 0.95)
+                edge = our_prob - no_price
+                if edge > MIN_EDGE and no_price < 0.95:
+                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'no', edge, our_prob,
+                        f"BRACKET ABOVE: {coin}=${current_price:,.0f} above ${threshold:,.0f}", duration)
+
+        return None
+
+    def _parse_threshold(self, ticker, title, coin):
+        """Extract price threshold from ticker or title."""
+        import re as _re
+
+        # Try title first: "Will BTC be above $85,000" or "Bitcoin above $85000"
+        # Match patterns like $85,000 or $85000 or $85.5K
+        price_match = _re.search(r'\$([0-9,]+\.?[0-9]*)\s*[Kk]?', title)
+        if price_match:
+            try:
+                val = price_match.group(1).replace(',', '')
+                threshold = float(val)
+                if 'K' in title[price_match.end():price_match.end()+2].upper() or 'k' in title[price_match.end():price_match.end()+2]:
+                    threshold *= 1000
+                # Sanity check based on coin
+                if coin == 'BTC' and 10000 < threshold < 500000:
+                    return threshold
+                elif coin == 'ETH' and 100 < threshold < 50000:
+                    return threshold
+                elif coin == 'SOL' and 1 < threshold < 5000:
+                    return threshold
+                # If no sanity check matched, still return if reasonable
+                if threshold > 0:
+                    return threshold
+            except Exception:
+                pass
+
+        # Try ticker: KXBTC15M-26MAR22-T68000 or -B68000 or -T68K
+        parts = ticker.split('-')
+        for part in reversed(parts):
+            if not part:
+                continue
+            prefix = part[0].upper()
+            if prefix in ('T', 'B'):
+                try:
+                    num_str = part[1:]
+                    if num_str.upper().endswith('K'):
+                        return float(num_str[:-1]) * 1000
+                    elif num_str.upper().endswith('M'):
+                        return float(num_str[:-1]) * 1000000
+                    else:
+                        val = float(num_str)
+                        # If small number for BTC, probably in thousands
+                        if coin == 'BTC' and val < 1000:
+                            return val * 1000
+                        return val
+                except Exception:
+                    continue
+
+        return None
 
     def _make_signal(self, cm, coin, current_price, m_short, m_long, vol, side, edge, our_prob, reasoning, duration):
         """Build a standard signal dict."""

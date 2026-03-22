@@ -27,7 +27,7 @@ class RiskManager:
     """Manages risk, Kelly sizing, and paper balance."""
 
     def __init__(self):
-        self.paper_balance = float(os.environ.get('PAPER_BALANCE', 100))
+        self.paper_balance = float(os.environ.get('PAPER_BALANCE', 100000))
         self.daily_pnl = 0.0
         self.positions = {}  # ticker -> {side, count, entry_price, strategy}
         self.daily_reset = datetime.now().date()
@@ -165,6 +165,11 @@ class RiskManager:
 
     def record_paper_trade(self, ticker, side, count, entry_price, strategy, title=''):
         """Record a paper trade entry. Returns False if blocked."""
+        # Auto-refill paper balance when running low
+        if _is_aggressive_paper and self.paper_balance < 10000:
+            logger.info(f"Paper balance auto-refill: ${self.paper_balance:.2f} -> $100,000.00")
+            self.paper_balance = 100000.0
+
         # In aggressive paper mode, allow stacking (same ticker, different key)
         position_key = ticker
         if _is_aggressive_paper and ticker in self.positions:
