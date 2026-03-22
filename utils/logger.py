@@ -72,3 +72,7 @@ def log_trade(trade_data, filename='trades.json'):
     # Save
     with open(filepath, 'w') as f:
         json.dump(trades, f, indent=2)
+
+
+# Module-level logger instance so `from utils.logger import logger` works
+logger = setup_logger()
