@@ -27,7 +27,8 @@ class RiskManager:
     """Manages risk, Kelly sizing, and paper balance."""
 
     def __init__(self):
-        self.paper_balance = float(os.environ.get('PAPER_BALANCE', 100000))
+        # Fix 1: Hardcode paper balance to $100,000 with auto-refill
+        self.paper_balance = 100000.0  # Always start at $100k
         self.daily_pnl = 0.0
         self.positions = {}  # ticker -> {side, count, entry_price, strategy}
         self.daily_reset = datetime.now().date()
@@ -67,6 +68,26 @@ class RiskManager:
         reward_to_risk = potential_profit / potential_loss
         return reward_to_risk >= 2.0  # Minimum 2:1 R:R
 
+    def calculate_position_size(self, price, strategy):
+        """Scale position size inversely with price"""
+        if price <= 0:
+            return 0
+
+        if price < 0.05:
+            count = 20    # $1.00 total risk
+        elif price < 0.10:
+            count = 10    # $1.00 total risk
+        elif price < 0.20:
+            count = 5     # $1.00 total risk
+        elif price < 0.40:
+            count = 3     # $1.20 total risk
+        elif price < 0.60:
+            count = 2     # $1.20 total risk
+        else:
+            count = 1     # $0.60-0.99 total risk
+
+        return count
+
     def kelly_size(self, edge, probability, price_cents=50):
         """Kelly Criterion position sizing: bankroll * 0.25 * (edge * confidence) / (1 - market_price)."""
         if edge <= 0 or probability <= 0 or probability >= 1 or price_cents <= 0:
@@ -75,6 +96,10 @@ class RiskManager:
         price_dollars = price_cents / 100.0 if price_cents > 1 else price_cents
         if price_dollars >= 1:
             return 1
+
+        # Use simple position sizing instead of Kelly for aggressive paper trading
+        if _is_aggressive_paper:
+            return self.calculate_position_size(price_dollars, None)
 
         # Kelly formula: f* = (b*p - q) / b where b = payout ratio
         payout = (1.0 - price_dollars) / price_dollars  # e.g. pay 30c to win 70c = 2.33x
@@ -291,10 +316,23 @@ class RiskManager:
             self.daily_reset = today
             self.stopped = False
 
+    def get_paper_balance(self):
+        """Paper balance = starting balance - open position cost + realized PnL"""
+        starting = 100000
+        # Calculate from DB or in-memory
+        total_cost = sum(pos['entry_price'] * pos['count'] for pos in self.positions.values())
+        realized = self.total_pnl  # This tracks all realized P&L
+        balance = starting - total_cost + realized
+
+        # Auto-refill if too low — paper money is infinite
+        if balance < 10000:
+            balance = 100000
+        return balance
+
     def get_status(self):
         win_rate = (self.total_wins / self.total_trades * 100) if self.total_trades > 0 else 0
         return {
-            'paper_balance': self.paper_balance,
+            'paper_balance': self.get_paper_balance(),  # Use calculated balance
             'daily_pnl': self.daily_pnl,
             'total_pnl': self.total_pnl,
             'trades_today': self.trades_today,

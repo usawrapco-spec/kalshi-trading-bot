@@ -77,9 +77,16 @@ def api_status():
             live_positions_value = cost_basis
             live_unrealized = 0
             live_count = len(live_open)
+
+            # Fix 6: Proper paper balance calculation - never goes negative
             paper_cost = sum(t.get('price', 0) * t.get('count', 0) for t in paper_open)
             paper_realized = sum(t.get('pnl', 0) or 0 for t in paper_settled)
-            paper_bal = 100.0 - paper_cost + paper_realized
+            paper_bal = 100000 - paper_cost + paper_realized  # Start with $100k
+
+            # Auto-refill if too low
+            if paper_bal < 10000:
+                paper_bal = 100000
+
             paper_count = len(paper_open)
 
         # Win/loss from settled trades (always fresh)

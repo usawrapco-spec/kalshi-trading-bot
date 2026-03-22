@@ -216,57 +216,62 @@ class CryptoMomentumStrategy(BaseStrategy):
         ticker = cm['ticker']
         title = cm.get('title', '')
 
-        # Try to extract threshold from title (e.g., "Will BTC be above $85,000 at ...")
-        threshold = self._parse_threshold(ticker, title, coin)
-        if not threshold or threshold <= 0:
+        # Parse bracket from ticker
+        parts = ticker.split('-')
+        bracket_part = parts[-1]  # e.g., "B62675" or "T70000"
+
+        bracket_type = bracket_part[0]  # 'B' or 'T'
+        # Parse threshold number (handle K suffix etc)
+        num_str = bracket_part[1:]
+        if num_str.endswith('K'):
+            threshold = float(num_str[:-1]) * 1000
+        else:
+            threshold = float(num_str)
+
+        distance_pct = (current_price - threshold) / threshold * 100
+
+        # THE CORRECT LOGIC:
+        if bracket_type == 'B':  # "Will price be BELOW threshold?"
+            if current_price < threshold * 0.97:
+                # Price IS below threshold → YES is correct
+                side = 'yes'
+            elif current_price > threshold * 1.03:
+                # Price is ABOVE threshold → NO is correct (it's NOT below)
+                side = 'no'
+            else:
+                return None  # Too close to boundary, skip
+
+        elif bracket_type == 'T':  # "Will price be ABOVE threshold?"
+            if current_price > threshold * 1.03:
+                # Price IS above threshold → YES is correct
+                side = 'yes'
+            elif current_price < threshold * 0.97:
+                # Price is BELOW threshold → NO is correct (it's NOT above)
+                side = 'no'
+            else:
+                return None  # Too close, skip
+
+        # Get REAL price from the market data we already fetched
+        if side == 'yes':
+            price = float(cm.get('yes_ask_dollars') or '0')
+        else:
+            price = float(cm.get('no_ask_dollars') or '0')
+
+        # SKIP if no real price available
+        if price <= 0 or price >= 0.98:
             return None
 
-        # Calculate distance from bracket
-        distance_pct = (current_price - threshold) / threshold
+        # SKIP if price is too expensive (>$0.85) — not enough upside
+        if price > 0.85:
+            return None
 
-        # Determine if this is an "above" or "below" market
-        title_lower = title.lower()
-        is_above = 'above' in title_lower or 'higher' in title_lower or 'over' in title_lower or 'up' in title_lower
-        is_below = 'below' in title_lower or 'lower' in title_lower or 'under' in title_lower or 'down' in title_lower
+        # Calculate edge and probability
+        our_prob = 0.65 if abs(distance_pct) > 5 else 0.55  # Strong signal if far from threshold
+        edge = our_prob - price
 
-        # Default to "above" if we can't tell
-        if not is_above and not is_below:
-            is_above = True
-
-        if is_above:
-            if distance_pct > 0.02:  # Price well above threshold → YES likely
-                our_prob = min(0.55 + distance_pct * 3, 0.95)
-                edge = our_prob - yes_price
-                if edge > MIN_EDGE and yes_price < 0.95:
-                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'yes', edge, our_prob,
-                        f"BRACKET: {coin}=${current_price:,.0f} is {distance_pct:+.1%} above ${threshold:,.0f}", duration)
-            elif distance_pct < -0.02:  # Price well below threshold → NO likely
-                our_prob = min(0.55 + abs(distance_pct) * 3, 0.95)
-                edge = our_prob - no_price
-                if edge > MIN_EDGE and no_price < 0.95:
-                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'no', edge, our_prob,
-                        f"BRACKET: {coin}=${current_price:,.0f} is {distance_pct:+.1%} below ${threshold:,.0f}", duration)
-            else:
-                # Near boundary — buy the cheaper side for exploration
-                if yes_price < no_price and yes_price < 0.50:
-                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'yes', 0.02, 0.52,
-                        f"BRACKET NEAR: {coin}=${current_price:,.0f} near ${threshold:,.0f}, exploring YES", duration)
-                elif no_price < 0.50:
-                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'no', 0.02, 0.52,
-                        f"BRACKET NEAR: {coin}=${current_price:,.0f} near ${threshold:,.0f}, exploring NO", duration)
-        elif is_below:
-            if distance_pct < -0.02:  # Price below threshold → YES for "below" market
-                our_prob = min(0.55 + abs(distance_pct) * 3, 0.95)
-                edge = our_prob - yes_price
-                if edge > MIN_EDGE and yes_price < 0.95:
-                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'yes', edge, our_prob,
-                        f"BRACKET BELOW: {coin}=${current_price:,.0f} below ${threshold:,.0f}", duration)
-            elif distance_pct > 0.02:
-                our_prob = min(0.55 + distance_pct * 3, 0.95)
-                edge = our_prob - no_price
-                if edge > MIN_EDGE and no_price < 0.95:
-                    return self._make_signal(cm, coin, current_price, 0, 0, 0, 'no', edge, our_prob,
-                        f"BRACKET ABOVE: {coin}=${current_price:,.0f} above ${threshold:,.0f}", duration)
+        if edge > MIN_EDGE:
+            return self._make_signal(cm, coin, current_price, 0, 0, 0, side, edge, our_prob,
+                f"BRACKET: {coin}=${current_price:,.0f} ({distance_pct:+.1f}%), threshold=${threshold:,.0f}, type={bracket_type} -> {side.upper()}", duration)
 
         return None
 

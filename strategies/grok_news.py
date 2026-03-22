@@ -33,6 +33,19 @@ class GrokNewsStrategy(BaseStrategy):
         else:
             logger.info(f"GrokNews initialized (model={MODEL}, max {MAX_PER_CYCLE}/cycle, edge>{MIN_EDGE:.0%})")
 
+    def should_grok_analyze(self, ticker):
+        """Only let Grok analyze markets where it might have real info"""
+        skip_prefixes = [
+            'KXHIGH', 'KXLOWT',  # Weather — use GFS instead
+            'KXBTC', 'KXETH', 'KXSOL',  # Crypto — use price data instead
+            'KXRAIN', 'KXSNOW',  # Precipitation
+            'KXMVE',  # Multivariate (junk)
+        ]
+        for prefix in skip_prefixes:
+            if ticker.startswith(prefix):
+                return False
+        return True
+
     @resilient_strategy
     def analyze(self, markets):
         if not self.api_key:
@@ -43,17 +56,18 @@ class GrokNewsStrategy(BaseStrategy):
         open_mkts.sort(key=lambda m: get_volume(m), reverse=True)
         # Filter to volume >= 10 to avoid wasting Grok calls on illiquid markets
         liquid = [m for m in open_mkts if get_volume(m) >= 10]
-        candidates = liquid[:MAX_PER_CYCLE]
+        # Filter to markets where Grok might have useful info (not weather/crypto)
+        candidates = [m for m in liquid if self.should_grok_analyze(m.get('ticker', ''))][:MAX_PER_CYCLE]
 
         if candidates:
             top = candidates[0]
             logger.info(
                 f"GrokNews: {len(open_mkts)} open, {len(liquid)} with vol>=10, "
-                f"sending top {len(candidates)} to Grok. "
+                f"{len(candidates)} suitable for Grok analysis. "
                 f"Top: {top.get('ticker', '?')} vol={get_volume(top):.0f}"
             )
         else:
-            logger.info(f"GrokNews: {len(open_mkts)} open but 0 with volume>=10, skipping")
+            logger.info(f"GrokNews: {len(open_mkts)} open but 0 suitable markets for Grok, skipping")
 
         signals = []
         for m in candidates:
@@ -120,28 +134,33 @@ class GrokNewsStrategy(BaseStrategy):
             logger.debug(f"GrokNews SKIP {ticker}: confidence={grok_conf:.2f} < {MIN_CONFIDENCE}")
             return None
 
+        # FLIP Grok's recommendation — Grok is a contrarian indicator
         if grok_prob > yes_price:
-            side = 'yes'
-            model_prob = grok_prob
-            mkt_price = yes_price
-        else:
+            grok_recommended_side = 'yes'
+            # We fade Grok: if Grok says yes, we buy NO
             side = 'no'
-            model_prob = 1 - grok_prob
-            mkt_price = 1 - yes_price
+            model_prob = 1 - grok_prob  # Our probability for NO
+            mkt_price = 1 - yes_price   # Market price for NO
+        else:
+            grok_recommended_side = 'no'
+            # We fade Grok: if Grok says no, we buy YES
+            side = 'yes'
+            model_prob = grok_prob      # Our probability for YES
+            mkt_price = yes_price       # Market price for YES
 
         actual_edge = model_prob - mkt_price
         confidence = min(50 + actual_edge * 200 + grok_conf * 30, 100)
 
         logger.info(
             f"GrokNews: {ticker} grok_prob={grok_prob:.2f} market={yes_price:.2f} "
-            f"edge={actual_edge:+.2f} conf={grok_conf:.2f} -> PAPER BUY {side.upper()} - {reasoning}"
+            f"edge={actual_edge:+.2f} conf={grok_conf:.2f} -> CONTRARIAN: Grok said {grok_recommended_side.upper()}, we fade to {side.upper()} - {reasoning}"
         )
 
         return {
             'ticker': ticker, 'title': title, 'action': 'buy', 'side': side,
             'count': 5, 'confidence': confidence, 'strategy_type': 'grok_news',
             'edge': actual_edge, 'model_prob': model_prob,
-            'reason': f"GrokNews: {side.upper()} grok={grok_prob:.0%} vs market={yes_price:.0%}, edge={actual_edge:+.0%}, conf={grok_conf:.0%} - {reasoning}",
+            'reason': f"CONTRARIAN: Grok said {grok_recommended_side.upper()} (historically 8% accurate), we fade to {side.upper()}. {reasoning}",
         }
 
     def _parse_grok_response(self, text):

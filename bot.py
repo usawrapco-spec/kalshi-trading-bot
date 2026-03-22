@@ -19,10 +19,10 @@ import sys
 import time
 import argparse
 import concurrent.futures
-from datetime import datetime
+from datetime import datetime, timezone
 
 from config import Config
-from utils.logger import setup_logger
+from utils.logger import setup_logger, logger
 from utils.kalshi_client import KalshiAPIClient
 from utils.risk_manager import RiskManager
 from utils.supabase_db import SupabaseDB
@@ -375,6 +375,41 @@ class KalshiBot:
             )
         except Exception as e:
             logger.error(f"Snapshot failed: {e}")
+
+    def check_live_settlements(self, kalshi_client, db):
+        """Check if any live (real money) trades have settled"""
+        try:
+            result = db.client.table('kalshi_trades').select('*').neq(
+                'order_id', 'paper'
+            ).or_('resolved.is.null,resolved.eq.false').execute()
+
+            for trade in (result.data or []):
+                try:
+                    resp = kalshi_client.get(f'/trade-api/v2/markets/{trade["ticker"]}')
+                    if resp.status_code != 200:
+                        continue
+                    market = resp.json().get('market', {})
+                    market_result = market.get('result', '')
+
+                    if market_result in ('yes', 'no'):
+                        entry = float(trade['price'])
+                        count = trade.get('count', 1)
+                        exit_price = 1.0 if market_result == trade['side'] else 0.0
+                        pnl = (exit_price - entry) * count
+
+                        db.client.table('kalshi_trades').update({
+                            'resolved': True,
+                            'exit_price': exit_price,
+                            'pnl': pnl,
+                            'resolved_at': datetime.now(timezone.utc).isoformat(),
+                        }).eq('id', trade['id']).execute()
+
+                        log.info(f"LIVE SETTLED: {trade['ticker']} {trade['side']} "
+                                 f"→ {market_result} | PnL: ${pnl:+.4f}")
+                except:
+                    continue
+        except Exception as e:
+            log.error(f"Live settlement check failed: {e}")
 
     def _check_settlements(self):
         """Check unresolved trades for settlement. Max 20 API calls per cycle."""
@@ -918,6 +953,9 @@ class KalshiBot:
         # === PHASE 0: Housekeeping ===
         # Check settlements FIRST, before generating new signals
         self._check_settlements()
+
+        # Check live settlements (real money trades)
+        self.check_live_settlements(self.client, self.db)
 
         # Check crypto settlements (15-min markets settle fast)
         self._check_crypto_settlements()
@@ -1540,15 +1578,8 @@ class KalshiBot:
                 if entry >= 0.99:
                     continue
 
-                # Aggressive sizing by price
-                if entry < 0.10:
-                    qty = 20
-                elif entry < 0.30:
-                    qty = 10
-                elif entry < 0.50:
-                    qty = 5
-                else:
-                    qty = 3
+                # Smart position sizing based on price
+                qty = self.risk.calculate_position_size(entry, 'exploration')
 
                 traded = self.risk.record_paper_trade(
                     ticker=ticker, side=side, count=qty,
