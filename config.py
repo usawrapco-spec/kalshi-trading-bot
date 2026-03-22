@@ -29,6 +29,10 @@ class Config:
     PAPER_BALANCE = float(os.getenv('PAPER_BALANCE', 100.0))  # $100 starting balance
     ENABLE_TRADING = os.getenv('ENABLE_TRADING', 'false').lower() == 'true'  # False = paper only
 
+    # Live Strategy Control — comma-separated list of strategy names that place REAL orders
+    # Only active when ENABLE_TRADING=true. Empty = all paper.
+    LIVE_STRATEGIES = [s.strip() for s in os.getenv('LIVE_STRATEGIES', '').split(',') if s.strip()]
+
     # Strategy Toggles
     ENABLE_WEATHER = os.getenv('ENABLE_WEATHER', 'true').lower() == 'true'
     ENABLE_GROK = os.getenv('ENABLE_GROK', 'true').lower() == 'true'

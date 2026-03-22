@@ -39,6 +39,7 @@ from strategies.market_making import MarketMakingStrategy
 from dashboard import start_dashboard
 from utils.market_helpers import get_yes_price as get_yes_price_dollars, get_volume
 from utils.ai_debate import run_debate
+from utils.live_validator import is_live_strategy, validate_live_trade
 from self_improver import SelfImprover
 
 logger = setup_logger('main')
@@ -85,6 +86,15 @@ class KalshiBot:
         self.risk = RiskManager()
         self.db = SupabaseDB()
 
+        # Live trading state
+        self.open_live_positions = []  # list of {ticker, side, count, cost, strategy}
+        self.real_balance_cents = 0
+        if Config.ENABLE_TRADING and Config.LIVE_STRATEGIES:
+            logger.info(f"LIVE STRATEGIES: {Config.LIVE_STRATEGIES}")
+            self._refresh_real_balance()
+        else:
+            logger.info("ALL PAPER MODE — no live strategies configured")
+
         # Fresh start: clear old paper trades from Supabase (unless in data_collection mode)
         if self.operating_mode != 'data_collection':
             self._clear_old_trades()
@@ -94,6 +104,8 @@ class KalshiBot:
 
         self._check_balance()
         logger.info(f"Paper balance: ${self.risk.paper_balance:.2f}")
+        if self.real_balance_cents:
+            logger.info(f"Real balance: ${self.real_balance_cents / 100:.2f}")
         logger.info("=" * 60)
 
     def _init_strategies(self):
@@ -137,6 +149,82 @@ class KalshiBot:
         bal = self.client.get_balance()
         if bal:
             logger.info(f"Kalshi balance: ${bal.get('balance', 0)/100:.2f}")
+
+    def _refresh_real_balance(self):
+        """Fetch real Kalshi balance (cents)."""
+        try:
+            bal = self.client.get_balance()
+            if bal:
+                self.real_balance_cents = bal.get('balance', 0)
+                logger.info(f"Real Kalshi balance: ${self.real_balance_cents / 100:.2f}")
+        except Exception as e:
+            logger.error(f"Failed to fetch real balance: {e}")
+
+    def _place_live_order(self, sig, price_for_side, strategy_name):
+        """Attempt to place a real order on Kalshi. Returns (success, order_id_or_reason)."""
+        ticker = sig['ticker']
+        side = sig['side']
+        count = sig['count']
+        price_cents = int(price_for_side * 100)
+
+        logger.info(
+            f"LIVE ORDER ATTEMPT: {ticker} {side.upper()} x{count} "
+            f"@ ${price_for_side:.2f} [{strategy_name}]"
+        )
+
+        # Validate against live limits
+        signal_data = {
+            'entry_price': price_for_side,
+            'count': count,
+            'edge': sig.get('edge', 0),
+            'confidence': sig.get('confidence', 0),
+            'side': side,
+        }
+        approved, reason = validate_live_trade(
+            signal_data, self.real_balance_cents, self.open_live_positions
+        )
+        logger.info(f"LIVE VALIDATION: {'APPROVED' if approved else 'REJECTED'} - {reason}")
+
+        if not approved:
+            return False, reason
+
+        # Place real limit order — prices in CENTS
+        try:
+            order_params = {
+                'ticker': ticker,
+                'action': 'buy',
+                'side': side,
+                'count': count,
+                'order_type': 'limit',
+            }
+            if side == 'yes':
+                order_params['yes_price'] = price_cents
+            else:
+                order_params['no_price'] = price_cents
+
+            result = self.client.create_order(**order_params)
+
+            if result and result.get('order', {}).get('order_id'):
+                order_id = result['order']['order_id']
+                cost = count * price_for_side
+                self.open_live_positions.append({
+                    'ticker': ticker, 'side': side, 'count': count,
+                    'cost': cost, 'strategy': strategy_name, 'order_id': order_id,
+                })
+                # Refresh balance after trade
+                self._refresh_real_balance()
+                logger.info(
+                    f"LIVE ORDER PLACED: order_id={order_id} "
+                    f"{ticker} {side.upper()} x{count} @ ${price_for_side:.2f}"
+                )
+                return True, order_id
+            else:
+                err = result.get('error', str(result)) if result else 'No response'
+                logger.error(f"LIVE ORDER FAILED: {err}")
+                return False, err
+        except Exception as e:
+            logger.error(f"LIVE ORDER FAILED: {e}")
+            return False, str(e)
 
     def run_cycle(self):
         logger.info("=" * 40)
@@ -551,17 +639,33 @@ class KalshiBot:
                 if is_learning_trade:
                     strategy_name = f"{strategy_name}_LEARNING"
 
-                traded = self.risk.record_paper_trade(
-                    ticker=sig['ticker'],
-                    side=sig['side'],
-                    count=sig['count'],
-                    entry_price=price_for_side,
-                    strategy=strategy_name,
-                    title=sig.get('title', ''),
-                )
+                # --- LIVE vs PAPER routing ---
+                raw_strategy = sig.get('strategy_type', 'unknown')
+                go_live = is_live_strategy(raw_strategy)
+                order_id_or_reason = None
 
-                if not traded:
-                    continue
+                if go_live:
+                    # REAL ORDER PATH
+                    self._refresh_real_balance()
+                    success, order_id_or_reason = self._place_live_order(
+                        sig, price_for_side, strategy_name,
+                    )
+                    if not success:
+                        logger.info(f"  Live order rejected, falling back to paper: {order_id_or_reason}")
+                        go_live = False  # fall through to paper
+
+                if not go_live:
+                    # PAPER ORDER PATH (default, or live fallback)
+                    traded = self.risk.record_paper_trade(
+                        ticker=sig['ticker'],
+                        side=sig['side'],
+                        count=sig['count'],
+                        entry_price=price_for_side,
+                        strategy=strategy_name,
+                        title=sig.get('title', ''),
+                    )
+                    if not traded:
+                        continue
 
                 trades_placed += 1
                 cycle_spent += cost
@@ -573,7 +677,9 @@ class KalshiBot:
 
                 if self.db:
                     reason = sig.get('reason', '')
-                    if not is_learning_trade and debates_used > 0:
+                    if go_live:
+                        reason = f"[LIVE] {reason}"
+                    elif not is_learning_trade and debates_used > 0:
                         reason = f"[DEBATED] {reason}"
                     elif is_learning_trade:
                         reason = f"[LEARNING] {reason}"
@@ -586,8 +692,9 @@ class KalshiBot:
                         'strategy': strategy_name,
                         'reason': reason,
                         'confidence': sig.get('confidence', conf),
-                        'order_id': 'paper',
+                        'order_id': order_id_or_reason if go_live else 'paper',
                         'price': price_for_side,
+                        'is_live': go_live,
                     })
 
             # Log ALL signal evaluations (both traded and skipped) for learning
@@ -822,6 +929,17 @@ class KalshiBot:
     def _log_status(self):
         self.risk.log_status()
         status = self.risk.get_status()
+
+        # Live status logging
+        if Config.ENABLE_TRADING and Config.LIVE_STRATEGIES:
+            self._refresh_real_balance()
+            live_exposure = sum(p.get('cost', 0) for p in self.open_live_positions)
+            logger.info(
+                f"LIVE STATUS: Real balance=${self.real_balance_cents / 100:.2f}, "
+                f"Open live positions={len(self.open_live_positions)}, "
+                f"Live exposure=${live_exposure:.2f}"
+            )
+
         if self.db:
             self.db.log_bot_status({
                 'is_running': True,
@@ -829,6 +947,8 @@ class KalshiBot:
                 'trades_today': status['trades_today'],
                 'balance': status['paper_balance'],
                 'active_positions': len(status['positions']),
+                'real_balance': self.real_balance_cents / 100.0 if self.real_balance_cents else None,
+                'live_positions': len(self.open_live_positions),
             })
             # Log equity snapshot
             try:

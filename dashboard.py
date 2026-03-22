@@ -122,6 +122,39 @@ def api_improvements():
     except:
         return jsonify([])
 
+@app.route('/api/live_status')
+def api_live_status():
+    """Live trading status — real balance, live positions, live trades."""
+    try:
+        db = get_db()
+        # Get latest bot status (includes real_balance and live_positions)
+        status = db.client.table('kalshi_bot_status').select('*').order('id', desc=True).limit(1).execute()
+        real_balance = None
+        live_positions = 0
+        if status.data:
+            r = status.data[0]
+            real_balance = r.get('real_balance')
+            live_positions = r.get('live_positions', 0)
+
+        # Get recent live trades
+        live_trades = []
+        try:
+            result = db.client.table('kalshi_trades').select('*').eq('is_live', True).order('id', desc=True).limit(20).execute()
+            live_trades = result.data or []
+        except Exception:
+            pass
+
+        live_strategies_env = os.environ.get('LIVE_STRATEGIES', '')
+        return jsonify({
+            'real_balance': real_balance,
+            'live_positions': live_positions,
+            'live_trades': live_trades,
+            'live_strategies': [s.strip() for s in live_strategies_env.split(',') if s.strip()],
+            'enable_trading': os.environ.get('ENABLE_TRADING', 'false').lower() == 'true',
+        })
+    except Exception as e:
+        return jsonify({'real_balance': None, 'live_positions': 0, 'live_trades': [], 'live_strategies': [], 'error': str(e)})
+
 
 # ============================================================
 #  NEURAL CORTEX DASHBOARD — Full HTML/CSS/JS inline
@@ -230,10 +263,15 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
   <div class="hdr-left">
     <span class="dot" id="statusDot"></span>
     <span class="hdr-title">KALSHI ALPHA</span>
-    <span class="mode-badge">PAPER TRADING</span>
+    <span class="mode-badge" id="modeBadge">PAPER TRADING</span>
+    <span id="liveBadge" style="display:none;font-size:.65rem;padding:2px 8px;border:1px solid rgba(255,60,60,0.5);border-radius:2px;color:#ff3c3c;letter-spacing:0.1em;text-shadow:0 0 6px rgba(255,60,60,0.3)">LIVE</span>
   </div>
   <div style="display:flex;align-items:center;gap:16px">
     <span class="hdr-meta">scan: <span data-field="last_scan">—</span></span>
+    <span id="realBalLabel" style="display:none;font-size:.7rem;color:rgba(255,60,60,0.6)">Real:</span>
+    <span id="realBal" style="display:none;font-size:1.1rem;font-weight:700;color:#ff3c3c;text-shadow:0 0 8px rgba(255,60,60,0.3)">$—</span>
+    <span class="hdr-meta" style="color:rgba(255,255,255,0.15)">|</span>
+    <span style="font-size:.7rem;color:rgba(0,240,255,0.4)">Paper:</span>
     <span class="hdr-bal" data-field="balance">$—</span>
   </div>
 </div>
@@ -480,9 +518,20 @@ async function fetchJ(url){try{const r=await fetch(url);return r.ok?await r.json
 
 async function refreshAll(){
   scanPulse();
-  const[status,trades,strats,equity,signals]=await Promise.all([
-    fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals')
+  const[status,trades,strats,equity,signals,live]=await Promise.all([
+    fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals'),fetchJ('/api/live_status')
   ]);
+
+  // LIVE STATUS
+  if(live&&live.enable_trading&&live.live_strategies&&live.live_strategies.length){
+    document.getElementById('liveBadge').style.display='inline';
+    document.getElementById('modeBadge').textContent='HYBRID';
+    if(live.real_balance!==null&&live.real_balance!==undefined){
+      document.getElementById('realBalLabel').style.display='inline';
+      document.getElementById('realBal').style.display='inline';
+      document.getElementById('realBal').textContent='$'+live.real_balance.toFixed(2);
+    }
+  }
 
   // STATUS
   if(status){
@@ -522,16 +571,23 @@ async function refreshAll(){
       const side=(t.side||'').toUpperCase();
       const reason=(t.reason||'').toUpperCase();
       const isW=reason.includes('WIN'),isL=reason.includes('LOSS');
-      return`<tr><td style="color:rgba(255,255,255,0.2)">${fmt(t.timestamp||t.created_at)}</td><td style="color:#00f0ff">${s}</td><td>${(t.ticker||'').substring(0,28)}</td><td style="color:${side==='YES'?'#39ff14':'#ff6d00'}">${side}</td><td>$${(t.price||0).toFixed(2)}</td><td style="color:${isW?'#39ff14':isL?'#ff3333':'rgba(255,255,255,0.2)'}">${isW?'WIN':isL?'LOSS':'OPEN'}</td></tr>`;
+      const isLive=t.is_live||reason.includes('[LIVE]');
+      const liveBorder=isLive?'border-left:3px solid #ff3c3c;':'';
+      const liveTag=isLive?'<span style="color:#ff3c3c;font-size:.6rem;margin-left:4px">LIVE</span>':'';
+      return`<tr style="${liveBorder}"><td style="color:rgba(255,255,255,0.2)">${fmt(t.timestamp||t.created_at)}</td><td style="color:${isLive?'#ff3c3c':'#00f0ff'}">${s}${liveTag}</td><td>${(t.ticker||'').substring(0,28)}</td><td style="color:${side==='YES'?'#39ff14':'#ff6d00'}">${side}</td><td>$${(t.price||0).toFixed(2)}</td><td style="color:${isW?'#39ff14':isL?'#ff3333':'rgba(255,255,255,0.2)'}">${isW?'WIN':isL?'LOSS':'OPEN'}</td></tr>`;
     }).join('');
   }
 
   // STRATEGIES
   if(strats&&strats.length){
     const el=document.getElementById('stratLayers');
+    const liveStrats=(live&&live.live_strategies)||[];
     el.innerHTML=strats.map(s=>{
-      const name=(s.strategy||'?').replace(/_/g,' ');
-      return`<div class="strat-row"><span class="strat-name">${name}</span><span class="strat-count">${s.trades||0} trades</span></div>`;
+      const raw=s.strategy||'?';
+      const name=raw.replace(/_/g,' ');
+      const isLiveStrat=liveStrats.some(ls=>raw.toLowerCase().includes(ls.toLowerCase()));
+      const badge=isLiveStrat?'<span style="color:#ff3c3c;font-size:.55rem;margin-left:4px;border:1px solid rgba(255,60,60,0.4);padding:0 3px;border-radius:1px">LIVE</span>':'';
+      return`<div class="strat-row"><span class="strat-name">${name}${badge}</span><span class="strat-count">${s.trades||0} trades</span></div>`;
     }).join('');
   }
 
