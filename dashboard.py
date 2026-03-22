@@ -255,6 +255,56 @@ def api_improvements():
     except:
         return jsonify([])
 
+@app.route('/api/swing')
+def api_swing():
+    """Swing trading data — non-weather paper positions and closed swing trades."""
+    try:
+        db = get_db()
+        # Open non-weather paper positions
+        open_result = db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').eq('resolved', False).execute()
+        non_weather = [t for t in (open_result.data or [])
+                       if t.get('strategy') != 'weather_edge'
+                       and not (t.get('ticker') or '').startswith('KXHIGH')
+                       and not (t.get('ticker') or '').startswith('KXLOWT')]
+
+        # Closed swing trades (resolved paper, non-weather, with SWING in reason)
+        closed_result = db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').eq('resolved', True).execute()
+        swing_closed = [t for t in (closed_result.data or [])
+                        if t.get('strategy') != 'weather_edge'
+                        and not (t.get('ticker') or '').startswith('KXHIGH')
+                        and not (t.get('ticker') or '').startswith('KXLOWT')
+                        and 'SWING' in (t.get('reason') or '').upper()]
+
+        total_pnl = sum(t.get('pnl', 0) or 0 for t in swing_closed)
+        wins = sum(1 for t in swing_closed if (t.get('pnl', 0) or 0) > 0)
+        losses = sum(1 for t in swing_closed if (t.get('pnl', 0) or 0) <= 0)
+
+        return jsonify({
+            'open_positions': len(non_weather),
+            'closed_trades': len(swing_closed),
+            'total_pnl': round(total_pnl, 4),
+            'wins': wins,
+            'losses': losses,
+            'positions': [{
+                'ticker': t.get('ticker', ''),
+                'strategy': t.get('strategy', ''),
+                'side': t.get('side', ''),
+                'entry': t.get('price', 0),
+                'count': t.get('count', 0),
+                'cost': round((t.get('price', 0) or 0) * (t.get('count', 0) or 0), 4),
+            } for t in non_weather[:20]],
+            'recent_closes': [{
+                'ticker': t.get('ticker', ''),
+                'side': t.get('side', ''),
+                'entry': t.get('price', 0),
+                'exit': t.get('exit_price', 0),
+                'pnl': t.get('pnl', 0),
+                'reason': (t.get('reason') or '')[:80],
+            } for t in swing_closed[-10:]],
+        })
+    except Exception:
+        return jsonify({'open_positions': 0, 'closed_trades': 0, 'total_pnl': 0, 'wins': 0, 'losses': 0, 'positions': [], 'recent_closes': []})
+
 @app.route('/api/live_status')
 def api_live_status():
     """Live trading status — real balance, live positions, live trades."""
@@ -464,6 +514,27 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
         <div class="metric-sub" id="paper-wl-record">—W / —L</div>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- SWING TRADING PANEL -->
+<div class="panel" id="swingPanel" style="margin:10px 16px;border-color:rgba(255,200,0,0.3);background:rgba(255,200,0,0.02)">
+  <div class="panel-title" style="color:#ffc800;display:flex;justify-content:space-between;align-items:center">
+    <span>&#x1f4c8; SWING TRADING (Paper)</span>
+    <span id="swing-summary" style="font-size:.65rem;color:rgba(255,255,255,0.3)">Loading...</span>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:0 14px 8px">
+    <div class="metric"><div class="metric-label">Open</div><div class="metric-value" id="swing-open" style="color:#ffc800">—</div></div>
+    <div class="metric"><div class="metric-label">Sells</div><div class="metric-value" id="swing-sells" style="color:#39ff14">0</div></div>
+    <div class="metric"><div class="metric-label">Cuts</div><div class="metric-value" id="swing-cuts" style="color:#ff3333">0</div></div>
+    <div class="metric"><div class="metric-label">Win Rate</div><div class="metric-value" id="swing-wr" style="color:#ffc800">—%</div></div>
+    <div class="metric"><div class="metric-label">Swing P&L</div><div class="metric-value" id="swing-pnl" style="color:#ffc800">$0.00</div></div>
+  </div>
+  <div style="max-height:140px;overflow-y:auto;padding:0 14px 10px">
+    <table class="ttable" style="font-size:.65rem">
+      <thead><tr><th>Ticker</th><th>Strategy</th><th>Side</th><th>Entry</th><th>Qty</th><th>Cost</th></tr></thead>
+      <tbody id="swingBody"><tr><td colspan="6" style="color:rgba(255,255,255,0.15)">No swing positions</td></tr></tbody>
+    </table>
   </div>
 </div>
 
@@ -685,8 +756,8 @@ async function fetchJ(url){try{const r=await fetch(url);return r.ok?await r.json
 
 async function refreshAll(){
   scanPulse();
-  const[status,trades,strats,equity,signals,live,debates,improvements]=await Promise.all([
-    fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals'),fetchJ('/api/live_status'),fetchJ('/api/debates'),fetchJ('/api/improvements')
+  const[status,trades,strats,equity,signals,live,debates,improvements,swing]=await Promise.all([
+    fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals'),fetchJ('/api/live_status'),fetchJ('/api/debates'),fetchJ('/api/improvements'),fetchJ('/api/swing')
   ]);
 
   // LIVE STATUS — header shows portfolio value (cash + positions)
@@ -869,6 +940,28 @@ async function refreshAll(){
     const el=document.getElementById('learnFeed');
     const nextRun=new Date();nextRun.setHours(nextRun.getHours()+(6-nextRun.getHours()%6),0,0,0);
     el.innerHTML='<div style="color:rgba(255,255,255,0.15)">Self-improvement analysis runs every 6 hours. Next run: '+nextRun.toLocaleTimeString()+'</div>';
+  }
+
+  // SWING TRADING PANEL
+  if(swing){
+    document.getElementById('swing-open').textContent=swing.open_positions||0;
+    document.getElementById('swing-sells').textContent=swing.wins||0;
+    document.getElementById('swing-cuts').textContent=swing.losses||0;
+    const swWr=(swing.wins+swing.losses)>0?((swing.wins/(swing.wins+swing.losses))*100).toFixed(0):'—';
+    document.getElementById('swing-wr').textContent=swWr+'%';
+    const swPnl=swing.total_pnl||0;
+    document.getElementById('swing-pnl').textContent=(swPnl>=0?'+$':'-$')+Math.abs(swPnl).toFixed(2);
+    document.getElementById('swing-pnl').className='metric-value '+(swPnl>=0?'profit':'loss');
+    document.getElementById('swing-summary').textContent=swing.closed_trades+' closed | '+swing.open_positions+' open';
+    const sb=document.getElementById('swingBody');
+    if(swing.positions&&swing.positions.length){
+      sb.innerHTML=swing.positions.map(p=>{
+        const side=(p.side||'').toUpperCase();
+        return`<tr><td style="color:#ffc800">${(p.ticker||'').substring(0,28)}</td><td>${(p.strategy||'').replace(/_/g,' ')}</td><td style="color:${side==='YES'?'#39ff14':'#ff6d00'}">${side}</td><td>$${(p.entry||0).toFixed(2)}</td><td>${p.count||0}</td><td>$${(p.cost||0).toFixed(2)}</td></tr>`;
+      }).join('');
+    }else{
+      sb.innerHTML='<tr><td colspan="6" style="color:rgba(255,255,255,0.15)">No swing positions</td></tr>';
+    }
   }
 }
 

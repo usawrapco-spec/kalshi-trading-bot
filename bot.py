@@ -100,6 +100,7 @@ class KalshiBot:
         self._reconstruct_state_from_db()
 
         self.strategies = []
+        self._swing_cycle_offset = 0  # Rotate through swing positions across cycles
         self._init_strategies()
 
         self._check_balance()
@@ -326,12 +327,262 @@ class KalshiBot:
         except Exception as e:
             logger.error(f"Settlement check failed: {e}")
 
+    def _evaluate_exits(self):
+        """Evaluate open live positions for profit-taking / loss-cutting."""
+        if not self.db or not self.db.client:
+            return 0.0
+        try:
+            live_open = self.db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').eq('resolved', False).execute()
+            if not live_open.data:
+                return 0.0
+
+            exits_taken = 0
+            capital_freed = 0.0
+            checked = 0
+
+            for trade in live_open.data:
+                if checked >= 15:  # Limit API calls
+                    break
+                ticker = trade.get('ticker', '')
+                if not ticker:
+                    continue
+
+                try:
+                    checked += 1
+                    market_data = self.client.get_market(ticker)
+                    if not market_data:
+                        continue
+                    market = market_data.get('market', market_data)
+
+                    # Already settled? Skip — _check_settlements handles that
+                    if market.get('result'):
+                        continue
+
+                    side = trade.get('side', 'yes')
+                    cost_basis = trade.get('price', 0)
+                    count = trade.get('count', 1)
+
+                    if side == 'yes':
+                        raw_bid = market.get('yes_bid', market.get('yes_bid_dollars', 0))
+                    else:
+                        raw_bid = market.get('no_bid', market.get('no_bid_dollars', 0))
+                    current_bid = float(raw_bid) if raw_bid else 0
+                    if current_bid > 1.0:
+                        current_bid = current_bid / 100.0
+
+                    if current_bid <= 0.01 or cost_basis <= 0:
+                        continue  # No liquidity or bad data
+
+                    unrealized_pct = (current_bid - cost_basis) / cost_basis
+
+                    # --- Get fresh model edge from weather strategy cache ---
+                    current_edge = None
+                    for strat in self.strategies:
+                        if hasattr(strat, '_cache_high'):
+                            # Re-evaluate using the strategy's _evaluate method
+                            sig = strat._evaluate(market)
+                            if sig:
+                                current_edge = sig.get('edge', 0)
+                            break
+
+                    # --- DECISION MATRIX ---
+                    should_sell = False
+                    reason = ""
+
+                    # Rule 1: Up 100%+ and edge shrunk below 20%
+                    if unrealized_pct >= 1.00 and current_edge is not None and current_edge < 0.20:
+                        should_sell = True
+                        reason = f"TAKE PROFIT: +{unrealized_pct:.0%}, edge={current_edge:.0%}"
+
+                    # Rule 2: Up 50%+ and edge < 10%
+                    if unrealized_pct >= 0.50 and current_edge is not None and current_edge < 0.10:
+                        should_sell = True
+                        reason = f"EDGE GONE: +{unrealized_pct:.0%}, edge={current_edge:.0%}"
+
+                    # Rule 3: Edge reversed (model says we're wrong)
+                    if current_edge is not None and current_edge < -0.10:
+                        should_sell = True
+                        reason = f"EDGE REVERSED: edge={current_edge:.0%}"
+
+                    # Rule 4: Bought cheap (≤15c), now worth ≥50c — lock big gain
+                    if current_bid >= 0.50 and cost_basis <= 0.15:
+                        should_sell = True
+                        reason = f"LOCK BIG GAIN: ${cost_basis:.2f}->${current_bid:.2f} (+{unrealized_pct:.0%})"
+
+                    # Rule 5: HOLD override — model still very confident with big edge
+                    if current_edge is not None and current_edge >= 0.30:
+                        # Check model prob from the signal
+                        for strat in self.strategies:
+                            if hasattr(strat, '_cache_high'):
+                                sig = strat._evaluate(market)
+                                if sig and sig.get('model_prob', 0) >= 0.90:
+                                    should_sell = False
+                                    reason = f"HOLD: model={sig['model_prob']:.0%}, edge={current_edge:.0%}"
+                                break
+
+                    if should_sell:
+                        logger.info(f"EXIT: {ticker} — {reason}")
+                        logger.info(f"  Cost: ${cost_basis:.2f} -> Bid: ${current_bid:.2f} ({unrealized_pct:+.0%})")
+
+                        price_cents = int(current_bid * 100)
+                        sell_params = {
+                            'ticker': ticker, 'action': 'sell', 'side': side,
+                            'count': count, 'order_type': 'limit',
+                        }
+                        if side == 'yes':
+                            sell_params['yes_price'] = price_cents
+                        else:
+                            sell_params['no_price'] = price_cents
+
+                        result = self.client.create_order(**sell_params)
+                        if result and result.get('order_id'):
+                            pnl = (current_bid - cost_basis) * count
+                            self.db.client.table('kalshi_trades').update({
+                                'resolved': True,
+                                'exit_price': current_bid,
+                                'pnl': round(pnl, 4),
+                                'resolved_at': datetime.utcnow().isoformat(),
+                                'reason': f"[EXIT] {reason}",
+                            }).eq('id', trade['id']).execute()
+
+                            exits_taken += 1
+                            capital_freed += current_bid * count
+                            logger.info(f"SOLD: {ticker} P&L=${pnl:+.2f} (freed ${current_bid * count:.2f})")
+                        else:
+                            logger.warning(f"Sell order failed for {ticker}")
+                    else:
+                        logger.debug(f"HOLD: {ticker} cost=${cost_basis:.2f} bid=${current_bid:.2f} edge={current_edge}")
+
+                except Exception as e:
+                    logger.debug(f"Exit eval failed for {ticker}: {e}")
+                    continue
+
+            if exits_taken > 0:
+                logger.info(f"EXITS: Sold {exits_taken} positions, freed ${capital_freed:.2f}")
+            return capital_freed
+        except Exception as e:
+            logger.error(f"Exit evaluation failed: {e}")
+            return 0.0
+
+    def _monitor_swings(self):
+        """Monitor non-weather paper positions for swing trade exits (paper only)."""
+        if not self.db or not self.db.client:
+            return
+        try:
+            open_trades = self.db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').eq('resolved', False).execute()
+            if not open_trades.data:
+                return
+
+            non_weather = [t for t in open_trades.data
+                          if t.get('strategy') != 'weather_edge'
+                          and not (t.get('ticker') or '').startswith('KXHIGH')
+                          and not (t.get('ticker') or '').startswith('KXLOWT')]
+
+            if not non_weather:
+                return
+
+            # Rotate through positions: check 10 per cycle
+            batch_size = 10
+            start = self._swing_cycle_offset % max(len(non_weather), 1)
+            batch = non_weather[start:start + batch_size]
+            if len(batch) < batch_size:
+                batch += non_weather[:batch_size - len(batch)]
+            self._swing_cycle_offset += batch_size
+
+            from utils.market_helpers import get_yes_price, get_no_price
+
+            summary = {"sells": 0, "holds": 0, "cuts": 0, "pnl": 0.0}
+
+            for trade in batch:
+                ticker = trade.get('ticker', '')
+                try:
+                    market_data = self.client.get_market(ticker)
+                    if not market_data:
+                        continue
+                    market = market_data.get('market', market_data) if market_data else {}
+
+                    if trade.get('side') == 'yes':
+                        current_price = get_yes_price(market)
+                    else:
+                        current_price = get_no_price(market)
+
+                    entry = trade.get('price', 0)
+                    count = trade.get('count', 1)
+                    if entry <= 0 or current_price <= 0:
+                        continue
+
+                    pct_change = (current_price - entry) / entry
+                    dollar_change = (current_price - entry) * count
+
+                    action = "HOLD"
+                    reason = ""
+
+                    # Tiered profit/loss thresholds by contract price
+                    if entry >= 0.70:
+                        if pct_change >= 0.07:
+                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on ${entry:.2f} contract"
+                        elif pct_change <= -0.05:
+                            action, reason = "CUT", f"STOP LOSS: {pct_change:.0%} on ${entry:.2f} contract"
+                    elif entry >= 0.50:
+                        if pct_change >= 0.10:
+                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on ${entry:.2f} contract"
+                        elif pct_change <= -0.07:
+                            action, reason = "CUT", f"STOP LOSS: {pct_change:.0%} on ${entry:.2f} contract"
+                    elif entry >= 0.30:
+                        if pct_change >= 0.15:
+                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on ${entry:.2f} contract"
+                        elif pct_change <= -0.10:
+                            action, reason = "CUT", f"STOP LOSS: {pct_change:.0%} on ${entry:.2f} contract"
+                    elif entry >= 0.10:
+                        if pct_change >= 0.20:
+                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on ${entry:.2f} contract"
+                        elif pct_change <= -0.25:
+                            action, reason = "CUT", f"STOP LOSS: {pct_change:.0%}"
+                    else:
+                        # < 10c: lottery tickets — only sell at +50%, never cut
+                        if pct_change >= 0.50:
+                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on cheap contract"
+
+                    if action in ("SELL", "CUT"):
+                        pnl = dollar_change
+                        self.db.client.table('kalshi_trades').update({
+                            'resolved': True,
+                            'exit_price': current_price,
+                            'pnl': round(pnl, 4),
+                            'resolved_at': datetime.utcnow().isoformat(),
+                            'reason': f"[SWING {action}] {reason}",
+                        }).eq('id', trade['id']).execute()
+
+                        emoji = "\U0001f4c8" if action == "SELL" else "\U0001f4c9"
+                        logger.info(f"{emoji} SWING {action}: {ticker} {reason} | Entry=${entry:.2f} Exit=${current_price:.2f} P&L=${pnl:+.2f}")
+                        summary["sells" if action == "SELL" else "cuts"] += 1
+                        summary["pnl"] += pnl
+                    else:
+                        logger.debug(f"SWING HOLD: {ticker} entry=${entry:.2f} now=${current_price:.2f} ({pct_change:+.0%})")
+                        summary["holds"] += 1
+
+                except Exception as e:
+                    logger.debug(f"Swing check failed for {ticker}: {e}")
+                    continue
+
+            if summary["sells"] > 0 or summary["cuts"] > 0:
+                logger.info(f"\U0001f4ca SWING SUMMARY: {summary['sells']} sells, {summary['cuts']} cuts, {summary['holds']} holds, P&L=${summary['pnl']:+.2f}")
+
+        except Exception as e:
+            logger.error(f"Swing monitor failed: {e}")
+
     def run_cycle(self):
         logger.info("=" * 40)
         logger.info(f"Cycle at {datetime.now().isoformat()}")
 
         # Check settlements FIRST, before generating new signals
         self._check_settlements()
+
+        # Evaluate exits on open positions (profit-taking / loss-cutting)
+        self._evaluate_exits()
+
+        # Monitor non-weather paper positions for swing exits
+        self._monitor_swings()
 
         if not self.risk.check_daily_loss_limit():
             logger.warning("Daily loss stop - halting")
