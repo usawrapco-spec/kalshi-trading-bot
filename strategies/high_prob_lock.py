@@ -65,9 +65,9 @@ class HighProbLockStrategy(BaseStrategy):
 
             checked += 1
 
-        # Cap to top 3 - each costs ~$0.95 so 3 = ~$2.85 from $10 balance
+        import os as _os; _max = 50 if float(_os.environ.get('PAPER_BALANCE', '100000')) >= 1000 else 3
         signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
-        signals = signals[:3]
+        signals = signals[:_max]
         logger.info(f"HighProbLock: {in_range} markets in {LOCK_MIN:.0%}-{LOCK_MAX:.0%} range, {len(signals)} signals (top 3)")
         return signals
 

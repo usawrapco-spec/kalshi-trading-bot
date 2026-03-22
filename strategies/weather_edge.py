@@ -131,10 +131,10 @@ class WeatherEdgeStrategy(BaseStrategy):
             if sig:
                 signals.append(sig)
 
-        # Cap to best 10 signals to leave room for other strategies
+        import os as _os; _max = 100 if float(_os.environ.get('PAPER_BALANCE', '100000')) >= 1000 else 10
         signals.sort(key=lambda s: s.get('edge', 0), reverse=True)
-        signals = signals[:10]
-        logger.info(f"WeatherEdge: {len(signals)} signals (top 10 by edge) from {len(temp_markets)} candidates")
+        signals = signals[:_max]
+        logger.info(f"WeatherEdge: {len(signals)} signals (top {_max} by edge) from {len(temp_markets)} candidates")
         return signals
 
     def _is_weather(self, m):

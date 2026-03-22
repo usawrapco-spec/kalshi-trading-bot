@@ -10,8 +10,11 @@ from utils.market_helpers import get_yes_cents, get_volume
 
 logger = setup_logger('sports_no')
 
-FADE_MIN = 60
-FADE_MAX = 85
+import os as _os
+_aggressive_paper = float(_os.environ.get('PAPER_BALANCE', '100000')) >= 1000
+
+FADE_MIN = 30 if _aggressive_paper else 60   # Paper: 30-95c, Live: 60-85c
+FADE_MAX = 95 if _aggressive_paper else 85
 
 SPORTS_KEYWORDS = [
     'ncaa', 'ncaab', 'ncaaf', 'nba', 'nfl', 'nhl', 'mlb', 'mls',
@@ -94,10 +97,11 @@ class SportsNOStrategy(BaseStrategy):
                 'reason': f"SportsNO: fade YES={yes_cents}c, buy NO={no_cents}c, est_win={est_no_prob:.0%}, edge={edge:+.0%}",
             })
 
-        # Keep top 5 by confidence
+        # Keep top signals by confidence
         signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
         top_edge = f"{signals[0]['edge']:+.0%}" if signals else '0'
-        signals = signals[:5]
+        max_signals = 50 if _aggressive_paper else 5
+        signals = signals[:max_signals]
         logger.info(
             f"SportsNO: {sports_count} sports markets, {in_range} in range, "
             f"top edge={top_edge}, returning {len(signals)} signals"

@@ -1245,37 +1245,23 @@ class KalshiBot:
 
         else:
             # LIVE PAPER/REAL MODE: Normal trading with risk management
-            logger.info("📈 LIVE TRADING: Processing signals with risk management...")
+            _aggressive_paper = Config.PAPER_BALANCE >= 1000
+            mode_label = "AGGRESSIVE PAPER" if _aggressive_paper else "LIVE TRADING"
+            logger.info(f"{mode_label}: Processing {len(all_signals)} signals...")
 
-            # LEARNING ALLOCATION SYSTEM
-            LEARNING_ALLOCATION = 0.15  # 15% of balance for learning
-            PRODUCTION_ALLOCATION = 0.85  # 85% for production
-
-            learning_budget = self.risk.paper_balance * LEARNING_ALLOCATION
-            production_budget = self.risk.paper_balance * PRODUCTION_ALLOCATION
-
-            MAX_TRADES = int(os.environ.get("MAX_TRADES_PER_CYCLE", 50))
-            MAX_CYCLE_SPEND = min(10.00, production_budget)  # Cap at production budget
+            MAX_TRADES = 999 if _aggressive_paper else int(os.environ.get("MAX_TRADES_PER_CYCLE", 50))
+            MAX_CYCLE_SPEND = 50000.0 if _aggressive_paper else 10.00
             all_signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
-            logger.info(f"Total signals across all strategies: {len(all_signals)}")
-            logger.info(f"Learning budget: ${learning_budget:.2f}, Production budget: ${production_budget:.2f}")
 
             trades_placed = 0
             cycle_spent = 0.0
-            learning_spent = 0.0
-            production_spent = 0.0
             debates_used = 0
-            MAX_DEBATES = 4  # Max 4 AI calls per cycle (2 per trade x 2 trades)
 
             for sig in all_signals:
-                if trades_placed >= MAX_TRADES:
+                if trades_placed >= MAX_TRADES or cycle_spent >= MAX_CYCLE_SPEND:
                     break
 
-                # Determine if this is a learning trade or production trade
-                is_learning_trade = (learning_spent < learning_budget and
-                                   sig.get('confidence', 0) < 70)  # Lower confidence = learning
-
-                # Calculate price and Kelly sizing
+                # Calculate price
                 edge = sig.get('edge', 0)
                 prob = sig.get('model_prob', 0.5)
                 price = get_yes_price_dollars(
@@ -1283,95 +1269,47 @@ class KalshiBot:
                 ) or 0.50
                 price_for_side = price if sig['side'] == 'yes' else (1 - price)
 
+                # Kelly sizing
                 if edge > 0 and prob > 0:
                     sig['count'] = self.risk.kelly_size(edge, prob, int(price_for_side * 100))
 
                 cost = sig['count'] * price_for_side
 
-                # Check budget constraints
-                if is_learning_trade:
-                    if learning_spent + cost > learning_budget:
-                        remaining = learning_budget - learning_spent
-                        if remaining < price_for_side:
-                            continue
-                        sig['count'] = max(1, int(remaining / price_for_side))
-                        cost = sig['count'] * price_for_side
-                else:
-                    if production_spent + cost > production_budget:
-                        remaining = production_budget - production_spent
-                        if remaining < price_for_side:
-                            continue
-                        sig['count'] = max(1, int(remaining / price_for_side))
-                        cost = sig['count'] * price_for_side
-
-                # Asymmetric reward filter (Soros Rule)
-                if not self.risk.passes_asymmetric_check(price_for_side, sig['side'], sig.get('confidence', 0)):
-                    logger.info(f"  SKIP {sig['ticker']}: fails asymmetric reward check (not 2:1 reward-to-risk)")
-                    continue
-
-                trade_type = "LEARNING" if is_learning_trade else "PRODUCTION"
-                conf = sig.get('confidence', 0)
-                logger.info(
-                    f"{trade_type} PICK: {sig['ticker']} BUY {sig['side'].upper()} x{sig['count']} "
-                    f"conf={conf:.0f} edge={edge:+.2f} cost=${cost:.2f} "
-                    f"[{sig.get('strategy_type', '?')}]"
-                )
-
-                # SPEED OPTIMIZATION: Skip AI debate for speed-sensitive strategies
-                # Scalp strategies skip debate entirely — speed > consensus
-                strategy_name = sig.get('strategy_type', 'unknown')
-                SKIP_DEBATE_STRATEGIES = {
-                    'weather_edge', 'weather_intraday',
-                    'crypto_momentum', 'market_making_scalp',
-                    'prob_arb', 'market_making', 'orderbook_edge',
-                    'near_certainty', 'high_prob_lock', 'sports_no',
-                    'forced_paper', 'precip_edge', 'cross_platform',
-                }
-                DEBATE_STRATEGIES = {'GrokNewsAnalysis', 'grok_news', 'MentionMarkets', 'mention_markets'}
-
-                # Skip debate if this is a scalp/data-driven strategy
-                if strategy_name.lower() in SKIP_DEBATE_STRATEGIES:
-                    needs_debate = False
-                else:
-                    needs_debate = any(ds.lower() in strategy_name.lower() for ds in DEBATE_STRATEGIES)
-
-                if needs_debate and not is_learning_trade and debates_used < MAX_DEBATES:
-                    should_trade, sig, debate_log = run_debate(sig, price)
-                    debates_used += 2  # Each debate uses 2 API calls
-
-                    # Log debate to Supabase
-                    if self.db:
-                        try:
-                            self.db.client.table('debate_log').insert({
-                                'timestamp': datetime.utcnow().isoformat(),
-                                'ticker': sig.get('ticker', ''),
-                                'market_title': sig.get('title', sig.get('ticker', '')),
-                                'grok_probability': sig.get('model_prob'),
-                                'grok_recommendation': 'TRADE' if should_trade else 'SKIP',
-                                'claude_probability': sig.get('claude_probability'),
-                                'claude_recommendation': sig.get('claude_recommendation'),
-                                'agreement': sig.get('debate_agreement', False),
-                                'final_decision': 'TRADE' if should_trade else 'SKIP',
-                                'size_modifier': sig.get('count', 1) / max(sig.get('original_count', sig.get('count', 1)), 1),
-                                'votes': debate_log.split(':')[0] if ':' in debate_log else debate_log,
-                            }).execute()
-                        except Exception as e:
-                            logger.error(f"Failed to log debate: {e}")
-
-                    if not should_trade:
-                        logger.info(f"  Trade vetoed by debate: {debate_log}")
+                # Asymmetric reward filter — SKIP for aggressive paper (trade everything)
+                if not _aggressive_paper:
+                    if not self.risk.passes_asymmetric_check(price_for_side, sig['side'], sig.get('confidence', 0)):
+                        logger.debug(f"  SKIP {sig['ticker']}: fails asymmetric reward check")
                         continue
-                elif needs_debate and is_learning_trade:
-                    logger.info(f"  Learning trade - skipping debate to save API costs")
-                elif needs_debate:
-                    logger.info(f"  Debate limit reached, trading without debate")
-                else:
-                    logger.info(f"  Data-driven strategy ({strategy_name}) - skipping debate for speed")
 
-                # Mark strategy for learning vs production
+                conf = sig.get('confidence', 0)
                 strategy_name = sig.get('strategy_type', 'unknown')
-                if is_learning_trade:
-                    strategy_name = f"{strategy_name}_LEARNING"
+
+                # DEBATE: Skip ALL debates in aggressive paper mode
+                if not _aggressive_paper:
+                    DEBATE_STRATEGIES = {'GrokNewsAnalysis', 'grok_news', 'MentionMarkets', 'mention_markets'}
+                    needs_debate = any(ds.lower() in strategy_name.lower() for ds in DEBATE_STRATEGIES)
+                    if needs_debate and debates_used < 4:
+                        should_trade, sig, debate_log = run_debate(sig, price)
+                        debates_used += 2
+                        if self.db:
+                            try:
+                                self.db.client.table('debate_log').insert({
+                                    'timestamp': datetime.utcnow().isoformat(),
+                                    'ticker': sig.get('ticker', ''),
+                                    'market_title': sig.get('title', sig.get('ticker', '')),
+                                    'grok_probability': sig.get('model_prob'),
+                                    'grok_recommendation': 'TRADE' if should_trade else 'SKIP',
+                                    'claude_probability': sig.get('claude_probability'),
+                                    'claude_recommendation': sig.get('claude_recommendation'),
+                                    'agreement': sig.get('debate_agreement', False),
+                                    'final_decision': 'TRADE' if should_trade else 'SKIP',
+                                    'size_modifier': sig.get('count', 1) / max(sig.get('original_count', sig.get('count', 1)), 1),
+                                    'votes': debate_log.split(':')[0] if ':' in debate_log else debate_log,
+                                }).execute()
+                            except Exception as e:
+                                logger.error(f"Failed to log debate: {e}")
+                        if not should_trade:
+                            continue
 
                 # --- LIVE vs PAPER routing ---
                 raw_strategy = sig.get('strategy_type', 'unknown')
@@ -1380,11 +1318,10 @@ class KalshiBot:
                 tier = None
 
                 if go_live:
-                    # TIERED SIZING for live trades
+                    # TIERED SIZING for live trades (unchanged — live is conservative)
                     self._refresh_real_balance()
                     balance_dollars = self.real_balance_cents / 100.0
 
-                    # Calculate hours to close for tier scoring
                     market_obj = next((m for m in markets if m.get('ticker') == sig['ticker']), {})
                     htc = hours_until_close(market_obj.get('close_time') or market_obj.get('expiration_time'))
 
@@ -1397,7 +1334,6 @@ class KalshiBot:
                     tier, tier_score, tier_reasons = rate_signal(tier_signal, htc)
                     tier_count = size_by_tier(tier, price_for_side, balance_dollars)
 
-                    # Check portfolio-level limits
                     try:
                         open_live = self.db.client.table('kalshi_trades').select('price,count').neq('order_id', 'paper').eq('resolved', False).execute()
                         current_exposure = sum(t.get('price', 0) * t.get('count', 0) for t in (open_live.data or []))
@@ -1431,7 +1367,7 @@ class KalshiBot:
                             go_live = False
 
                 if not go_live:
-                    # PAPER ORDER PATH (default, or live fallback)
+                    # PAPER ORDER PATH
                     traded = self.risk.record_paper_trade(
                         ticker=sig['ticker'],
                         side=sig['side'],
@@ -1446,20 +1382,11 @@ class KalshiBot:
                 trades_placed += 1
                 cycle_spent += cost
 
-                if is_learning_trade:
-                    learning_spent += cost
-                else:
-                    production_spent += cost
-
                 if self.db:
                     reason = sig.get('reason', '')
                     tier_tag = f"[{tier}] " if tier else ""
                     if go_live:
                         reason = f"[LIVE] {tier_tag}{reason}"
-                    elif not is_learning_trade and debates_used > 0:
-                        reason = f"[DEBATED] {reason}"
-                    elif is_learning_trade:
-                        reason = f"[LEARNING] {reason}"
 
                     self.db.log_trade({
                         'ticker': sig['ticker'],
@@ -1495,6 +1422,10 @@ class KalshiBot:
 
             logger.info(f"Cycle done: {trades_placed} trades, ${cycle_spent:.2f} spent")
 
+            # === EXPLORATION TRADES (paper only, aggressive mode) ===
+            if _aggressive_paper:
+                self._exploration_trades(markets, trades_placed)
+
         # Forced paper trade if nothing fired
         if len(all_signals) == 0:
             logger.info("No signals from any strategy - forcing paper trade")
@@ -1508,6 +1439,75 @@ class KalshiBot:
             self._check_virtual_settlements()
 
         self._log_status()
+
+    def _exploration_trades(self, markets, already_traded_count):
+        """Random exploration trades — paper only. Trade random untouched markets for data."""
+        import random
+        if not markets:
+            return
+
+        # Get tickers we already have positions on
+        existing_tickers = set(self.risk.positions.keys())
+        # Also get tickers from DB to avoid recently traded
+        recent_tickers = set()
+        if self.db and self.db.client:
+            try:
+                recent = self.db.client.table('kalshi_trades').select('ticker').eq('order_id', 'paper').limit(500).execute()
+                recent_tickers = {t.get('ticker', '') for t in (recent.data or [])}
+            except Exception:
+                pass
+
+        all_traded = existing_tickers | recent_tickers
+
+        # Filter to untouched open markets with valid prices
+        untouched = []
+        for m in markets:
+            ticker = m.get('ticker', '')
+            if ticker in all_traded:
+                continue
+            if m.get('result'):
+                continue
+            yes_p = get_yes_price_dollars(m)
+            if yes_p <= 0.01 or yes_p >= 0.99:
+                continue
+            untouched.append(m)
+
+        if not untouched:
+            return
+
+        random.shuffle(untouched)
+        explore_count = min(10, len(untouched))  # 10 random trades per cycle
+        explored = 0
+
+        for m in untouched[:explore_count]:
+            ticker = m.get('ticker', '')
+            title = (m.get('title') or '')[:60]
+            yes_price = get_yes_price_dollars(m) or 0.50
+            no_price = 1.0 - yes_price
+
+            # Buy the cheaper side
+            side = 'yes' if yes_price < no_price else 'no'
+            entry = yes_price if side == 'yes' else no_price
+            entry = max(entry, 0.01)
+
+            traded = self.risk.record_paper_trade(
+                ticker=ticker, side=side, count=1,
+                entry_price=entry, strategy='exploration', title=title,
+            )
+            if not traded:
+                continue
+
+            explored += 1
+            if self.db:
+                self.db.log_trade({
+                    'ticker': ticker, 'action': 'buy', 'side': side,
+                    'count': 1, 'strategy': 'exploration',
+                    'reason': f"[EXPLORE] Random market, {side.upper()} @ ${entry:.2f}",
+                    'confidence': 0, 'order_id': 'paper', 'price': entry,
+                })
+
+        if explored > 0:
+            logger.info(f"EXPLORATION: {explored} random paper trades from {len(untouched)} untouched markets")
 
     def _forced_paper_trade(self, markets):
         """Pick highest-volume market and paper trade it. NEVER fails."""
@@ -1557,7 +1557,9 @@ class KalshiBot:
         market_map = {m.get('ticker'): m for m in markets} if markets else {}
 
         settled = []
-        for ticker, pos in list(self.risk.positions.items()):
+        for position_key, pos in list(self.risk.positions.items()):
+            # Support stacked positions: key may be ticker_timestamp, actual ticker in pos
+            ticker = pos.get('ticker', position_key)
             m = market_map.get(ticker)
             if not m:
                 # Market not in current fetch - try fetching it directly
@@ -1589,8 +1591,8 @@ class KalshiBot:
             else:
                 continue
 
-            # Settle the paper trade
-            self.risk.settle_paper_trade(ticker, resolved_yes)
+            # Settle the paper trade (use position_key for stacked positions)
+            self.risk.settle_paper_trade(position_key, resolved_yes)
             settled.append(ticker)
 
             # Log settlement to Supabase

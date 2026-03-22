@@ -4,6 +4,7 @@ Buys the near-certain side (85-97c) on markets closing within 24h for small
 guaranteed-ish profit, and buys cheap contracts (3-15c) for asymmetric upside.
 """
 
+import os as _os
 import re
 import requests
 from datetime import datetime, timezone, timedelta
@@ -13,7 +14,8 @@ from utils.market_helpers import get_yes_cents, get_no_cents, get_volume
 
 logger = setup_logger('near_certainty')
 
-MAX_ENTRY_PRICE = 0.50  # NEVER buy contracts above 50 cents
+_aggressive_paper = float(_os.environ.get('PAPER_BALANCE', '100000')) >= 1000
+MAX_ENTRY_PRICE = 0.99 if _aggressive_paper else 0.50  # Paper: buy anything, Live: max 50c
 
 
 class NearCertaintyStrategy(BaseStrategy):
@@ -68,10 +70,11 @@ class NearCertaintyStrategy(BaseStrategy):
             if sig:
                 signals.append(sig)
 
-        # Keep top 5 only
+        # Keep top signals
         total_found = len(signals)
         signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
-        signals = signals[:5]
+        max_signals = 50 if _aggressive_paper else 5
+        signals = signals[:max_signals]
 
         logger.info(
             f"NearCertainty: {closing_soon} closing <24h, "
@@ -85,14 +88,16 @@ class NearCertaintyStrategy(BaseStrategy):
         volume = get_volume(m)
 
         side, price = None, 0
-        if 85 <= yes_c <= 97:
+        nc_min = 70 if _aggressive_paper else 85
+        nc_max = 99 if _aggressive_paper else 97
+        if nc_min <= yes_c <= nc_max:
             side, price = 'yes', yes_c
-        elif 85 <= no_c <= 97:
+        elif nc_min <= no_c <= nc_max:
             side, price = 'no', no_c
-        # Expanded fallback
-        elif 80 <= yes_c <= 99:
+        # Expanded fallback (only in conservative mode — aggressive already covers it)
+        elif not _aggressive_paper and 80 <= yes_c <= 99:
             side, price = 'yes', yes_c
-        elif 80 <= no_c <= 99:
+        elif not _aggressive_paper and 80 <= no_c <= 99:
             side, price = 'no', no_c
         else:
             return None
@@ -142,9 +147,10 @@ class NearCertaintyStrategy(BaseStrategy):
         volume = get_volume(m)
 
         side, price = None, 0
-        if 1 <= yes_c <= 15:
+        cheap_max = 30 if _aggressive_paper else 15
+        if 1 <= yes_c <= cheap_max:
             side, price = 'yes', yes_c
-        elif 1 <= no_c <= 15:
+        elif 1 <= no_c <= cheap_max:
             side, price = 'no', no_c
         else:
             return None

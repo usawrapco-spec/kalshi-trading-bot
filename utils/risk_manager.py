@@ -8,14 +8,19 @@ from utils.logger import setup_logger
 
 logger = setup_logger('risk_manager')
 
-MIN_CONFIDENCE = 30
-MAX_OPEN_POSITIONS = 50
-MAX_TRADE_PCT = 0.05       # Max 5% of starting balance per single trade ($5)
-MAX_STRATEGY_PCT = 0.10    # Max 10% of starting balance per strategy per cycle ($10)
-CASH_RESERVE_PCT = 0.30    # Never go below 30% of starting balance ($30)
-DAILY_LOSS_STOP = -30.0    # 30% of $100 paper balance
-KELLY_FRACTION = 0.10      # Tenth-Kelly for very conservative sizing
-STARTING_BALANCE = 100.0   # Reference for percentage calculations
+# --- PAPER MODE: Aggressive (toggled by PAPER_BALANCE >= 1000) ---
+# --- LIVE MODE: Conservative (existing limits preserved for real money) ---
+_paper_balance = float(os.environ.get('PAPER_BALANCE', '100000'))
+_is_aggressive_paper = _paper_balance >= 1000  # Auto-detect: $1k+ = aggressive paper
+
+MIN_CONFIDENCE = 0 if _is_aggressive_paper else 30
+MAX_OPEN_POSITIONS = 5000 if _is_aggressive_paper else 50
+MAX_TRADE_PCT = 0.10 if _is_aggressive_paper else 0.05        # 10% vs 5%
+MAX_STRATEGY_PCT = 0.25 if _is_aggressive_paper else 0.10     # 25% vs 10%
+CASH_RESERVE_PCT = 0.0 if _is_aggressive_paper else 0.30      # 0% vs 30%
+DAILY_LOSS_STOP = -50000.0 if _is_aggressive_paper else -30.0 # $50k vs $30
+KELLY_FRACTION = 0.25 if _is_aggressive_paper else 0.10       # Quarter-Kelly vs Tenth
+STARTING_BALANCE = _paper_balance
 
 
 class RiskManager:
@@ -83,8 +88,9 @@ class RiskManager:
         bankroll_dollars = self.paper_balance
         risk_amount = bankroll_dollars * fraction
 
-        # Cap at 2% of balance (conservative, down from 5%)
-        risk_amount = min(risk_amount, bankroll_dollars * 0.02)
+        # Cap at percentage of balance
+        cap_pct = 0.05 if _is_aggressive_paper else 0.02
+        risk_amount = min(risk_amount, bankroll_dollars * cap_pct)
 
         contracts = max(1, int(risk_amount / price_dollars))
         contracts = min(contracts, Config.MAX_ORDER_SIZE)
@@ -107,6 +113,10 @@ class RiskManager:
 
     def check_circuit_breaker(self):
         """Circuit breaker: shutdown if win rate < 30% in last 50 trades."""
+        # Aggressive paper mode: never trip circuit breaker (we want max volume)
+        if _is_aggressive_paper:
+            return True
+
         if self.circuit_breaker_tripped:
             return False
 
@@ -155,25 +165,30 @@ class RiskManager:
 
     def record_paper_trade(self, ticker, side, count, entry_price, strategy, title=''):
         """Record a paper trade entry. Returns False if blocked."""
-        # Hard guards - these cannot be bypassed
-        if ticker in self.positions:
+        # In aggressive paper mode, allow stacking (same ticker, different key)
+        position_key = ticker
+        if _is_aggressive_paper and ticker in self.positions:
+            # Allow stacking: use ticker+timestamp as key
+            position_key = f"{ticker}_{int(datetime.now().timestamp() * 1000)}"
+
+        if not _is_aggressive_paper and ticker in self.positions:
             logger.info(f"SKIP {ticker}: already have open position")
             return False
+
         if len(self.positions) >= MAX_OPEN_POSITIONS:
             logger.info(f"SKIP {ticker}: max positions ({MAX_OPEN_POSITIONS}) reached")
             return False
 
-        # Cash reserve: never go below 30% of starting balance
+        # Cash reserve
         cash_floor = STARTING_BALANCE * CASH_RESERVE_PCT
         if self.paper_balance <= cash_floor:
             logger.info(f"SKIP {ticker}: balance ${self.paper_balance:.2f} <= cash reserve ${cash_floor:.2f}")
             return False
 
-        # Max 10% of starting balance per single trade
+        # Max per trade
         max_per_trade = STARTING_BALANCE * MAX_TRADE_PCT
         cost = count * entry_price
         if cost > max_per_trade:
-            # Reduce count to fit within limit
             count = max(1, int(max_per_trade / entry_price))
             cost = count * entry_price
 
@@ -181,7 +196,7 @@ class RiskManager:
             logger.info(f"SKIP {ticker}: cost ${cost:.2f} would breach cash reserve")
             return False
 
-        # Max 20% of starting balance per strategy per cycle
+        # Max per strategy
         max_per_strategy = STARTING_BALANCE * MAX_STRATEGY_PCT
         strategy_spent = sum(
             p['count'] * p['entry_price']
@@ -192,10 +207,11 @@ class RiskManager:
             logger.info(f"SKIP {ticker}: strategy {strategy} at ${strategy_spent:.2f} + ${cost:.2f} > ${max_per_strategy:.2f} limit")
             return False
 
-        self.positions[ticker] = {
+        self.positions[position_key] = {
             'side': side, 'count': count,
             'entry_price': entry_price,
             'strategy': strategy, 'title': title,
+            'ticker': ticker,  # Keep original ticker for settlement
             'timestamp': datetime.now().isoformat(),
         }
         self.paper_balance -= cost

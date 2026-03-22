@@ -102,7 +102,8 @@ class PrecipEdgeStrategy(BaseStrategy):
                 signals.append(sig)
 
         signals.sort(key=lambda s: s.get('edge', 0), reverse=True)
-        signals = signals[:5]
+        import os as _os; _max = 50 if float(_os.environ.get('PAPER_BALANCE', '100000')) >= 1000 else 5
+        signals = signals[:_max]
         logger.info(f"PrecipEdge: {len(signals)} signals from {len(precip_markets)} candidates")
         return signals
 

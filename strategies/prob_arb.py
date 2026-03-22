@@ -136,7 +136,8 @@ class ProbabilityArbStrategy(BaseStrategy):
         # Sort by edge, keep top 5 only
         signals.sort(key=lambda s: s.get('edge', 0), reverse=True)
         top_edge = signals[0]['edge'] if signals else 0
-        signals = signals[:5]
+        import os as _os; _max = 50 if float(_os.environ.get('PAPER_BALANCE', '100000')) >= 1000 else 5
+        signals = signals[:_max]
         logger.info(f"ProbArb: checked {arb_checked}, found {arb_found} opportunities, top edge={top_edge:.1%}, returning {len(signals)} signals")
         return signals
 
