@@ -574,7 +574,7 @@ class KalshiBot:
             return 0.0
 
     def _monitor_swings(self):
-        """Monitor non-weather paper positions for swing trade exits (paper only)."""
+        """AGGRESSIVE position monitor: check 50 paper positions per cycle, sell actively."""
         if not self.db or not self.db.client:
             return
         try:
@@ -582,107 +582,126 @@ class KalshiBot:
             if not open_trades.data:
                 return
 
-            non_weather = [t for t in open_trades.data
-                          if t.get('strategy') != 'weather_edge'
-                          and not (t.get('ticker') or '').startswith('KXHIGH')
-                          and not (t.get('ticker') or '').startswith('KXLOWT')]
+            # Exclude live weather_edge — those are managed separately
+            paper_positions = [t for t in open_trades.data
+                              if not (t.get('strategy') == 'weather_edge'
+                                      and t.get('order_id') != 'paper')]
 
-            if not non_weather:
+            if not paper_positions:
                 return
 
-            # Rotate through positions: check 15 per cycle (was 10)
-            batch_size = 15
-            start = self._swing_cycle_offset % max(len(non_weather), 1)
-            batch = non_weather[start:start + batch_size]
-            if len(batch) < batch_size:
-                batch += non_weather[:batch_size - len(batch)]
+            # Check 50 positions per cycle (rotates through all positions)
+            batch_size = 50
+            start = self._swing_cycle_offset % max(len(paper_positions), 1)
+            batch = paper_positions[start:start + batch_size]
+            if len(batch) < batch_size and len(paper_positions) > batch_size:
+                batch += paper_positions[:batch_size - len(batch)]
             self._swing_cycle_offset += batch_size
 
             from utils.market_helpers import get_yes_price, get_no_price
 
             summary = {"sells": 0, "holds": 0, "cuts": 0, "pnl": 0.0}
 
+            # Group by ticker to avoid duplicate API calls
+            from collections import defaultdict
+            by_ticker = defaultdict(list)
             for trade in batch:
-                ticker = trade.get('ticker', '')
+                by_ticker[trade.get('ticker', '')].append(trade)
+
+            for ticker, trades in by_ticker.items():
+                if not ticker:
+                    continue
                 try:
                     market_data = self.client.get_market(ticker)
                     if not market_data:
                         continue
                     market = market_data.get('market', market_data) if market_data else {}
 
-                    if trade.get('side') == 'yes':
-                        current_price = get_yes_price(market)
-                    else:
-                        current_price = get_no_price(market)
+                    # Check if close to expiry
+                    hours_left = 999
+                    close_time = market.get('close_time') or market.get('expiration_time') or ''
+                    if close_time:
+                        try:
+                            close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00')).replace(tzinfo=None)
+                            hours_left = (close_dt - datetime.utcnow()).total_seconds() / 3600
+                        except Exception:
+                            pass
 
-                    entry = trade.get('price', 0)
-                    count = trade.get('count', 1)
-                    if entry <= 0 or current_price <= 0:
-                        continue
+                    for trade in trades:
+                        side = trade.get('side', 'yes')
+                        if side == 'yes':
+                            current_price = get_yes_price(market)
+                        else:
+                            current_price = get_no_price(market)
 
-                    pct_change = (current_price - entry) / entry
-                    dollar_change = (current_price - entry) * count
+                        entry = trade.get('price', 0)
+                        count = trade.get('count', 1)
+                        if entry <= 0 or current_price <= 0:
+                            continue
 
-                    action = "HOLD"
-                    reason = ""
-                    trade_strategy = trade.get('strategy', '')
+                        pct_change = (current_price - entry) / entry
+                        dollar_pnl = (current_price - entry) * count
+                        trade_strategy = trade.get('strategy', '')
+                        is_crypto = 'crypto' in trade_strategy.lower() or 'KX' in ticker
 
-                    # CRYPTO SCALPS: Super tight exits (5% take profit, 3% stop loss)
-                    if 'crypto' in trade_strategy.lower() or 'market_making_scalp' in trade_strategy.lower():
-                        if pct_change >= 0.05:
-                            action, reason = "SELL", f"CRYPTO TP: +{pct_change:.0%} (5% target hit)"
-                        elif pct_change <= -0.03:
-                            action, reason = "CUT", f"CRYPTO SL: {pct_change:.0%} (3% stop hit)"
-                    # Tiered profit/loss thresholds by contract price
-                    elif entry >= 0.70:
-                        if pct_change >= 0.07:
-                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on ${entry:.2f} contract"
-                        elif pct_change <= -0.05:
-                            action, reason = "CUT", f"STOP LOSS: {pct_change:.0%} on ${entry:.2f} contract"
-                    elif entry >= 0.50:
-                        if pct_change >= 0.10:
-                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on ${entry:.2f} contract"
-                        elif pct_change <= -0.07:
-                            action, reason = "CUT", f"STOP LOSS: {pct_change:.0%} on ${entry:.2f} contract"
-                    elif entry >= 0.30:
-                        if pct_change >= 0.15:
-                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on ${entry:.2f} contract"
-                        elif pct_change <= -0.10:
-                            action, reason = "CUT", f"STOP LOSS: {pct_change:.0%} on ${entry:.2f} contract"
-                    elif entry >= 0.10:
-                        if pct_change >= 0.20:
-                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on ${entry:.2f} contract"
-                        elif pct_change <= -0.25:
+                        action = "HOLD"
+                        reason = ""
+
+                        # === CRYPTO: tight exits ===
+                        if is_crypto:
+                            if pct_change >= 0.10:
+                                action, reason = "SELL", f"CRYPTO TP: +{pct_change:.0%}"
+                            elif pct_change <= -0.30:
+                                action, reason = "CUT", f"CRYPTO SL: {pct_change:.0%}"
+
+                        # === ALL: Big win always sell ===
+                        elif pct_change >= 1.00:
+                            action, reason = "SELL", f"BIG WIN: +{pct_change:.0%}!"
+
+                        # === CHEAP contracts (<15c entry): scalp at 15%+ ===
+                        elif entry < 0.15 and pct_change >= 0.15:
+                            action, reason = "SELL", f"SCALP: +{pct_change:.0%} on ${entry:.2f}"
+
+                        # === TAKE PROFIT: 30%+ on any position ===
+                        elif pct_change >= 0.30:
+                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%}"
+
+                        # === NEAR EXPIRY: sell if up anything with <2h left ===
+                        elif pct_change > 0.05 and hours_left < 2:
+                            action, reason = "SELL", f"EXPIRY: +{pct_change:.0%} with {hours_left:.1f}h left"
+
+                        # === STOP LOSS: down 50%+ ===
+                        elif pct_change <= -0.50:
                             action, reason = "CUT", f"STOP LOSS: {pct_change:.0%}"
-                    else:
-                        # < 10c: lottery tickets — only sell at +50%, never cut
-                        if pct_change >= 0.50:
-                            action, reason = "SELL", f"TAKE PROFIT: +{pct_change:.0%} on cheap contract"
 
-                    if action in ("SELL", "CUT"):
-                        pnl = dollar_change
-                        self.db.client.table('kalshi_trades').update({
-                            'resolved': True,
-                            'exit_price': current_price,
-                            'pnl': round(pnl, 4),
-                            'resolved_at': datetime.utcnow().isoformat(),
-                            'reason': f"[SWING {action}] {reason}",
-                        }).eq('id', trade['id']).execute()
+                        if action in ("SELL", "CUT"):
+                            self.db.client.table('kalshi_trades').update({
+                                'resolved': True,
+                                'exit_price': current_price,
+                                'pnl': round(dollar_pnl, 4),
+                                'resolved_at': datetime.utcnow().isoformat(),
+                                'reason': f"[ACTIVE {action}] {reason}",
+                            }).eq('id', trade['id']).execute()
 
-                        emoji = "\U0001f4c8" if action == "SELL" else "\U0001f4c9"
-                        logger.info(f"{emoji} SWING {action}: {ticker} {reason} | Entry=${entry:.2f} Exit=${current_price:.2f} P&L=${pnl:+.2f}")
-                        summary["sells" if action == "SELL" else "cuts"] += 1
-                        summary["pnl"] += pnl
-                    else:
-                        logger.debug(f"SWING HOLD: {ticker} entry=${entry:.2f} now=${current_price:.2f} ({pct_change:+.0%})")
-                        summary["holds"] += 1
+                            # Refund paper balance (entry cost back + pnl)
+                            self.risk.paper_balance += entry * count + dollar_pnl
+
+                            logger.info(f"ACTIVE {action}: {ticker} {side.upper()} | {reason} | Entry=${entry:.2f} Exit=${current_price:.2f} P&L=${dollar_pnl:+.2f}")
+                            summary["sells" if action == "SELL" else "cuts"] += 1
+                            summary["pnl"] += dollar_pnl
+                        else:
+                            summary["holds"] += 1
 
                 except Exception as e:
-                    logger.debug(f"Swing check failed for {ticker}: {e}")
+                    logger.debug(f"Position check failed for {ticker}: {e}")
                     continue
 
-            if summary["sells"] > 0 or summary["cuts"] > 0:
-                logger.info(f"\U0001f4ca SWING SUMMARY: {summary['sells']} sells, {summary['cuts']} cuts, {summary['holds']} holds, P&L=${summary['pnl']:+.2f}")
+            total_open = len(paper_positions)
+            logger.info(
+                f"POSITION MONITOR: {total_open} open | checked {len(batch)} | "
+                f"{summary['sells']} sells, {summary['cuts']} cuts, {summary['holds']} holds | "
+                f"P&L=${summary['pnl']:+.2f}"
+            )
 
         except Exception as e:
             logger.error(f"Swing monitor failed: {e}")
@@ -1261,13 +1280,16 @@ class KalshiBot:
                 if trades_placed >= MAX_TRADES or cycle_spent >= MAX_CYCLE_SPEND:
                     break
 
-                # Calculate price
+                # Calculate price — try market data first, then signal's own price
                 edge = sig.get('edge', 0)
                 prob = sig.get('model_prob', 0.5)
-                price = get_yes_price_dollars(
-                    next((m for m in markets if m.get('ticker') == sig['ticker']), {})
-                ) or 0.50
+                market_match = next((m for m in markets if m.get('ticker') == sig['ticker']), {})
+                price = get_yes_price_dollars(market_match) if market_match else 0
+                if not price or price <= 0:
+                    # Crypto/series markets aren't in the main markets list — use signal's price
+                    price = sig.get('model_prob', 0) or sig.get('buy_price', 0) or 0.50
                 price_for_side = price if sig['side'] == 'yes' else (1 - price)
+                price_for_side = max(0.01, min(0.99, price_for_side))
 
                 # Position sizing
                 if edge > 0 and prob > 0:
