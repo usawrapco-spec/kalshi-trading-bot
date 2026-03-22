@@ -26,7 +26,7 @@ class Config:
     MAX_ORDER_SIZE = int(os.getenv('MAX_ORDER_SIZE', 50))
 
     # Paper Trading
-    PAPER_BALANCE = float(os.getenv('PAPER_BALANCE', 100000.0))  # $100k for aggressive paper trading
+    PAPER_BALANCE = float(os.getenv('PAPER_BALANCE', 10000.0))  # $10k paper — 1 contract per bet, max coverage
     ENABLE_TRADING = os.getenv('ENABLE_TRADING', 'false').lower() == 'true'  # False = paper only
 
     # Live Strategy Control — comma-separated list of strategy names that place REAL orders

@@ -188,7 +188,7 @@ class KalshiBot:
                 logger.error(f"Paper reset failed: {e}")
 
             # Paper balance stays at $100k (set in __init__)
-            self.risk.paper_balance = 100000.0
+            self.risk.paper_balance = 10000.0
             logger.info(f"Paper balance: $100,000.00 (fresh start)")
 
             # Live trades
@@ -383,7 +383,7 @@ class KalshiBot:
                 'realized_pnl': round(realized, 2),
                 'open_live_trades': len(live_trades),
                 'open_paper_trades': len(paper_open.data or []),
-                'paper_balance': round(100000.0 - paper_cost + paper_realized, 2),
+                'paper_balance': round(10000.0 - paper_cost + paper_realized, 2),
             }).execute()
 
             logger.info(
@@ -1342,7 +1342,7 @@ class KalshiBot:
             logger.info(f"{mode_label}: Processing {len(all_signals)} signals...")
 
             MAX_TRADES = 999 if _aggressive_paper else int(os.environ.get("MAX_TRADES_PER_CYCLE", 50))
-            MAX_CYCLE_SPEND = 50000.0 if _aggressive_paper else 10.00
+            MAX_CYCLE_SPEND = 5000.0 if _aggressive_paper else 10.00
             all_signals.sort(key=lambda s: s.get('confidence', 0), reverse=True)
 
             trades_placed = 0
@@ -1377,16 +1377,9 @@ class KalshiBot:
                 if edge > 0 and prob > 0:
                     sig['count'] = self.risk.kelly_size(edge, prob, int(price_for_side * 100))
 
-                # Aggressive paper sizing: override with price-based quantities
+                # Aggressive paper sizing: small positions, maximize number of bets for data
                 if _aggressive_paper:
-                    if price_for_side < 0.10:
-                        sig['count'] = max(sig['count'], 50)
-                    elif price_for_side < 0.30:
-                        sig['count'] = max(sig['count'], 20)
-                    elif price_for_side < 0.50:
-                        sig['count'] = max(sig['count'], 10)
-                    else:
-                        sig['count'] = max(sig['count'], 5)
+                    sig['count'] = max(sig['count'], 1)  # At least 1 contract per bet
 
                 cost = sig['count'] * price_for_side
 
@@ -1864,9 +1857,9 @@ class KalshiBot:
 
         if self.db:
             # Use position book for accurate paper balance
-            paper_bal = 100000 - pb['exposure'] + pb['realized_pnl']
-            if paper_bal < 10000:
-                paper_bal = 100000
+            paper_bal = 10000 - pb['exposure'] + pb['realized_pnl']
+            if paper_bal < 1000:
+                paper_bal = 10000
 
             self.db.log_bot_status({
                 'is_running': True,
