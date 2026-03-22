@@ -419,7 +419,7 @@ def api_live_status():
         # Get recent live trades
         live_trades = []
         try:
-            result = db.client.table('kalshi_trades').select('*').eq('is_live', True).order('id', desc=True).limit(20).execute()
+            result = db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').neq('order_id', 'forced_paper').order('id', desc=True).limit(20).execute()
             live_trades = result.data or []
         except Exception:
             pass

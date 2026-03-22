@@ -1482,7 +1482,6 @@ class KalshiBot:
                         'confidence': sig.get('confidence', conf),
                         'order_id': order_id_or_reason if go_live else 'paper',
                         'price': price_for_side,
-                        'is_live': go_live,
                     })
 
                     # Track paper buys in position book for active selling
