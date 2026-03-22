@@ -189,10 +189,22 @@ class CryptoMomentumStrategy(BaseStrategy):
         """Generate ALL signal types: bracket, momentum, volatility expansion, mean reversion."""
         signals = []
 
-        # --- SIGNAL TYPE 0: Bracket-based direct price comparison (highest volume) ---
+        # Check if this is a bracket market (B=below, T=above threshold)
+        ticker = cm['ticker']
+        bracket_part = ticker.split('-')[-1] if '-' in ticker else ''
+        is_bracket = len(bracket_part) > 1 and bracket_part[0] in ('B', 'T')
+
+        # --- SIGNAL TYPE 0: Bracket-based direct price comparison ---
         sig = self._check_bracket(cm, coin, current_price, yes_price, no_price, duration)
         if sig:
             signals.append(sig)
+
+        # For bracket markets, ONLY use bracket logic.
+        # Momentum/vol/reversion signals don't account for bracket direction
+        # and will produce inverted sides (e.g., "up momentum → buy YES" is WRONG
+        # for a "below" bracket where up price means YES should decrease).
+        if is_bracket:
+            return signals
 
         # --- SIGNAL TYPE 1: Momentum (lowered thresholds) ---
         sig = self._check_momentum(cm, coin, current_price, m_short, m_long, yes_price, no_price, duration)

@@ -330,20 +330,13 @@ def api_swing():
     """Swing trading data — non-weather paper positions and closed swing trades."""
     try:
         db = get_db()
-        # Open non-weather paper positions
-        open_result = db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').eq('resolved', False).execute()
-        non_weather = [t for t in (open_result.data or [])
-                       if t.get('strategy') not in ('weather_edge', 'precip_edge', 'crypto_momentum')
-                       and not (t.get('ticker') or '').startswith('KXHIGH')
-                       and not (t.get('ticker') or '').startswith('KXLOWT')]
+        # ALL open paper positions (no strategy filter — show everything)
+        open_result = db.client.table('kalshi_trades').select('*').in_('order_id', ['paper', 'forced_paper']).eq('resolved', False).execute()
+        non_weather = open_result.data or []
 
-        # Closed swing trades (resolved paper, non-weather/crypto, with SWING in reason)
-        closed_result = db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').eq('resolved', True).execute()
-        swing_closed = [t for t in (closed_result.data or [])
-                        if t.get('strategy') not in ('weather_edge', 'precip_edge', 'crypto_momentum')
-                        and not (t.get('ticker') or '').startswith('KXHIGH')
-                        and not (t.get('ticker') or '').startswith('KXLOWT')
-                        and 'SWING' in (t.get('reason') or '').upper()]
+        # Closed paper trades with P&L
+        closed_result = db.client.table('kalshi_trades').select('*').in_('order_id', ['paper', 'forced_paper']).eq('resolved', True).execute()
+        swing_closed = [t for t in (closed_result.data or []) if t.get('pnl') is not None]
 
         total_pnl = sum(t.get('pnl', 0) or 0 for t in swing_closed)
         wins = sum(1 for t in swing_closed if (t.get('pnl', 0) or 0) > 0)

@@ -365,10 +365,10 @@ class KalshiBot:
             settled = self.db.client.table('kalshi_trades').select('pnl').neq('order_id', 'paper').eq('resolved', True).execute()
             realized = sum((t.get('pnl', 0) or 0) for t in (settled.data or []))
 
-            # 4. Paper stats
-            paper_open = self.db.client.table('kalshi_trades').select('price,count').eq('order_id', 'paper').eq('resolved', False).execute()
+            # 4. Paper stats (include both 'paper' and 'forced_paper')
+            paper_open = self.db.client.table('kalshi_trades').select('price,count').in_('order_id', ['paper', 'forced_paper']).eq('resolved', False).execute()
             paper_cost = sum((t.get('price', 0) or 0) * (t.get('count', 0) or 0) for t in (paper_open.data or []))
-            paper_settled = self.db.client.table('kalshi_trades').select('pnl').eq('order_id', 'paper').eq('resolved', True).execute()
+            paper_settled = self.db.client.table('kalshi_trades').select('pnl').in_('order_id', ['paper', 'forced_paper']).eq('resolved', True).execute()
             paper_realized = sum((t.get('pnl', 0) or 0) for t in (paper_settled.data or []))
 
             total = cash + market_value
@@ -383,7 +383,7 @@ class KalshiBot:
                 'realized_pnl': round(realized, 2),
                 'open_live_trades': len(live_trades),
                 'open_paper_trades': len(paper_open.data or []),
-                'paper_balance': round(100.0 - paper_cost + paper_realized, 2),
+                'paper_balance': round(100000.0 - paper_cost + paper_realized, 2),
             }).execute()
 
             logger.info(
