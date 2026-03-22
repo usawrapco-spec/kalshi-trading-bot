@@ -3,7 +3,7 @@
 Kalshi Trading Bot - Paper Trading System
 
 Strategies:
-  - WeatherEdge: Open-Meteo GFS ensemble vs KXHIGH temperature markets
+  - WeatherEdge: Open-Meteo GFS ensemble vs KXHIGH/KXLOWT temperature markets (24 cities)
   - GrokNewsAnalysis: xAI Grok-3 evaluates top 20 liquid markets (vol>=10)
   - ProbabilityArbitrage: YES+NO mispricing and orderbook spread detection
   - SportsNO: fade sports favorites (YES 60-85c) by buying NO
@@ -95,9 +95,8 @@ class KalshiBot:
         else:
             logger.info("ALL PAPER MODE — no live strategies configured")
 
-        # Fresh start: clear old paper trades from Supabase (unless in data_collection mode)
-        if self.operating_mode != 'data_collection':
-            self._clear_old_trades()
+        # Reconstruct paper state from Supabase (survives deploys)
+        self._reconstruct_state_from_db()
 
         self.strategies = []
         self._init_strategies()
@@ -134,16 +133,34 @@ class KalshiBot:
             self.strategies.append(WeatherEdgeStrategy(self.client, self.risk, self.db))
         logger.info(f"{len(self.strategies)} strategies loaded")
 
-    def _clear_old_trades(self):
-        """Clear all old paper trades from Supabase for a fresh start."""
+    def _reconstruct_state_from_db(self):
+        """Reconstruct paper + live state from Supabase so deploys don't reset state."""
         if not self.db or not self.db.client:
             return
         try:
-            # Delete all old paper trades
-            self.db.client.table('kalshi_trades').delete().neq('id', 0).execute()
-            logger.info("Cleared all old paper trades from Supabase - fresh start")
+            # Paper trades
+            paper_result = self.db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').execute()
+            paper_trades = paper_result.data or []
+            total_paper_cost = sum(t.get('price', 0) * t.get('count', 0) for t in paper_trades)
+            reconstructed_balance = 100.0 - total_paper_cost
+            if paper_trades:
+                self.risk.paper_balance = reconstructed_balance
+                logger.info(f"Reconstructed paper balance from {len(paper_trades)} trades: ${reconstructed_balance:.2f}")
+
+            # Live trades
+            live_result = self.db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').execute()
+            live_trades = live_result.data or []
+            self.open_live_positions = [
+                {'ticker': t['ticker'], 'side': t.get('side', 'yes'),
+                 'count': t.get('count', 1), 'cost': t.get('price', 0) * t.get('count', 1),
+                 'strategy': t.get('strategy', 'unknown')}
+                for t in live_trades
+                if not any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS', 'SETTLED'))
+            ]
+            if live_trades:
+                logger.info(f"Reconstructed {len(self.open_live_positions)} open live positions from {len(live_trades)} live trades")
         except Exception as e:
-            logger.error(f"Failed to clear old trades: {e}")
+            logger.error(f"Failed to reconstruct state from DB: {e}")
 
     def _check_balance(self):
         bal = self.client.get_balance()
@@ -396,8 +413,9 @@ class KalshiBot:
             except Exception as e:
                 logger.error(f"Markets fetch failed: {e}")
 
-            # 3. Weather series
-            for series in ('KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN'):
+            # 3. Weather series (all 24: 17 high + 7 low temp cities)
+            from strategies.weather_edge import CITIES as WEATHER_CITIES
+            for series in WEATHER_CITIES:
                 try:
                     _add_markets(self.client.get_markets_by_series(series), series)
                 except Exception as e:
@@ -640,6 +658,26 @@ class KalshiBot:
                 if needs_debate and not is_learning_trade and debates_used < MAX_DEBATES:
                     should_trade, sig, debate_log = run_debate(sig, price)
                     debates_used += 2  # Each debate uses 2 API calls
+
+                    # Log debate to Supabase
+                    if self.db:
+                        try:
+                            self.db.client.table('debate_log').insert({
+                                'timestamp': datetime.utcnow().isoformat(),
+                                'ticker': sig.get('ticker', ''),
+                                'market_title': sig.get('title', sig.get('ticker', '')),
+                                'grok_probability': sig.get('model_prob'),
+                                'grok_recommendation': 'TRADE' if should_trade else 'SKIP',
+                                'claude_probability': sig.get('claude_probability'),
+                                'claude_recommendation': sig.get('claude_recommendation'),
+                                'agreement': sig.get('debate_agreement', False),
+                                'final_decision': 'TRADE' if should_trade else 'SKIP',
+                                'size_modifier': sig.get('count', 1) / max(sig.get('original_count', sig.get('count', 1)), 1),
+                                'votes': debate_log.split(':')[0] if ':' in debate_log else debate_log,
+                            }).execute()
+                        except Exception as e:
+                            logger.error(f"Failed to log debate: {e}")
+
                     if not should_trade:
                         logger.info(f"  Trade vetoed by debate: {debate_log}")
                         continue

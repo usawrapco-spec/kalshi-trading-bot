@@ -83,6 +83,8 @@ def api_status():
         if real_balance is not None:
             live_daily_pnl = real_balance + live_cost - starting_balance
 
+        print(f"API returning live balance: ${real_balance:.2f}" if real_balance else "API returning live balance: None")
+
         return jsonify({
             'is_running': r.get('is_running', False),
             'last_check': r.get('last_check'),
@@ -116,8 +118,22 @@ def api_status():
 def api_trades():
     try:
         db = get_db()
-        result = db.client.table('kalshi_trades').select('*').order('id', desc=True).limit(50).execute()
-        return jsonify(result.data or [])
+        result = db.client.table('kalshi_trades').select('*').order('id', desc=True).limit(30).execute()
+        trades = []
+        for t in (result.data or []):
+            trades.append({
+                'timestamp': t.get('timestamp') or t.get('created_at'),
+                'ticker': t.get('ticker', ''),
+                'side': t.get('side', ''),
+                'price': t.get('price', 0),
+                'count': t.get('count', 0),
+                'strategy': t.get('strategy', ''),
+                'is_live': t.get('order_id') not in (None, 'paper', 'forced_paper'),
+                'order_id': t.get('order_id', ''),
+                'confidence': t.get('confidence', 0),
+                'reason': (t.get('reason') or '')[:100],
+            })
+        return jsonify(trades)
     except:
         return jsonify([])
 
@@ -179,7 +195,10 @@ def api_equity():
 def api_signals():
     try:
         db = get_db()
-        result = db.client.table('signal_evaluations').select('timestamp,strategy,ticker,side,edge,confidence,action,skip_reason').order('timestamp', desc=True).limit(100).execute()
+        result = db.client.table('signal_evaluations').select(
+            'timestamp,strategy,ticker,market_title,side,yes_price,no_price,'
+            'our_probability,market_probability,edge,confidence,action,skip_reason'
+        ).order('timestamp', desc=True).limit(50).execute()
         return jsonify(result.data or [])
     except:
         return jsonify([])
@@ -632,8 +651,8 @@ async function fetchJ(url){try{const r=await fetch(url);return r.ok?await r.json
 
 async function refreshAll(){
   scanPulse();
-  const[status,trades,strats,equity,signals,live]=await Promise.all([
-    fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals'),fetchJ('/api/live_status')
+  const[status,trades,strats,equity,signals,live,debates,improvements]=await Promise.all([
+    fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals'),fetchJ('/api/live_status'),fetchJ('/api/debates'),fetchJ('/api/improvements')
   ]);
 
   // LIVE STATUS
@@ -756,10 +775,57 @@ async function refreshAll(){
   if(signals&&signals.length){
     const el=document.getElementById('signalFeed');
     el.innerHTML=signals.slice(0,40).map(s=>{
-      const isSkip=s.action==='SKIP';
+      const act=(s.action||'').toUpperCase();
+      const isSkip=act==='SKIP';
+      const isTrade=act==='TRADE'||act==='VIRTUAL_TRADE';
       const edge=((s.edge||0)*100).toFixed(1);
-      return`<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.02);${isSkip?'opacity:.35':''}"><span style="color:rgba(255,255,255,0.15)">${fmtTime(s.timestamp)}</span> <span style="color:#00f0ff">${s.strategy||'?'}</span> ${s.ticker||''} — edge:${edge}% → <span style="color:${isSkip?'rgba(255,255,255,0.2)':'#39ff14'}">${s.action||'?'}</span> ${s.skip_reason?'<span style="color:rgba(255,255,255,0.15)">('+s.skip_reason+')</span>':''}</div>`;
+      const conf=(s.confidence||0).toFixed(0);
+      const price=s.yes_price?(s.side==='yes'?s.yes_price:s.no_price||0):0;
+      const col=isTrade?'#39ff14':isSkip?'#ff3333':'rgba(255,255,255,0.3)';
+      return`<div style="padding:5px 0;border-bottom:1px solid rgba(255,255,255,0.02);${isSkip?'opacity:.4':''}">
+        <div><span style="color:rgba(255,255,255,0.15)">${fmtTime(s.timestamp)}</span> <span style="color:#00f0ff;font-weight:600">[${s.strategy||'?'}]</span> ${s.ticker||''}</div>
+        <div style="font-size:.65rem;color:rgba(255,255,255,0.3)">Side: ${(s.side||'?').toUpperCase()} ${price?'| Price: $'+price.toFixed(2):''} | Edge: ${edge}% | Conf: ${conf}% → <span style="color:${col}">${act||'?'}</span>${s.skip_reason?' <span style="color:rgba(255,255,255,0.2)">('+s.skip_reason+')</span>':''}</div>
+      </div>`;
     }).join('');
+  }
+
+  // DEBATES TAB
+  if(debates&&debates.length){
+    const el=document.getElementById('debatesFeed');
+    el.innerHTML=debates.map(d=>{
+      const agree=d.agreement;
+      return`<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.03)">
+        <div><span style="color:rgba(255,255,255,0.15)">${fmt(d.timestamp)}</span> <span style="color:#00f0ff;font-weight:600">${d.ticker||'?'}</span></div>
+        <div style="font-size:.65rem;margin-top:2px">
+          <span style="color:#ff6d00">Grok: ${d.grok_probability!==null?((d.grok_probability*100).toFixed(0)+'%'):'—'}</span> → ${d.grok_recommendation||'—'}
+          ${d.claude_probability!==null?' | <span style="color:#a855f7">Claude: '+(d.claude_probability*100).toFixed(0)+'%</span> → '+(d.claude_recommendation||'—'):''}
+          ${d.gemini_probability!==null?' | <span style="color:#22d3ee">Gemini: '+(d.gemini_probability*100).toFixed(0)+'%</span>':''}
+        </div>
+        <div style="font-size:.65rem;margin-top:2px">Decision: <span style="color:${d.final_decision==='SKIP'?'#ff3333':'#39ff14'}">${d.final_decision||'?'}</span> | Agreement: ${agree?'✅':'❌'} ${d.votes?'| '+d.votes:''}</div>
+      </div>`;
+    }).join('');
+  }
+
+  // LEARNING LAB TAB
+  if(improvements&&improvements.length){
+    const el=document.getElementById('learnFeed');
+    el.innerHTML=improvements.map(imp=>{
+      const verdicts=imp.strategy_verdicts?JSON.parse(imp.strategy_verdicts):{};
+      const params=imp.new_parameters?JSON.parse(imp.new_parameters):{};
+      return`<div style="padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.03)">
+        <div><span style="color:rgba(255,255,255,0.15)">${fmt(imp.timestamp)}</span> <span style="color:#00f0ff;font-weight:600">Self-Improvement Run</span></div>
+        <div style="font-size:.65rem;margin-top:4px;color:rgba(255,255,255,0.4)">
+          ${Object.entries(verdicts).map(([s,v])=>'<span style="color:'+(v==='PROFITABLE'?'#39ff14':v==='UNPROFITABLE'?'#ff3333':'#ffd700')+'">'+s+': '+v+'</span>').join(' | ')}
+        </div>
+        <div style="font-size:.65rem;margin-top:2px;color:rgba(255,255,255,0.3)">
+          Debate mode: ${params.debate_mode||'—'} | Min volume: ${params.min_volume_filter||'—'}
+        </div>
+      </div>`;
+    }).join('');
+  }else{
+    const el=document.getElementById('learnFeed');
+    const nextRun=new Date();nextRun.setHours(nextRun.getHours()+(6-nextRun.getHours()%6),0,0,0);
+    el.innerHTML='<div style="color:rgba(255,255,255,0.15)">Self-improvement analysis runs every 6 hours. Next run: '+nextRun.toLocaleTimeString()+'</div>';
   }
 }
 
