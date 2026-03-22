@@ -101,10 +101,16 @@ class KalshiBot:
         else:
             logger.info("ALL PAPER MODE — no live strategies configured")
 
-        # Reconstruct paper state from Supabase (survives deploys)
+        # Reconstruct state from Supabase (paper reset + live positions)
         self._reconstruct_state_from_db()
 
-        # Position book + exit manager (active selling)
+        # Immediately check live settlements (resolve March 21-22 trades etc)
+        try:
+            self._check_live_settlements()
+        except Exception as e:
+            logger.error(f"Startup live settlement check failed: {e}")
+
+        # Position book + exit manager (active selling — starts fresh after paper reset)
         self.position_book = PositionBook(self.db)
         self.position_book.load_from_db()
         self.exit_manager = ExitManager(self.client, self.position_book, self.risk)
@@ -160,18 +166,30 @@ class KalshiBot:
         logger.info(f"{len(self.strategies)} strategies loaded (HyperThink enabled)")
 
     def _reconstruct_state_from_db(self):
-        """Reconstruct paper + live state from Supabase so deploys don't reset state."""
+        """Reconstruct live state from Supabase. Paper balance stays at $100k (fresh start)."""
         if not self.db or not self.db.client:
             return
         try:
-            # Paper trades
-            paper_result = self.db.client.table('kalshi_trades').select('*').eq('order_id', 'paper').execute()
-            paper_trades = paper_result.data or []
-            total_paper_cost = sum(t.get('price', 0) * t.get('count', 0) for t in paper_trades)
-            reconstructed_balance = 100.0 - total_paper_cost
-            if paper_trades:
-                self.risk.paper_balance = reconstructed_balance
-                logger.info(f"Reconstructed paper balance from {len(paper_trades)} trades: ${reconstructed_balance:.2f}")
+            # Wipe old unresolved paper trades on startup — fresh $100k balance
+            try:
+                old_paper = self.db.client.table('kalshi_trades').select('id').eq(
+                    'order_id', 'paper'
+                ).eq('resolved', False).execute()
+                old_count = len(old_paper.data or [])
+                if old_count > 0:
+                    self.db.client.table('kalshi_trades').update({
+                        'resolved': True,
+                        'pnl': 0,
+                        'reason': '[RESET] Paper account reset to $100,000',
+                        'resolved_at': datetime.now(timezone.utc).isoformat(),
+                    }).eq('order_id', 'paper').eq('resolved', False).execute()
+                    logger.info(f"PAPER RESET: Resolved {old_count} old paper positions, balance=$100,000")
+            except Exception as e:
+                logger.error(f"Paper reset failed: {e}")
+
+            # Paper balance stays at $100k (set in __init__)
+            self.risk.paper_balance = 100000.0
+            logger.info(f"Paper balance: $100,000.00 (fresh start)")
 
             # Live trades
             live_result = self.db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').execute()
