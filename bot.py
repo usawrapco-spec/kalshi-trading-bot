@@ -376,40 +376,48 @@ class KalshiBot:
         except Exception as e:
             logger.error(f"Snapshot failed: {e}")
 
-    def check_live_settlements(self, kalshi_client, db):
-        """Check if any live (real money) trades have settled"""
+    def _check_live_settlements(self):
+        """Check if any live (real money) trades have settled."""
+        if not self.db or not self.db.client:
+            return
         try:
-            result = db.client.table('kalshi_trades').select('*').neq(
+            result = self.db.client.table('kalshi_trades').select('*').neq(
                 'order_id', 'paper'
-            ).or_('resolved.is.null,resolved.eq.false').execute()
+            ).eq('resolved', False).execute()
 
+            settled = 0
             for trade in (result.data or []):
                 try:
-                    resp = kalshi_client.get(f'/trade-api/v2/markets/{trade["ticker"]}')
-                    if resp.status_code != 200:
+                    market_data = self.client.get_market(trade['ticker'])
+                    if not market_data:
                         continue
-                    market = resp.json().get('market', {})
+                    market = market_data.get('market', market_data)
                     market_result = market.get('result', '')
 
                     if market_result in ('yes', 'no'):
-                        entry = float(trade['price'])
-                        count = trade.get('count', 1)
-                        exit_price = 1.0 if market_result == trade['side'] else 0.0
+                        entry = float(trade.get('price', 0) or 0)
+                        count = trade.get('count', 1) or 1
+                        exit_price = 1.0 if market_result == trade.get('side') else 0.0
                         pnl = (exit_price - entry) * count
 
-                        db.client.table('kalshi_trades').update({
+                        self.db.client.table('kalshi_trades').update({
                             'resolved': True,
                             'exit_price': exit_price,
-                            'pnl': pnl,
+                            'pnl': round(pnl, 4),
                             'resolved_at': datetime.now(timezone.utc).isoformat(),
                         }).eq('id', trade['id']).execute()
 
-                        log.info(f"LIVE SETTLED: {trade['ticker']} {trade['side']} "
-                                 f"→ {market_result} | PnL: ${pnl:+.4f}")
-                except:
+                        won = "WIN" if pnl > 0 else "LOSS"
+                        logger.info(f"LIVE SETTLED: {trade['ticker']} {trade.get('side')} "
+                                    f"-> {market_result} | {won} PnL=${pnl:+.4f}")
+                        settled += 1
+                except Exception:
                     continue
+
+            if settled:
+                logger.info(f"Live settlements: {settled} trades resolved")
         except Exception as e:
-            log.error(f"Live settlement check failed: {e}")
+            logger.error(f"Live settlement check failed: {e}")
 
     def _check_settlements(self):
         """Check unresolved trades for settlement. Max 20 API calls per cycle."""
@@ -955,7 +963,7 @@ class KalshiBot:
         self._check_settlements()
 
         # Check live settlements (real money trades)
-        self.check_live_settlements(self.client, self.db)
+        self._check_live_settlements()
 
         # Check crypto settlements (15-min markets settle fast)
         self._check_crypto_settlements()
@@ -1828,20 +1836,25 @@ class KalshiBot:
             )
 
         if self.db:
+            # Use position book for accurate paper balance
+            paper_bal = 100000 - pb['exposure'] + pb['realized_pnl']
+            if paper_bal < 10000:
+                paper_bal = 100000
+
             self.db.log_bot_status({
                 'is_running': True,
-                'daily_pnl': status['daily_pnl'],
+                'daily_pnl': pb['realized_pnl'],
                 'trades_today': status['trades_today'],
-                'balance': status['paper_balance'],
-                'active_positions': len(status['positions']),
+                'balance': paper_bal,
+                'active_positions': pb['open'],
                 'real_balance': self.real_balance_cents / 100.0 if self.real_balance_cents else None,
                 'live_positions': len(self.open_live_positions),
             })
             # Log equity snapshot
             try:
                 self.db.client.table('equity_snapshots').insert({
-                    'balance': self.risk.paper_balance,
-                    'open_positions': len(self.risk.positions),
+                    'balance': paper_bal,
+                    'open_positions': pb['open'],
                 }).execute()
             except Exception:
                 pass  # Never crash the bot over logging

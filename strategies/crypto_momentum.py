@@ -214,19 +214,27 @@ class CryptoMomentumStrategy(BaseStrategy):
     def _check_bracket(self, cm, coin, current_price, yes_price, no_price, duration):
         """Parse bracket threshold from ticker and compare to current price."""
         ticker = cm['ticker']
-        title = cm.get('title', '')
 
-        # Parse bracket from ticker
-        parts = ticker.split('-')
-        bracket_part = parts[-1]  # e.g., "B62675" or "T70000"
+        try:
+            # Parse bracket from ticker
+            parts = ticker.split('-')
+            bracket_part = parts[-1]  # e.g., "B62675" or "T70000"
 
-        bracket_type = bracket_part[0]  # 'B' or 'T'
-        # Parse threshold number (handle K suffix etc)
-        num_str = bracket_part[1:]
-        if num_str.endswith('K'):
-            threshold = float(num_str[:-1]) * 1000
-        else:
-            threshold = float(num_str)
+            bracket_type = bracket_part[0]  # 'B' or 'T'
+            if bracket_type not in ('B', 'T'):
+                return None
+
+            # Parse threshold number (handle K suffix etc)
+            num_str = bracket_part[1:]
+            if num_str.endswith('K'):
+                threshold = float(num_str[:-1]) * 1000
+            else:
+                threshold = float(num_str)
+
+            if threshold <= 0:
+                return None
+        except (ValueError, IndexError):
+            return None
 
         distance_pct = (current_price - threshold) / threshold * 100
 
@@ -252,10 +260,15 @@ class CryptoMomentumStrategy(BaseStrategy):
                 return None  # Too close, skip
 
         # Get REAL price from the market data we already fetched
+        raw_market = cm.get('market', {})
         if side == 'yes':
-            price = float(cm.get('yes_ask_dollars') or '0')
+            price = cm.get('yes_ask', 0) or cm.get('yes_price', 0) or safe_float(raw_market.get('yes_ask_dollars', 0))
         else:
-            price = float(cm.get('no_ask_dollars') or '0')
+            # no_ask not stored in cm, derive from raw market or use no_price
+            price = cm.get('no_price', 0) or safe_float(raw_market.get('no_ask_dollars', 0))
+        # Normalize
+        if price > 1.0:
+            price = price / 100.0
 
         # SKIP if no real price available
         if price <= 0 or price >= 0.98:
