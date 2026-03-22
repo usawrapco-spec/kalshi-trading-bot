@@ -56,7 +56,7 @@ def api_status():
             live_unrealized = snapshot.get('unrealized_pnl', 0)
             live_realized = snapshot.get('realized_pnl', 0)
             live_count = snapshot.get('open_live_trades', 0)
-            paper_bal = snapshot.get('paper_balance', 100.0)
+            paper_bal = snapshot.get('paper_balance', 100000.0)
             paper_count = snapshot.get('open_paper_trades', 0)
             cost_basis = snapshot.get('positions_cost_basis', 0)
         else:
@@ -110,7 +110,7 @@ def api_status():
                 'balance': round(paper_bal, 2),
                 'daily_pnl': round(paper_realized_pnl, 2),
                 'positions': paper_count,
-                'roi_percent': round(((paper_bal - 100) / 100) * 100, 2),
+                'roi_percent': round(((paper_bal - 100000) / 100000) * 100, 2),
                 'trades_today': 0,
                 'wins': paper_wins,
                 'losses': paper_losses,
@@ -132,7 +132,7 @@ def api_status():
     except Exception as e:
         return jsonify({
             'is_running': False, 'last_check': None, 'error': str(e),
-            'paper': {'balance': 100, 'daily_pnl': 0, 'positions': 0, 'roi_percent': 0, 'trades_today': 0, 'wins': 0, 'losses': 0},
+            'paper': {'balance': 100000, 'daily_pnl': 0, 'positions': 0, 'roi_percent': 0, 'trades_today': 0, 'wins': 0, 'losses': 0},
             'live': {'balance': None, 'daily_pnl': None, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 5.00, 'unrealized_pnl': 0},
         })
 
