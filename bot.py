@@ -46,6 +46,7 @@ from utils.ai_debate import run_debate
 from utils.live_validator import is_live_strategy, validate_live_trade
 from utils.signal_tier import rate_signal, size_by_tier, check_portfolio_limits, hours_until_close, TIER_CONFIG, MAX_LIVE_TRADES_PER_CYCLE
 from self_improver import SelfImprover
+from utils.position_book import PositionBook, ExitManager
 
 logger = setup_logger('main')
 
@@ -102,6 +103,11 @@ class KalshiBot:
 
         # Reconstruct paper state from Supabase (survives deploys)
         self._reconstruct_state_from_db()
+
+        # Position book + exit manager (active selling)
+        self.position_book = PositionBook(self.db)
+        self.position_book.load_from_db()
+        self.exit_manager = ExitManager(self.client, self.position_book, self.risk)
 
         self.strategies = []
         self._swing_cycle_offset = 0  # Rotate through swing positions across cycles
@@ -922,11 +928,14 @@ class KalshiBot:
         # Take portfolio snapshot (throttled to every 5 min)
         self._take_portfolio_snapshot()
 
-        # Evaluate exits on open positions (profit-taking / loss-cutting)
+        # Evaluate exits on open LIVE positions (profit-taking / loss-cutting)
         self._evaluate_exits()
 
-        # Monitor non-weather paper positions for swing exits
-        self._monitor_swings()
+        # === ACTIVE SELLING: Exit manager checks ALL paper positions ===
+        try:
+            self.exit_manager.run()
+        except Exception as e:
+            logger.error(f"Exit manager failed: {e}")
 
         if not self.risk.check_daily_loss_limit():
             logger.warning("Daily loss stop - halting")
@@ -1421,7 +1430,7 @@ class KalshiBot:
                     if go_live:
                         reason = f"[LIVE] {tier_tag}{reason}"
 
-                    self.db.log_trade({
+                    trade_result = self.db.log_trade({
                         'ticker': sig['ticker'],
                         'action': 'buy',
                         'side': sig['side'],
@@ -1433,6 +1442,20 @@ class KalshiBot:
                         'price': price_for_side,
                         'is_live': go_live,
                     })
+
+                    # Track paper buys in position book for active selling
+                    if not go_live and trade_result:
+                        try:
+                            trade_id = None
+                            if hasattr(trade_result, 'data') and trade_result.data:
+                                trade_id = trade_result.data[0].get('id')
+                            if trade_id:
+                                self.position_book.add(
+                                    trade_id, sig['ticker'], sig['side'],
+                                    price_for_side, sig['count'], strategy_name,
+                                )
+                        except Exception:
+                            pass  # Position book is best-effort
 
             # Log ALL signal evaluations (both traded and skipped) for learning
             if self.db:
@@ -1536,12 +1559,21 @@ class KalshiBot:
 
                 explored += 1
                 if self.db:
-                    self.db.log_trade({
+                    ex_result = self.db.log_trade({
                         'ticker': ticker, 'action': 'buy', 'side': side,
                         'count': qty, 'strategy': 'exploration',
                         'reason': f"[EXPLORE] Random market, {side.upper()} x{qty} @ ${entry:.2f}",
                         'confidence': 0, 'order_id': 'paper', 'price': entry,
                     })
+                    # Track in position book
+                    try:
+                        if ex_result and hasattr(ex_result, 'data') and ex_result.data:
+                            self.position_book.add(
+                                ex_result.data[0].get('id'), ticker, side,
+                                entry, qty, 'exploration',
+                            )
+                    except Exception:
+                        pass
 
         if explored > 0:
             logger.info(f"EXPLORATION: {explored} random paper trades from {len(untouched)} untouched markets")
@@ -1745,6 +1777,14 @@ class KalshiBot:
     def _log_status(self):
         self.risk.log_status()
         status = self.risk.get_status()
+
+        # Position book stats (active selling)
+        pb = self.position_book.stats()
+        logger.info(
+            f"POSITION BOOK: {pb['open']} open | ${pb['exposure']:.2f} exposure | "
+            f"realized=${pb['realized_pnl']:+.2f} | {pb['wins']}W/{pb['losses']}L "
+            f"({pb['win_rate']:.0f}%) | {pb['sells_today']} sells today"
+        )
 
         # Live status logging
         if Config.ENABLE_TRADING and Config.LIVE_STRATEGIES:
