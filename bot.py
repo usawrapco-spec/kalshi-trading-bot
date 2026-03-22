@@ -166,43 +166,42 @@ class KalshiBot:
         logger.info(f"{len(self.strategies)} strategies loaded (HyperThink enabled)")
 
     def _reconstruct_state_from_db(self):
-        """Reconstruct live state from Supabase. Paper balance stays at $100k (fresh start)."""
+        """Reconstruct live state from Supabase. Delete old paper trades for clean start."""
         if not self.db or not self.db.client:
             return
         try:
-            # Wipe old unresolved paper trades on startup — fresh $100k balance
+            # DELETE all paper trades (open AND old resolved) for a clean slate
+            # Previous resets left resolved trades with pnl=0 that pollute win/loss stats
             try:
-                old_paper = self.db.client.table('kalshi_trades').select('id').eq(
-                    'order_id', 'paper'
-                ).eq('resolved', False).execute()
-                old_count = len(old_paper.data or [])
-                if old_count > 0:
-                    self.db.client.table('kalshi_trades').update({
-                        'resolved': True,
-                        'pnl': 0,
-                        'reason': '[RESET] Paper account reset to $100,000',
-                        'resolved_at': datetime.now(timezone.utc).isoformat(),
-                    }).eq('order_id', 'paper').eq('resolved', False).execute()
-                    logger.info(f"PAPER RESET: Resolved {old_count} old paper positions, balance=$100,000")
+                for oid in ['paper', 'forced_paper']:
+                    old = self.db.client.table('kalshi_trades').select('id').eq(
+                        'order_id', oid
+                    ).execute()
+                    old_count = len(old.data or [])
+                    if old_count > 0:
+                        self.db.client.table('kalshi_trades').delete().eq(
+                            'order_id', oid
+                        ).execute()
+                        logger.info(f"PAPER RESET: Deleted {old_count} {oid} trades (clean slate)")
             except Exception as e:
                 logger.error(f"Paper reset failed: {e}")
 
-            # Paper balance stays at $100k (set in __init__)
             self.risk.paper_balance = 10000.0
-            logger.info(f"Paper balance: $100,000.00 (fresh start)")
+            logger.info(f"Paper balance: $10,000.00 (fresh start)")
 
-            # Live trades
-            live_result = self.db.client.table('kalshi_trades').select('*').neq('order_id', 'paper').execute()
+            # Live trades (exclude paper and forced_paper)
+            live_result = self.db.client.table('kalshi_trades').select('*').neq(
+                'order_id', 'paper'
+            ).neq('order_id', 'forced_paper').eq('resolved', False).execute()
             live_trades = live_result.data or []
             self.open_live_positions = [
                 {'ticker': t['ticker'], 'side': t.get('side', 'yes'),
                  'count': t.get('count', 1), 'cost': t.get('price', 0) * t.get('count', 1),
                  'strategy': t.get('strategy', 'unknown')}
                 for t in live_trades
-                if not any(k in (t.get('reason') or '').upper() for k in ('WIN', 'LOSS', 'SETTLED'))
             ]
             if live_trades:
-                logger.info(f"Reconstructed {len(self.open_live_positions)} open live positions from {len(live_trades)} live trades")
+                logger.info(f"Reconstructed {len(self.open_live_positions)} open live positions")
         except Exception as e:
             logger.error(f"Failed to reconstruct state from DB: {e}")
 
@@ -331,10 +330,15 @@ class KalshiBot:
             try:
                 portfolio_response = self.client.get_portfolio()
                 if portfolio_response:
-                    # Kalshi returns portfolio_value in cents
-                    portfolio_value = portfolio_response.get('portfolio_value', 0) / 100.0
-            except Exception:
-                pass
+                    # Try common Kalshi portfolio response fields (cents)
+                    pv = (portfolio_response.get('portfolio_value')
+                          or portfolio_response.get('total_value')
+                          or portfolio_response.get('balance', 0))
+                    if pv:
+                        portfolio_value = pv / 100.0
+                    logger.debug(f"Portfolio API response keys: {list(portfolio_response.keys())}")
+            except Exception as e:
+                logger.debug(f"Portfolio API failed: {e}")
 
             # 2. Count open live trades and compute cost basis from DB
             live_open = self.db.client.table('kalshi_trades').select('price,count,side').neq('order_id', 'paper').neq('order_id', 'forced_paper').eq('resolved', False).execute()
@@ -360,8 +364,6 @@ class KalshiBot:
             paper_cost = sum((t.get('price', 0) or 0) * (t.get('count', 0) or 0) for t in (paper_open.data or []))
             paper_settled = self.db.client.table('kalshi_trades').select('pnl').in_('order_id', ['paper', 'forced_paper']).eq('resolved', True).execute()
             paper_realized = sum((t.get('pnl', 0) or 0) for t in (paper_settled.data or []))
-
-            total = cash + market_value
 
             # 5. Save snapshot
             self.db.client.table('portfolio_snapshots').insert({
