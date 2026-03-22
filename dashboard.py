@@ -31,6 +31,10 @@ def get_db():
 def health():
     return "OK"
 
+@app.route('/api/ping')
+def ping():
+    return jsonify({'ok': True})
+
 @app.route('/api/status')
 def api_status():
     try:
@@ -62,34 +66,16 @@ def api_status():
             paper_count = snapshot.get('open_paper_trades', 0)
             cost_basis = snapshot.get('positions_cost_basis', 0)
         else:
-            # Fallback: compute from trades (cost basis only, no market value)
-            all_trades_result = db.client.table('kalshi_trades').select('*').execute()
-            all_trades = all_trades_result.data or []
-            live_trades = [t for t in all_trades if t.get('order_id') not in (None, 'paper', 'forced_paper')]
-            paper_trades = [t for t in all_trades if t.get('order_id') in (None, 'paper', 'forced_paper')]
-            live_open = [t for t in live_trades if not t.get('resolved')]
-            live_settled = [t for t in live_trades if t.get('resolved')]
-            paper_open = [t for t in paper_trades if not t.get('resolved')]
-            paper_settled = [t for t in paper_trades if t.get('resolved')]
-
-            cost_basis = sum(t.get('price', 0) * t.get('count', 0) for t in live_open)
-            live_realized = sum(t.get('pnl', 0) or 0 for t in live_settled)
-            live_balance = None
-            live_cash = r.get('real_balance')
-            live_positions_value = cost_basis
+            # No snapshot yet — use defaults until bot writes first snapshot
+            live_balance = 0
+            live_cash = 0
+            live_positions_value = 0
             live_unrealized = 0
-            live_count = len(live_open)
-
-            # Fix 6: Proper paper balance calculation - never goes negative
-            paper_cost = sum(t.get('price', 0) * t.get('count', 0) for t in paper_open)
-            paper_realized = sum(t.get('pnl', 0) or 0 for t in paper_settled)
-            paper_bal = 10000 - paper_cost + paper_realized  # Start with $10k
-
-            # Auto-refill if too low
-            if paper_bal < 1000:
-                paper_bal = 10000
-
-            paper_count = len(paper_open)
+            live_realized = 0
+            live_count = 0
+            paper_bal = 10000.0
+            paper_count = 0
+            cost_basis = 0
 
         # Win/loss from settled trades (always fresh)
         live_settled_result = db.client.table('kalshi_trades').select('pnl').neq('order_id', 'paper').neq('order_id', 'forced_paper').eq('resolved', True).execute()
