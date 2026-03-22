@@ -2,11 +2,16 @@
 
 Inspired by vladmeer/kalshi-arbitrage-bot. Checks orderbook spreads and
 cross-market pricing within the same event for risk-free-ish opportunities.
+
+Enhanced with:
+  - Liquidity validation (check ask sizes before trading)
+  - Volume check (skip dead/illiquid markets)
+  - HyperThink validation (agents confirm arb is real, not stale/trap)
 """
 
 from strategies.base import BaseStrategy
 from utils.logger import setup_logger
-from utils.market_helpers import get_price, get_yes_price, get_no_price
+from utils.market_helpers import get_price, get_yes_price, get_no_price, safe_float
 from utils.api_resilience import resilient_strategy
 
 logger = setup_logger('prob_arb')
@@ -17,21 +22,25 @@ FEE_RATE = 0.035
 # Minimum profitable gap after fees (conservative estimate)
 MIN_PROFITABLE_GAP = 0.08  # 8% gap needed to overcome fees + slippage
 
+MIN_ASK_SIZE = 5       # Both sides need at least 5 contracts at ask
+MIN_VOLUME_24H = 100   # Skip markets with < 100 contracts traded in 24h
+MAX_ARB_CONTRACTS = 10 # Cap arb size
+
 
 def kalshi_fee(cost_basis):
     """Estimate Kalshi fees on a position. Kalshi charges ~3.5% on winning positions."""
     if cost_basis <= 0:
         return 0
-    # Conservative estimate: fees are ~3.5% of the position value
     return cost_basis * FEE_RATE
 
 
 class ProbabilityArbStrategy(BaseStrategy):
     """Find events where YES+NO prices don't sum to $1.00, or orderbook spread opportunities."""
 
-    def __init__(self, client, risk_manager, db):
+    def __init__(self, client, risk_manager, db, hyperthink=None):
         super().__init__(client, risk_manager, db)
-        logger.info("ProbabilityArb initialized (fee-adjusted YES+NO mispricing)")
+        self.hyperthink = hyperthink
+        logger.info("ProbabilityArb initialized (fee-adjusted, liquidity-checked, HyperThink-validated)")
 
     @resilient_strategy
     def analyze(self, markets):
@@ -57,23 +66,53 @@ class ProbabilityArbStrategy(BaseStrategy):
 
                 # Only consider if gap is large enough to overcome fees
                 if gap >= MIN_PROFITABLE_GAP:
-                    # Estimate profit: buy both sides, one wins
-                    # Cost: $1 total, get back $1 from winner minus fees
-                    est_fee = kalshi_fee(1.0)  # Fee on winning $1 position
+                    est_fee = kalshi_fee(1.0)
                     net_profit = gap - est_fee
 
-                    if net_profit > 0.01:  # At least 1 cent profit per dollar
-                        arb_found += 1
+                    if net_profit > 0.01:
                         ticker = m.get('ticker', '')
+
+                        # Liquidity check: are there enough contracts at these prices?
+                        yes_ask_size = safe_float(m.get('yes_ask_size_fp', m.get('yes_ask_size', 0)))
+                        no_ask_size = safe_float(m.get('no_ask_size_fp', m.get('no_ask_size', 0)))
+                        volume = safe_float(m.get('volume_24h_fp', m.get('volume_24h', m.get('volume', 0))))
+
+                        if yes_ask_size < MIN_ASK_SIZE or no_ask_size < MIN_ASK_SIZE:
+                            logger.debug(f"ProbArb SKIP {ticker}: illiquid (yes_size={yes_ask_size:.0f}, no_size={no_ask_size:.0f})")
+                            continue
+                        if volume < MIN_VOLUME_24H:
+                            logger.debug(f"ProbArb SKIP {ticker}: low volume ({volume:.0f} < {MIN_VOLUME_24H})")
+                            continue
+
+                        contracts = min(int(yes_ask_size), int(no_ask_size), MAX_ARB_CONTRACTS)
+
+                        # HyperThink validation: is this arb real or a trap?
+                        if self.hyperthink:
+                            is_real = self.hyperthink.validate_arb(
+                                ticker=ticker,
+                                title=m.get('title', ''),
+                                yes_ask=yes_price, no_ask=no_price,
+                                total=total, gap_pct=(gap * 100),
+                                volume=volume, contracts=contracts,
+                            )
+                            if not is_real:
+                                logger.info(f"ProbArb SKIP {ticker}: HyperThink says TRAP")
+                                continue
+
+                        arb_found += 1
                         signals.append({
                             'ticker': ticker, 'title': m.get('title', ''), 'action': 'buy',
-                            'side': 'yes', 'count': 1, 'confidence': 95,
+                            'side': 'yes', 'count': contracts, 'confidence': 95,
                             'strategy_type': 'prob_arb',
                             'edge': net_profit, 'model_prob': 0.99,
-                            'reason': f"ProbArb: YES={yes_price:.2f}+NO={no_price:.2f}={total:.2f}, gap={gap:.1%}, net={net_profit:.3f} after {est_fee:.3f} fees",
+                            'reason': (
+                                f"ProbArb: YES={yes_price:.2f}+NO={no_price:.2f}={total:.2f}, "
+                                f"gap={gap:.1%}, net={net_profit:.3f}, "
+                                f"{contracts}x (liq: yes={yes_ask_size:.0f} no={no_ask_size:.0f} vol={volume:.0f})"
+                            ),
                         })
 
-            # Spread opportunity
+            # Spread opportunity (unchanged — these are directional, not paired arbs)
             yes_ask = get_price(m, ['yes_ask', 'yes_ask_dollars'])
             no_bid = get_price(m, ['no_bid', 'no_bid_dollars'])
             if yes_ask > 0 and no_bid > 0:

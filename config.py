@@ -44,6 +44,7 @@ class Config:
     ENABLE_ORDERBOOK = os.getenv('ENABLE_ORDERBOOK', 'true').lower() == 'true'
     ENABLE_CROSS_PLATFORM = os.getenv('ENABLE_CROSS_PLATFORM', 'true').lower() == 'true'
     ENABLE_MARKET_MAKING = os.getenv('ENABLE_MARKET_MAKING', 'false').lower() == 'true'
+    ENABLE_PRECIP = os.getenv('ENABLE_PRECIP', 'true').lower() == 'true'
 
     # Monitoring
     CHECK_INTERVAL_SECONDS = int(os.getenv('CHECK_INTERVAL_SECONDS', 30))

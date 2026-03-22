@@ -36,6 +36,8 @@ from strategies.high_prob_lock import HighProbLockStrategy
 from strategies.orderbook_edge import OrderBookEdgeStrategy
 from strategies.cross_platform import CrossPlatformEdgeStrategy
 from strategies.market_making import MarketMakingStrategy
+from strategies.precip_edge import PrecipEdgeStrategy
+from utils.hyperthink import HyperThink
 from dashboard import start_dashboard
 from utils.market_helpers import get_yes_price as get_yes_price_dollars, get_volume
 from utils.ai_debate import run_debate
@@ -111,6 +113,10 @@ class KalshiBot:
 
     def _init_strategies(self):
         logger.info("Loading strategies...")
+
+        # Shared HyperThink consensus engine (Grok + Claude debate)
+        self.hyperthink = HyperThink(db=self.db)
+
         # Order matters: run scarce-signal strategies first so they get position slots
         # before WeatherEdge floods with 30+ signals
         if Config.ENABLE_GROK:
@@ -126,14 +132,16 @@ class KalshiBot:
         if Config.ENABLE_MARKET_MAKING:
             self.strategies.append(MarketMakingStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_PROB_ARB:
-            self.strategies.append(ProbabilityArbStrategy(self.client, self.risk, self.db))
+            self.strategies.append(ProbabilityArbStrategy(self.client, self.risk, self.db, hyperthink=self.hyperthink))
         if Config.ENABLE_SPORTS_NO:
             self.strategies.append(SportsNOStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_NEAR_CERTAINTY:
             self.strategies.append(NearCertaintyStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_WEATHER:
             self.strategies.append(WeatherEdgeStrategy(self.client, self.risk, self.db))
-        logger.info(f"{len(self.strategies)} strategies loaded")
+        if Config.ENABLE_PRECIP:
+            self.strategies.append(PrecipEdgeStrategy(self.client, self.risk, self.db, hyperthink=self.hyperthink))
+        logger.info(f"{len(self.strategies)} strategies loaded (HyperThink enabled)")
 
     def _reconstruct_state_from_db(self):
         """Reconstruct paper + live state from Supabase so deploys don't reset state."""
@@ -574,6 +582,9 @@ class KalshiBot:
     def run_cycle(self):
         logger.info("=" * 40)
         logger.info(f"Cycle at {datetime.now().isoformat()}")
+
+        # Reset HyperThink debate counter each cycle (max 5 per cycle)
+        self.hyperthink.reset_cycle()
 
         # Check settlements FIRST, before generating new signals
         self._check_settlements()
