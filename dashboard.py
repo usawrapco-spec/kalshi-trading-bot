@@ -83,7 +83,12 @@ def api_status():
         if real_balance is not None:
             live_daily_pnl = real_balance + live_cost - starting_balance
 
-        print(f"API returning live balance: ${real_balance:.2f}" if real_balance else "API returning live balance: None")
+        # Portfolio value = cash + open position value
+        portfolio_value = None
+        if real_balance is not None:
+            portfolio_value = real_balance + live_cost
+
+        print(f"API returning live: cash=${real_balance:.2f}, positions=${live_cost:.2f}, portfolio=${portfolio_value:.2f}" if real_balance else "API returning live balance: None")
 
         return jsonify({
             'is_running': r.get('is_running', False),
@@ -98,7 +103,9 @@ def api_status():
                 'losses': paper_losses,
             },
             'live': {
-                'balance': real_balance,
+                'balance': portfolio_value,
+                'cash': real_balance,
+                'positions_value': live_cost,
                 'daily_pnl': live_daily_pnl,
                 'positions': live_positions,
                 'wins': live_wins,
@@ -655,11 +662,16 @@ async function refreshAll(){
     fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals'),fetchJ('/api/live_status'),fetchJ('/api/debates'),fetchJ('/api/improvements')
   ]);
 
-  // LIVE STATUS
+  // LIVE STATUS — header shows portfolio value (cash + positions)
   if(live&&live.enable_trading&&live.live_strategies&&live.live_strategies.length){
     document.getElementById('liveBadge').style.display='inline';
     document.getElementById('modeBadge').textContent='HYBRID';
-    if(live.real_balance!==null&&live.real_balance!==undefined){
+    const hdrBal=status&&status.live&&status.live.balance;
+    if(hdrBal!==null&&hdrBal!==undefined){
+      document.getElementById('realBalLabel').style.display='inline';
+      document.getElementById('realBal').style.display='inline';
+      document.getElementById('realBal').textContent='$'+hdrBal.toFixed(2);
+    }else if(live.real_balance!==null&&live.real_balance!==undefined){
       document.getElementById('realBalLabel').style.display='inline';
       document.getElementById('realBal').style.display='inline';
       document.getElementById('realBal').textContent='$'+live.real_balance.toFixed(2);
@@ -682,18 +694,20 @@ async function refreshAll(){
     document.getElementById('paper-win-rate').textContent=pwr+'%';
     document.getElementById('paper-wl-record').textContent=(paper.wins||0)+'W / '+(paper.losses||0)+'L';
 
-    // LIVE TRADING
-    const live=status.live||{};
-    const lb=live.balance||0;
-    const lpnl=live.daily_pnl||0;
+    // LIVE TRADING — portfolio value = cash + positions
+    const live_s=status.live||{};
+    const lb=live_s.balance||0;
+    const lCash=live_s.cash||0;
+    const lPos=live_s.positions_value||0;
+    const lpnl=live_s.daily_pnl||0;
     document.getElementById('live-balance').textContent=lb!==null?'$'+lb.toFixed(2):'—';
+    document.getElementById('live-exposure').textContent='Cash: $'+lCash.toFixed(2)+' | Positions: $'+lPos.toFixed(2);
     document.getElementById('live-pnl').textContent=lpnl!==null?(lpnl>=0?'+$':'-$')+Math.abs(lpnl).toFixed(2):'—';
     document.getElementById('live-pnl').className='metric-value '+(lpnl>=0?'profit':'loss');
-    document.getElementById('live-positions').textContent=live.positions||0;
-    const lwr=(live.wins+live.losses)>0?((live.wins/(live.wins+live.losses))*100).toFixed(0):'—';
+    document.getElementById('live-positions').textContent=live_s.positions||0;
+    const lwr=(live_s.wins+live_s.losses)>0?((live_s.wins/(live_s.wins+live_s.losses))*100).toFixed(0):'—';
     document.getElementById('live-win-rate').textContent=lwr+'%';
-    document.getElementById('live-wl-record').textContent=(live.wins||0)+'W / '+(live.losses||0)+'L';
-    document.getElementById('live-exposure').textContent='$'+(live.total_exposure||0).toFixed(2)+' / $'+(live.max_exposure||5.00).toFixed(2)+' max';
+    document.getElementById('live-wl-record').textContent=(live_s.wins||0)+'W / '+(live_s.losses||0)+'L';
 
     // Header balance (paper)
     document.querySelectorAll('[data-field="balance"]').forEach(el=>{el.textContent='$'+pb.toFixed(2);el.style.color='#00f0ff'});
