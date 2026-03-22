@@ -1928,10 +1928,10 @@ def main():
         Config.KALSHI_API_HOST = 'https://demo-api.kalshi.co'
         logger.info("Demo mode - using demo API")
 
-    bot = KalshiBot(dry_run=True)  # Always paper trading for now
-
-    # Start Flask dashboard in background daemon thread
+    # Start Flask dashboard FIRST so healthcheck passes immediately
     start_dashboard()
+
+    bot = KalshiBot(dry_run=True)  # Always paper trading for now
 
     # Run bot trading loop on main thread (keeps process alive)
     bot.run()
