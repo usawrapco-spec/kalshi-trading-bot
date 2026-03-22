@@ -37,7 +37,9 @@ from strategies.orderbook_edge import OrderBookEdgeStrategy
 from strategies.cross_platform import CrossPlatformEdgeStrategy
 from strategies.market_making import MarketMakingStrategy
 from strategies.precip_edge import PrecipEdgeStrategy
+from strategies.crypto_momentum import CryptoMomentumStrategy
 from utils.hyperthink import HyperThink
+from utils.crypto_monitor import CryptoPriceMonitor
 from dashboard import start_dashboard
 from utils.market_helpers import get_yes_price as get_yes_price_dollars, get_volume
 from utils.ai_debate import run_debate
@@ -141,6 +143,14 @@ class KalshiBot:
             self.strategies.append(WeatherEdgeStrategy(self.client, self.risk, self.db))
         if Config.ENABLE_PRECIP:
             self.strategies.append(PrecipEdgeStrategy(self.client, self.risk, self.db, hyperthink=self.hyperthink))
+        if Config.ENABLE_CRYPTO:
+            self.crypto_monitor = CryptoPriceMonitor()
+            self.strategies.append(CryptoMomentumStrategy(
+                self.client, self.risk, self.db,
+                crypto_monitor=self.crypto_monitor, hyperthink=self.hyperthink,
+            ))
+        else:
+            self.crypto_monitor = None
         logger.info(f"{len(self.strategies)} strategies loaded (HyperThink enabled)")
 
     def _reconstruct_state_from_db(self):
@@ -670,6 +680,72 @@ class KalshiBot:
         except Exception as e:
             logger.error(f"Swing monitor failed: {e}")
 
+    def _check_crypto_settlements(self):
+        """Check if any crypto paper trades have settled."""
+        if not self.db or not self.db.client:
+            return
+        try:
+            unresolved = self.db.client.table('crypto_signals').select('*').eq('resolved', False).execute()
+            if not unresolved.data:
+                return
+
+            settled_count = 0
+            for trade in unresolved.data[:20]:
+                ticker = trade.get('ticker', '')
+                if not ticker:
+                    continue
+                try:
+                    market_data = self.client.get_market(ticker)
+                    if not market_data:
+                        continue
+                    market = market_data.get('market', market_data)
+                    result = market.get('result', '')
+                    if not result:
+                        continue
+
+                    won = (trade.get('side') == 'yes' and result == 'yes') or \
+                          (trade.get('side') == 'no' and result == 'no')
+                    entry = trade.get('price', 0)
+                    count = trade.get('count', 1)
+                    pnl = (1.0 - entry) * count if won else -(entry * count)
+
+                    # Get current crypto price for the record
+                    btc_settlement = 0
+                    if hasattr(self, 'crypto_monitor') and self.crypto_monitor:
+                        prices = self.crypto_monitor.last_prices
+                        btc_settlement = prices.get('BTC', 0)
+
+                    self.db.client.table('crypto_signals').update({
+                        'resolved': True,
+                        'exit_price': 1.0 if won else 0.0,
+                        'pnl': round(pnl, 4),
+                        'resolved_at': datetime.utcnow().isoformat(),
+                        'btc_price_at_settlement': btc_settlement,
+                    }).eq('id', trade['id']).execute()
+
+                    # Also update in kalshi_trades
+                    try:
+                        self.db.client.table('kalshi_trades').update({
+                            'resolved': True,
+                            'exit_price': 1.0 if won else 0.0,
+                            'pnl': round(pnl, 4),
+                            'resolved_at': datetime.utcnow().isoformat(),
+                        }).eq('ticker', ticker).eq('strategy', 'crypto_momentum').eq('resolved', False).execute()
+                    except Exception:
+                        pass
+
+                    emoji = "WIN" if won else "LOSS"
+                    logger.info(f"CRYPTO SETTLED: {ticker} {emoji} P&L=${pnl:+.2f}")
+                    settled_count += 1
+                except Exception as e:
+                    logger.debug(f"Crypto settlement check failed for {ticker}: {e}")
+                    continue
+
+            if settled_count > 0:
+                logger.info(f"Crypto: settled {settled_count} trades")
+        except Exception as e:
+            logger.error(f"Crypto settlement check failed: {e}")
+
     def run_cycle(self):
         logger.info("=" * 40)
         logger.info(f"Cycle at {datetime.now().isoformat()}")
@@ -679,6 +755,9 @@ class KalshiBot:
 
         # Check settlements FIRST, before generating new signals
         self._check_settlements()
+
+        # Check crypto settlements (15-min markets settle fast)
+        self._check_crypto_settlements()
 
         # Take portfolio snapshot (throttled to every 5 min)
         self._take_portfolio_snapshot()
@@ -1294,13 +1373,13 @@ class KalshiBot:
                 'confidence': 0, 'order_id': 'forced_paper', 'price': entry,
             })
 
-    def _check_settlements(self, markets):
+    def _check_settlements(self, markets=None):
         """Check if any open paper trades have settled and calculate P&L."""
         if not self.risk.positions:
             return
 
         # Build ticker -> market lookup from current data
-        market_map = {m.get('ticker'): m for m in markets}
+        market_map = {m.get('ticker'): m for m in markets} if markets else {}
 
         settled = []
         for ticker, pos in list(self.risk.positions.items()):

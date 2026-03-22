@@ -297,6 +297,41 @@ def api_portfolio_history():
     except Exception:
         return jsonify([])
 
+@app.route('/api/crypto')
+def api_crypto():
+    """Crypto momentum trading data."""
+    try:
+        db = get_db()
+        result = db.client.table('crypto_signals').select('*').order('timestamp', desc=True).limit(50).execute()
+        signals = result.data or []
+
+        resolved = [s for s in signals if s.get('resolved')]
+        wins = sum(1 for s in resolved if (s.get('pnl', 0) or 0) > 0)
+        losses = sum(1 for s in resolved if (s.get('pnl', 0) or 0) <= 0)
+        total_pnl = sum(s.get('pnl', 0) or 0 for s in resolved)
+
+        return jsonify({
+            'total_signals': len(signals),
+            'resolved': len(resolved),
+            'wins': wins,
+            'losses': losses,
+            'win_rate': round(wins / max(len(resolved), 1) * 100, 1),
+            'total_pnl': round(total_pnl, 2),
+            'recent': [{
+                'ticker': s.get('ticker', ''),
+                'side': s.get('side', ''),
+                'price': s.get('price', 0),
+                'count': s.get('count', 0),
+                'btc_price_at_entry': s.get('btc_price_at_entry', 0),
+                'btc_momentum_5m': s.get('btc_momentum_5m', 0),
+                'hyperthink_consensus': s.get('hyperthink_consensus', ''),
+                'resolved': s.get('resolved', False),
+                'pnl': s.get('pnl', 0),
+            } for s in signals[:10]],
+        })
+    except Exception:
+        return jsonify({'total_signals': 0, 'resolved': 0, 'wins': 0, 'losses': 0, 'win_rate': 0, 'total_pnl': 0, 'recent': []})
+
 @app.route('/api/live_status')
 def api_live_status():
     """Live trading status — real balance, live positions, live trades."""
@@ -530,6 +565,27 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
   </div>
 </div>
 
+<!-- CRYPTO MOMENTUM PANEL -->
+<div class="panel" id="cryptoPanel" style="margin:10px 16px;border-color:rgba(138,43,226,0.3);background:rgba(138,43,226,0.02)">
+  <div class="panel-title" style="color:#a855f7;display:flex;justify-content:space-between;align-items:center">
+    <span>&#x1fa99; CRYPTO MOMENTUM (Paper)</span>
+    <span id="crypto-summary" style="font-size:.65rem;color:rgba(255,255,255,0.3)">Loading...</span>
+  </div>
+  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:0 14px 8px">
+    <div class="metric"><div class="metric-label">Signals</div><div class="metric-value" id="crypto-signals" style="color:#a855f7">0</div></div>
+    <div class="metric"><div class="metric-label">Wins</div><div class="metric-value" id="crypto-wins" style="color:#39ff14">0</div></div>
+    <div class="metric"><div class="metric-label">Losses</div><div class="metric-value" id="crypto-losses" style="color:#ff3333">0</div></div>
+    <div class="metric"><div class="metric-label">Win Rate</div><div class="metric-value" id="crypto-wr" style="color:#a855f7">—%</div></div>
+    <div class="metric"><div class="metric-label">P&L</div><div class="metric-value" id="crypto-pnl" style="color:#a855f7">$0.00</div></div>
+  </div>
+  <div style="max-height:110px;overflow-y:auto;padding:0 14px 10px">
+    <table class="ttable" style="font-size:.65rem">
+      <thead><tr><th>Ticker</th><th>Side</th><th>BTC</th><th>Mom 5m</th><th>HyperThink</th><th>P&L</th></tr></thead>
+      <tbody id="cryptoBody"><tr><td colspan="6" style="color:rgba(255,255,255,0.15)">No crypto signals yet</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
 <!-- MAIN 3-COLUMN -->
 <div class="grid-main">
 
@@ -748,8 +804,8 @@ async function fetchJ(url){try{const r=await fetch(url);return r.ok?await r.json
 
 async function refreshAll(){
   scanPulse();
-  const[status,trades,strats,equity,signals,live,debates,improvements,swing]=await Promise.all([
-    fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals'),fetchJ('/api/live_status'),fetchJ('/api/debates'),fetchJ('/api/improvements'),fetchJ('/api/swing')
+  const[status,trades,strats,equity,signals,live,debates,improvements,swing,crypto]=await Promise.all([
+    fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals'),fetchJ('/api/live_status'),fetchJ('/api/debates'),fetchJ('/api/improvements'),fetchJ('/api/swing'),fetchJ('/api/crypto')
   ]);
 
   // LIVE STATUS — header shows portfolio value (cash + positions)
@@ -954,6 +1010,33 @@ async function refreshAll(){
       }).join('');
     }else{
       sb.innerHTML='<tr><td colspan="6" style="color:rgba(255,255,255,0.15)">No swing positions</td></tr>';
+    }
+  }
+
+  // CRYPTO MOMENTUM PANEL
+  if(crypto){
+    document.getElementById('crypto-signals').textContent=crypto.total_signals||0;
+    document.getElementById('crypto-wins').textContent=crypto.wins||0;
+    document.getElementById('crypto-losses').textContent=crypto.losses||0;
+    document.getElementById('crypto-wr').textContent=(crypto.win_rate||0).toFixed(0)+'%';
+    const cPnl=crypto.total_pnl||0;
+    document.getElementById('crypto-pnl').textContent=(cPnl>=0?'+$':'-$')+Math.abs(cPnl).toFixed(2);
+    document.getElementById('crypto-pnl').className='metric-value '+(cPnl>=0?'profit':'loss');
+    document.getElementById('crypto-summary').textContent=crypto.resolved+' settled | '+(crypto.total_signals-crypto.resolved)+' open';
+    const cb=document.getElementById('cryptoBody');
+    if(crypto.recent&&crypto.recent.length){
+      cb.innerHTML=crypto.recent.map(s=>{
+        const side=(s.side||'').toUpperCase();
+        const pnl=s.pnl||0;
+        const res=s.resolved;
+        const pnlStr=res?(pnl>=0?'+$'+pnl.toFixed(2):'-$'+Math.abs(pnl).toFixed(2)):'OPEN';
+        const pnlColor=res?(pnl>=0?'#39ff14':'#ff3333'):'rgba(255,255,255,0.3)';
+        const btc=s.btc_price_at_entry||0;
+        const mom=(s.btc_momentum_5m||0)*100;
+        return`<tr><td style="color:#a855f7">${(s.ticker||'').substring(0,24)}</td><td style="color:${side==='YES'?'#39ff14':'#ff6d00'}">${side}</td><td>$${btc.toLocaleString()}</td><td>${mom>=0?'+':''}${mom.toFixed(1)}%</td><td>${s.hyperthink_consensus||'—'}</td><td style="color:${pnlColor}">${pnlStr}</td></tr>`;
+      }).join('');
+    }else{
+      cb.innerHTML='<tr><td colspan="6" style="color:rgba(255,255,255,0.15)">No crypto signals yet</td></tr>';
     }
   }
 }
