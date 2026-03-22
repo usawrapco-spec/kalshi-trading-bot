@@ -78,27 +78,32 @@ def api_status():
 
         # Portfolio value = cash + MARKET VALUE of open positions
         # Fetch current prices for each open live position
+        from utils.market_helpers import get_yes_price, get_no_price
         positions_market_value = 0.0
         if real_cash is not None and live_open:
             try:
                 for t in live_open:
                     ticker = t.get('ticker', '')
-                    cost_basis = t.get('price', 0) * t.get('count', 0)
+                    qty = t.get('count', 0)
+                    cost_per = t.get('price', 0)
+                    cost_basis = cost_per * qty
                     try:
                         market_data = kalshi_client.get_market(ticker)
                         market = market_data.get('market', market_data) if market_data else {}
                         if t.get('side') == 'yes':
-                            current_price = float(market.get('yes_bid', market.get('yes_bid_dollars', t.get('price', 0))))
+                            current_price = get_yes_price(market)
                         else:
-                            current_price = float(market.get('no_bid', market.get('no_bid_dollars', 1.0 - t.get('price', 0))))
-                        # Kalshi may return cents — normalize to dollars
-                        if current_price > 1.0:
-                            current_price = current_price / 100.0
-                        market_val = current_price * t.get('count', 0)
-                        print(f"Position {ticker}: cost=${cost_basis:.2f} market=${market_val:.2f}")
-                        positions_market_value += market_val
-                    except Exception:
-                        print(f"Position {ticker}: cost=${cost_basis:.2f} market=FALLBACK")
+                            current_price = get_no_price(market)
+                        # If market returned 0, fall back to cost basis per contract
+                        if current_price <= 0:
+                            print(f"POSITION: {ticker} side={t.get('side')} cost=${cost_per} market=$0 (no bid) qty={qty} -> FALLBACK to cost_basis=${cost_basis:.4f}")
+                            positions_market_value += cost_basis
+                        else:
+                            market_val = current_price * qty
+                            print(f"POSITION: {ticker} side={t.get('side')} cost=${cost_per} market=${current_price} qty={qty} -> val=${market_val:.4f}")
+                            positions_market_value += market_val
+                    except Exception as e:
+                        print(f"POSITION: {ticker} side={t.get('side')} cost=${cost_per} qty={qty} -> ERROR: {e} -> FALLBACK to cost_basis=${cost_basis:.4f}")
                         positions_market_value += cost_basis
             except Exception as e:
                 print(f"Market value fetch failed, using cost basis: {e}")
