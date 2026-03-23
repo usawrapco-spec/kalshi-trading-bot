@@ -15,8 +15,7 @@ PORT = int(os.environ.get('PORT', 8080))
 
 MIN_PRICE = 0.02
 MAX_PRICE = 0.15
-BUY_COUNT = 2
-MAX_BUYS_PER_CYCLE = 5
+MAX_BUYS_PER_CYCLE = 20
 CYCLE_SECONDS = 30
 STARTING_BALANCE = 50.00
 RESERVE_BALANCE = 5.00
@@ -139,12 +138,13 @@ def fetch_trending():
     try:
         resp = kalshi_get('/markets?status=open&limit=200')
         markets = resp.get('markets', [])
-        # Sort by volume — whatever's hottest right now
         markets.sort(key=lambda m: float(m.get('volume_24h', '0') or m.get('volume_24h_fp', '0') or '0'), reverse=True)
-        top = markets[:50]  # Top 50 by volume
+        top = markets[:50]
         cheap = _cheap_from_markets(top, 'trending')
+        # Only require volume for trending — these are hot markets, need activity
+        cheap = [c for c in cheap if c['volume'] >= 50]
         cheap.sort(key=lambda x: x['volume'], reverse=True)
-        return cheap[:10]
+        return cheap
     except Exception as e:
         logger.warning(f"Trending fetch: {e}")
         return []
@@ -168,7 +168,7 @@ def fetch_crypto():
                 logger.info(f"  {t[-25:]}: YES={ya:.2f} NO={na:.2f}")
         except Exception as e:
             logger.warning(f"Crypto {series}: {e}")
-    return _cheap_from_markets(all_markets, 'crypto')[:10]
+    return _cheap_from_markets(all_markets, 'crypto')
 
 
 def fetch_weather():
@@ -180,7 +180,7 @@ def fetch_weather():
             all_markets.extend(resp.get('markets', []))
         except:
             pass
-    return _cheap_from_markets(all_markets, 'weather')[:10]
+    return _cheap_from_markets(all_markets, 'weather')
 
 
 # === PAPER TRADING ===
@@ -189,13 +189,23 @@ def kalshi_fee(price):
     return math.ceil(0.07 * price * (1 - price) * 100) / 100
 
 
+def get_buy_count(price):
+    """More contracts for cheaper prices — spread wide."""
+    if price <= 0.05:
+        return 5
+    if price <= 0.10:
+        return 3
+    return 2
+
+
 def buy(ticker, side, price, strategy, reason):
-    cost = price * BUY_COUNT
-    logger.info(f"BUY: {ticker} {side} x{BUY_COUNT} @ ${price:.2f} = ${cost:.2f} | {reason}")
+    count = get_buy_count(price)
+    cost = price * count
+    logger.info(f"BUY: {ticker} {side} x{count} @ ${price:.2f} = ${cost:.2f} | {reason}")
     try:
         db.table('trades').insert({
             'ticker': ticker, 'side': side, 'action': 'buy',
-            'price': float(price), 'count': BUY_COUNT,
+            'price': float(price), 'count': count,
             'strategy': strategy, 'reason': reason,
             'last_seen_bid': float(price),
         }).execute()
@@ -350,7 +360,7 @@ def run_cycle():
                 break
             if bought >= MAX_BUYS_PER_CYCLE:
                 break
-            cost = signal['price'] * BUY_COUNT
+            cost = signal['price'] * get_buy_count(signal['price'])
             if cost > trading_bal - RESERVE_BALANCE:
                 continue
             if (signal['ticker'], signal['side']) in owned:
