@@ -205,29 +205,20 @@ def find_buy_candidates(markets):
     candidates = []
     for market in markets:
         ticker = market.get('ticker', '')
-        status = market.get('status', '')
-        if status != 'open':
-            continue
         if 'KXMVE' in ticker:
             continue
 
-        yes_ask = sf(market.get('yes_ask_dollars', '0'))
-        yes_bid = sf(market.get('yes_bid_dollars', '0'))
-        no_ask = sf(market.get('no_ask_dollars', '0'))
-        no_bid = sf(market.get('no_bid_dollars', '0'))
-
-        # Fallback to cents fields
-        if yes_ask == 0 and yes_bid == 0 and no_ask == 0 and no_bid == 0:
-            yes_ask = sf(market.get('yes_ask', 0)) / 100.0 if sf(market.get('yes_ask', 0)) > 1 else sf(market.get('yes_ask', 0))
-            yes_bid = sf(market.get('yes_bid', 0)) / 100.0 if sf(market.get('yes_bid', 0)) > 1 else sf(market.get('yes_bid', 0))
-            no_ask = sf(market.get('no_ask', 0)) / 100.0 if sf(market.get('no_ask', 0)) > 1 else sf(market.get('no_ask', 0))
-            no_bid = sf(market.get('no_bid', 0)) / 100.0 if sf(market.get('no_bid', 0)) > 1 else sf(market.get('no_bid', 0))
+        yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
+        yes_bid = float(market.get('yes_bid_dollars', '0') or '0')
+        no_ask = float(market.get('no_ask_dollars', '0') or '0')
+        no_bid = float(market.get('no_bid_dollars', '0') or '0')
 
         if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid > 0:
             candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
         if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid > 0:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
+    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (3-20c with bid)")
     return candidates
 
 
