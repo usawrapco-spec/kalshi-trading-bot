@@ -1122,20 +1122,18 @@ tr:hover{background:#1a1a1a !important}
   <div class="scanner-cats" id="scanner-cats">Waiting for first scan...</div>
 </div>
 
-<!-- Panels -->
-<div class="panels-row">
-  <div class="panel">
-    <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
-    <div class="panel-body"><table><thead><tr>
-      <th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Bid</th><th>P&amp;L</th><th>Gain</th>
-    </tr></thead><tbody id="open-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
-  </div>
-  <div class="panel">
-    <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
-    <div class="panel-body"><table><thead><tr>
-      <th>Time</th><th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>P&amp;L</th><th>Gain</th>
-    </tr></thead><tbody id="trades-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
-  </div>
+<!-- Combined Positions & Trades -->
+<div class="panel" style="margin-bottom:14px">
+  <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
+  <div class="panel-body"><table><thead><tr>
+    <th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Bid</th><th>P&amp;L</th><th>Gain</th>
+  </tr></thead><tbody id="open-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
+</div>
+<div class="panel" style="margin-bottom:14px">
+  <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
+  <div class="panel-body"><table><thead><tr>
+    <th>Time</th><th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>P&amp;L</th><th>Gain</th>
+  </tr></thead><tbody id="trades-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <!-- Equity Curve -->
