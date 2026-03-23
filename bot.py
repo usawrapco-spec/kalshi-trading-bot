@@ -1,5 +1,5 @@
 """
-Random exit above 30%, block monthly/weekly, expiry exit all.
+Random exit above 30%, instant at 100%, 1 contract, 70% spread.
 Buy cheap crypto contracts. Above 30% gain, dice roll each cycle to take profit.
 """
 
@@ -248,43 +248,20 @@ def clear_non_btcd():
 
 
 # === SELL LOGIC ===
-# 15s timeout above 30%, instant sell 100%+, random catch in between
-
-entry_times = {}
+# Random exit above 30%, instant at 100%
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker='', side=''):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
-    now = time.time()
 
-    key = f"{ticker}_{side}"
-    if key not in entry_times:
-        entry_times[key] = now
-    age = now - entry_times[key]
-
-    # 100%+ — instant sell
     if gain_pct >= 100:
-        entry_times.pop(key, None)
         return True, count, f"BIG WIN +{gain_pct:.0f}%"
 
-    # 15 seconds old + above 30% — sell it, stop waiting
-    if age >= 15 and gain_pct >= 30:
-        entry_times.pop(key, None)
-        return True, count, f"TIMEOUT +{gain_pct:.0f}% ({age:.0f}s)"
-
-    # Under 15s and 30-99% — random chance to catch spikes
     if gain_pct >= 30:
         sell_chance = min(0.80, 0.10 + (gain_pct - 30) * 0.005)
         if random.random() < sell_chance:
-            entry_times.pop(key, None)
             return True, count, f"TAKE PROFIT +{gain_pct:.0f}%"
-
-    # Expiry exit
-    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
-        if gain_pct > 0:
-            entry_times.pop(key, None)
-            return True, count, f"EXPIRY EXIT {gain_pct:+.0f}%"
 
     return False, 0, None
 
@@ -305,12 +282,12 @@ def find_buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars', '0') or '0')
         no_bid = float(market.get('no_bid_dollars', '0') or '0')
 
-        if 0.03 <= yes_ask <= 0.20 and yes_bid >= yes_ask * 0.90:
+        if 0.03 <= yes_ask <= 0.20 and yes_bid >= yes_ask * 0.70:
             candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
-        if 0.03 <= no_ask <= 0.20 and no_bid >= no_ask * 0.90:
+        if 0.03 <= no_ask <= 0.20 and no_bid >= no_ask * 0.70:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (block monthly/weekly, 3-20c, 90% spread)")
+    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (block monthly/weekly, 3-20c, 70% spread)")
     return candidates
 
 
@@ -560,7 +537,7 @@ def sync_with_kalshi():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — random exit above 30%, expiry exit")
+    logger.info("check_sells() — random exit above 30%, instant 100%")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -960,7 +937,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; random exit above 30%, block monthly, expiry exit all</div>
+  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; random exit above 30%, instant 100%, 70% spread</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -991,10 +968,9 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
-  <div class="status-item">Buy: 3-20c, 90% spread</div>
-  <div class="status-item">Strategy: random exit 30%+</div>
-  <div class="status-item">Expiry exit: 5min</div>
-  <div class="status-item">Max: 5 contracts</div>
+  <div class="status-item">Buy: 3-20c, 70% spread</div>
+  <div class="status-item">Strategy: random exit 30%+, instant 100%</div>
+  <div class="status-item">Max: 1 contract</div>
   <div class="status-item">All crypto series</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
@@ -1165,8 +1141,7 @@ def cash_out_all():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — cash out all, then random exit above 30%, block monthly, expiry exit all")
-    cash_out_all()
+    logger.info("Bot starting — random exit above 30%, instant 100%, 1 contract, 70% spread")
     clear_dead()
     sync_with_kalshi()
     cycle_count = 0
