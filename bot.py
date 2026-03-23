@@ -310,6 +310,26 @@ def scan_and_buy():
 
 def run_cycle():
     logger.info("=== CYCLE START ===")
+
+    # TEMP TEST - remove after confirming it works
+    logger.info("FORCE TEST BUY")
+    try:
+        market = kalshi_get('/markets/KXHIGHCHI-26MAR23-T47')
+        m = market.get('market', market)
+        price = float(m.get('yes_ask_dollars', '0') or '0')
+        logger.info(f"TEST: KXHIGHCHI-26MAR23-T47 yes_ask={price} type={type(price)} cheap={0.03 <= price <= 0.15}")
+        if 0.03 <= price <= 0.15:
+            db.table('trades').insert({
+                'ticker': 'KXHIGHCHI-26MAR23-T47', 'side': 'yes', 'action': 'buy',
+                'price': price, 'count': 1, 'strategy': 'test', 'reason': 'FORCE TEST'
+            }).execute()
+            logger.info(f"TEST BUY SUCCESS at {price}")
+        else:
+            logger.info(f"TEST: price {price} not in range - WHY?")
+    except Exception as e:
+        logger.error(f"TEST FAILED: {e}")
+    # END TEMP TEST
+
     try:
         check_positions()
     except Exception as e:
