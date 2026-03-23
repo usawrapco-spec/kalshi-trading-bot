@@ -268,7 +268,13 @@ def buy_candidates(markets):
         if ticker in owned:
             continue
 
-        # No expiry filter — buy anything with a bid in range
+        # Skip if less than 5 minutes to expiry
+        close_time = market.get('close_time') or market.get('expected_expiration_time')
+        if close_time:
+            close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+            mins_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 60
+            if mins_left < 5:
+                continue
 
         yes_ask = sf(market.get('yes_ask_dollars', '0'))
         yes_bid = sf(market.get('yes_bid_dollars', '0'))
