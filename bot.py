@@ -287,8 +287,6 @@ def find_buy_candidates(markets):
         ticker = market.get('ticker', '')
         if 'KXMVE' in ticker:
             continue
-        if '15M' not in ticker:
-            continue  # ONLY 15-minute contracts
 
         yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
         yes_bid = float(market.get('yes_bid_dollars', '0') or '0')
