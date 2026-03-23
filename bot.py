@@ -29,8 +29,6 @@ MAX_DEPLOYMENT_PCT = 0.95
 MAX_SPEND_PER_TRADE_PCT = 0.15
 MAX_SPEND_PER_CYCLE = 25
 MAX_OPEN_POSITIONS = 200
-PROFIT_SAVE_PCT = 0.20
-PROFIT_REINVEST_PCT = 0.80
 
 # === CRYPTO SERIES — the only thing we scan ===
 CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
@@ -155,19 +153,10 @@ def get_balance():
         return 0.0
 
 
-def get_saved_balance():
-    sells = db.table('trades').select('pnl') \
-        .eq('action', 'sell').not_.is_('pnl', 'null').execute()
-    total_wins = sum(max(0.0, sf(t['pnl'])) for t in (sells.data or []))
-    return round(total_wins * PROFIT_SAVE_PCT, 4)
-
-
 def get_trading_balance():
-    total = get_balance()
-    saved = get_saved_balance()
-    trading = max(0.0, total - saved)
-    logger.info(f"Balance: ${total:.2f} total | ${trading:.2f} trading | ${saved:.2f} SAVED")
-    return total, trading, saved
+    balance = get_balance()
+    logger.info(f"Balance: ${balance:.2f}")
+    return balance
 
 
 def get_owned():
@@ -370,9 +359,6 @@ def check_sells():
                 continue
 
             logger.info(f"SELL: {ticker} {side} x{sell_qty} @ ${current_bid:.2f} | {reason} | pnl=${pnl:.4f}")
-            if pnl > 0:
-                banked = pnl * PROFIT_SAVE_PCT
-                logger.info(f"PROFIT: ${pnl:.4f} total | ${banked:.4f} BANKED")
 
             try:
                 db.table('trades').insert({
@@ -400,10 +386,10 @@ def check_sells():
 # === RUN BUYS ===
 
 def run_buys(markets):
-    total_balance, trading_balance, saved_balance = get_trading_balance()
+    trading_balance = get_trading_balance()
     owned = get_owned()
     num_open = len(owned)
-    logger.info(f"Own {num_open} positions | trading=${trading_balance:.2f} saved=${saved_balance:.2f}")
+    logger.info(f"Own {num_open} positions | balance=${trading_balance:.2f}")
 
     if num_open >= MAX_OPEN_POSITIONS:
         logger.info(f"At max positions ({MAX_OPEN_POSITIONS}), skipping buys")
@@ -472,8 +458,8 @@ def run_buys(markets):
 # === MAIN CYCLE ===
 
 def run_cycle():
-    total, trading, saved = get_trading_balance()
-    logger.info(f"=== CYCLE START === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
+    balance = get_trading_balance()
+    logger.info(f"=== CYCLE START === Balance: ${balance:.2f}")
 
     try:
         check_sells()
@@ -486,8 +472,8 @@ def run_cycle():
     except Exception as e:
         logger.error(f"Buy error: {e}")
 
-    total, trading, saved = get_trading_balance()
-    logger.info(f"=== CYCLE END === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
+    balance = get_trading_balance()
+    logger.info(f"=== CYCLE END === Balance: ${balance:.2f}")
 
 
 # === DASHBOARD ===
@@ -501,8 +487,6 @@ def health():
 def api_status():
     try:
         balance = get_balance()
-        saved = get_saved_balance()
-        trading = max(0.0, balance - saved)
 
         sells = db.table('trades').select('pnl') \
             .eq('action', 'sell').not_.is_('pnl', 'null').execute()
@@ -520,17 +504,8 @@ def api_status():
         positions_cost = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in live_positions), 2)
         cash = round(balance - positions_cost, 2)
 
-        today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        today_sells = db.table('trades').select('pnl') \
-            .eq('action', 'sell').not_.is_('pnl', 'null') \
-            .gte('created_at', today_str).execute()
-        saved_today = round(sum(max(0.0, sf(t['pnl'])) for t in (today_sells.data or [])) * PROFIT_SAVE_PCT, 4)
-
         return jsonify({
             'balance': round(balance, 2),
-            'trading': round(trading, 2),
-            'saved': round(saved, 4),
-            'saved_today': saved_today,
             'net_pnl': round(net_pnl, 4),
             'wins': wins,
             'losses': losses,
@@ -655,7 +630,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="portfolio-breakdown">
     <div class="item"><div class="label">Positions</div><div class="val" id="p-positions">...</div></div>
     <div class="item"><div class="label">Cash</div><div class="val" id="p-cash">...</div></div>
-    <div class="item"><div class="label">Banked</div><div class="val green" id="p-saved">...</div></div>
+    <div class="item"><div class="label">Balance</div><div class="val" id="p-balance">...</div></div>
     <div class="item"><div class="label">Record</div><div class="val" id="p-record">...</div></div>
   </div>
 </div>
@@ -685,8 +660,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item">Sell: half at +100%</div>
   <div class="status-item">Expiry: save all green</div>
   <div class="status-item">Max: 5 contracts</div>
-  <div class="status-item">Bank: 20% of wins</div>
-  <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span></div>
+  <div class="status-item">Full balance trading</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
 <div class="footer">Crypto Scalper &mdash; auto-refresh 15s</div>
@@ -724,12 +698,8 @@ async function refresh(){
 
     $('p-positions').textContent='$'+posVal.toFixed(2);
     $('p-cash').textContent='$'+cash.toFixed(2);
-    var savedToday=status.saved_today||0;
-    $('p-saved').innerHTML='$'+(status.saved||0).toFixed(2)
-      +(savedToday>0?'<div style="font-size:10px;color:#00d673;margin-top:2px">+$'+savedToday.toFixed(2)+' today</div>':'')
-      +'<div style="font-size:9px;color:#555;margin-top:2px">Protected forever</div>';
+    $('p-balance').textContent='$'+bal.toFixed(2);
     $('p-record').innerHTML='<span class="green">'+status.wins+'W</span> <span class="gray">/</span> <span class="red">'+status.losses+'L</span>';
-    $('sb-saved').textContent='$'+(status.saved||0).toFixed(2);
   }
 
   if(open&&!open.error){
