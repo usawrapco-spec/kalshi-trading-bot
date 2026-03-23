@@ -268,19 +268,17 @@ def scan_and_buy():
     # Priority 1: Crypto 15-min
     for series in CRYPTO_SERIES:
         markets = get_series_markets(series)
+        logger.info(f"Crypto {series}: {len(markets)} markets — raw prices: {[(m.get('ticker','?'), m.get('yes_ask_dollars','?'), m.get('no_ask_dollars','?')) for m in markets[:3]]}")
         cheap = count_cheap(markets)
-        logger.info(f"Crypto {series}: {len(markets)} markets, {len(cheap)} cheap (3-15¢)")
-        if cheap:
-            logger.info(f"  Sample: {cheap[0]['ticker']} YES={cheap[0].get('yes_ask_dollars')} NO={cheap[0].get('no_ask_dollars')}")
+        logger.info(f"  {len(cheap)} cheap (3-15¢)")
         scan_markets(markets, 'crypto')
 
     # Priority 2: Trending/high-volume
     trending = get_trending_markets()
     trending.sort(key=lambda m: float(m.get('volume_24h_fp', '0') or '0'), reverse=True)
+    logger.info(f"Trending: {len(trending)} markets — raw prices: {[(m.get('ticker','?'), m.get('yes_ask_dollars','?'), m.get('no_ask_dollars','?')) for m in trending[:3]]}")
     cheap = count_cheap(trending)
-    logger.info(f"Trending: {len(trending)} markets, {len(cheap)} cheap (3-15¢)")
-    if cheap:
-        logger.info(f"  Sample: {cheap[0]['ticker']} YES={cheap[0].get('yes_ask_dollars')} NO={cheap[0].get('no_ask_dollars')}")
+    logger.info(f"  {len(cheap)} cheap (3-15¢)")
     scan_markets(trending, 'trending')
 
     # Priority 3: Weather
@@ -288,11 +286,13 @@ def scan_and_buy():
     weather_cheap = 0
     for series in WEATHER_SERIES:
         markets = get_series_markets(series)
+        if markets:
+            logger.info(f"Weather {series}: {len(markets)} markets — raw prices: {[(m.get('ticker','?'), m.get('yes_ask_dollars','?'), m.get('no_ask_dollars','?')) for m in markets[:3]]}")
+        else:
+            logger.info(f"Weather {series}: 0 markets returned")
         cheap = count_cheap(markets)
         weather_total += len(markets)
         weather_cheap += len(cheap)
-        if cheap:
-            logger.info(f"Weather {series}: {len(markets)} markets, {len(cheap)} cheap — sample: {cheap[0]['ticker']} YES={cheap[0].get('yes_ask_dollars')} NO={cheap[0].get('no_ask_dollars')}")
         scan_markets(markets, 'weather')
     logger.info(f"Weather total: {weather_total} markets, {weather_cheap} cheap (3-15¢)")
 
