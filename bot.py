@@ -527,50 +527,29 @@ class KalshiBot:
 
                     unrealized_pct = (current_bid - cost_basis) / cost_basis
 
-                    # --- Get fresh model edge from weather strategy cache ---
-                    current_edge = None
-                    for strat in self.strategies:
-                        if hasattr(strat, '_cache_high'):
-                            # Re-evaluate using the strategy's _evaluate method
-                            sig = strat._evaluate(market)
-                            if sig:
-                                current_edge = sig.get('edge', 0)
-                            break
-
-                    # --- DECISION MATRIX ---
+                    # --- SCALPING SELL RULES ---
                     should_sell = False
                     reason = ""
 
-                    # Rule 1: Up 100%+ and edge shrunk below 20%
-                    if unrealized_pct >= 1.00 and current_edge is not None and current_edge < 0.20:
+                    # Rule 1: Up 100%+ — always sell (doubled money)
+                    if unrealized_pct >= 1.00:
                         should_sell = True
-                        reason = f"TAKE PROFIT: +{unrealized_pct:.0%}, edge={current_edge:.0%}"
+                        reason = f"BIG WIN: +{unrealized_pct:.0%} (${cost_basis:.2f}->${current_bid:.2f})"
 
-                    # Rule 2: Up 50%+ and edge < 10%
-                    if unrealized_pct >= 0.50 and current_edge is not None and current_edge < 0.10:
+                    # Rule 2: Up 50%+ — take profit
+                    elif unrealized_pct >= 0.50:
                         should_sell = True
-                        reason = f"EDGE GONE: +{unrealized_pct:.0%}, edge={current_edge:.0%}"
+                        reason = f"TAKE PROFIT: +{unrealized_pct:.0%} (${cost_basis:.2f}->${current_bid:.2f})"
 
-                    # Rule 3: Edge reversed (model says we're wrong)
-                    if current_edge is not None and current_edge < -0.10:
+                    # Rule 3: Bought cheap (≤20c), now worth ≥30c — lock gain
+                    elif cost_basis <= 0.20 and current_bid >= 0.30:
                         should_sell = True
-                        reason = f"EDGE REVERSED: edge={current_edge:.0%}"
+                        reason = f"PUMP SELL: ${cost_basis:.2f}->${current_bid:.2f} (+{unrealized_pct:.0%})"
 
-                    # Rule 4: Bought cheap (≤15c), now worth ≥50c — lock big gain
-                    if current_bid >= 0.50 and cost_basis <= 0.15:
+                    # Rule 4: Down 50%+ — stop loss
+                    elif unrealized_pct <= -0.50:
                         should_sell = True
-                        reason = f"LOCK BIG GAIN: ${cost_basis:.2f}->${current_bid:.2f} (+{unrealized_pct:.0%})"
-
-                    # Rule 5: HOLD override — model still very confident with big edge
-                    if current_edge is not None and current_edge >= 0.30:
-                        # Check model prob from the signal
-                        for strat in self.strategies:
-                            if hasattr(strat, '_cache_high'):
-                                sig = strat._evaluate(market)
-                                if sig and sig.get('model_prob', 0) >= 0.90:
-                                    should_sell = False
-                                    reason = f"HOLD: model={sig['model_prob']:.0%}, edge={current_edge:.0%}"
-                                break
+                        reason = f"STOP LOSS: {unrealized_pct:.0%} (${cost_basis:.2f}->${current_bid:.2f})"
 
                     if should_sell:
                         logger.info(f"EXIT: {ticker} — {reason}")
@@ -1394,6 +1373,11 @@ class KalshiBot:
                                 logger.error(f"Failed to log debate: {e}")
                         if not should_trade:
                             continue
+
+                # --- GLOBAL CHEAP ENTRY FILTER: only buy 3c-20c contracts ---
+                if price_for_side < 0.03 or price_for_side > 0.20:
+                    logger.debug(f"  SKIP {sig['ticker']}: price ${price_for_side:.2f} outside 3c-20c scalp range")
+                    continue
 
                 # --- LIVE vs PAPER routing ---
                 raw_strategy = sig.get('strategy_type', 'unknown')

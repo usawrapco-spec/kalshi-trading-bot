@@ -148,16 +148,16 @@ class PositionBook:
 class ExitManager:
     """Runs every cycle. Checks positions against current market prices. Sells actively."""
 
-    # AGGRESSIVE EXIT THRESHOLDS - SELL MORE FREQUENTLY
-    TAKE_PROFIT = 0.30          # 30% gain (was 25%)
-    SCALP_CHEAP = 0.15          # 15% on cheap contracts (<$0.15)
-    BIG_WIN = 1.00              # 100% always sell
-    STOP_LOSS = -0.40           # 40% loss
-    TRAILING_STOP = 0.20        # 20% drop from peak
+    # SCALPING THRESHOLDS — Buy cheap, sell the pump
+    TAKE_PROFIT = 0.50          # 50% gain — sell (5c -> 7.5c, 10c -> 15c)
+    SCALP_CHEAP = 0.30          # 30% on cheap contracts (<$0.15)
+    BIG_WIN = 1.00              # 100% always sell (doubled money)
+    STOP_LOSS = -0.50           # 50% loss — cut it
+    TRAILING_STOP = 0.20        # 20% drop from peak (protect gains)
     CRYPTO_TP = 0.15            # Crypto: 15% take profit
     CRYPTO_SL = -0.25           # Crypto: 25% stop loss
-    EXPIRY_HOURS = 3            # Sell if <3h to expiry and up
-    STALE_CHECKS = 200          # Cut after ~200 checks with no movement
+    EXPIRY_HOURS = 1            # Sell if <1h to expiry and up (avoid settlement risk)
+    STALE_CHECKS = 150          # Cut stale positions faster
     MAX_SELLS_PER_CYCLE = 75    # Cap per cycle to not overwhelm API
 
     def __init__(self, kalshi_client, position_book, risk_manager=None):
