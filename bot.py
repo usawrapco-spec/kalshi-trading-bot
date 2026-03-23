@@ -1,4 +1,4 @@
-import os, time, logging, math, requests, traceback
+import os, time, logging, math, re, requests, traceback
 from datetime import datetime, timezone
 from flask import Flask, render_template_string, jsonify
 from threading import Thread
@@ -595,6 +595,11 @@ def run_buys(markets):
             skipped_mve += 1
             continue
 
+        # Block long-dated contracts (>24h out) — only trade short-term
+        expiry_secs = get_time_to_expiry(ticker)
+        if expiry_secs is None or expiry_secs > 86400:
+            continue
+
         if ticker in owned:
             already_owned += 1
             continue
@@ -680,8 +685,8 @@ def run_buys(markets):
         if cost > trading_balance - current_deployed:
             continue
 
-        # FINAL SAFETY: hard cap at 5 contracts before ANY order
-        b['count'] = min(b['count'], 5)
+        # FINAL SAFETY: hard cap at 10 contracts before ANY order
+        b['count'] = min(b['count'], MAX_CONTRACTS_PER_TRADE)
         cost = b['price'] * b['count']
 
         # Place real Kalshi order
@@ -726,40 +731,70 @@ sell_history = []  # Rolling last 20 sell gain percentages
 EXPIRY_WINDOW_SECONDS = 60  # 1 minute — sell anything green before close
 
 
-def get_time_to_expiry(market):
-    """Returns seconds until market closes, or None if unknown."""
-    close_time_str = market.get('close_time') or market.get('expiration_time')
-    if not close_time_str:
-        return None
-    try:
-        close_time_str = close_time_str.replace('Z', '+00:00')
-        close_time = datetime.fromisoformat(close_time_str)
-        now = datetime.now(timezone.utc)
-        return max(0, (close_time - now).total_seconds())
-    except:
-        return None
+def get_time_to_expiry(market_or_ticker):
+    """Returns seconds until market closes, or None if unknown.
+    Accepts a market dict OR a ticker string. Tries ticker parsing first,
+    falls back to market close_time field."""
+    ticker = None
+    if isinstance(market_or_ticker, str):
+        ticker = market_or_ticker
+    elif isinstance(market_or_ticker, dict):
+        ticker = market_or_ticker.get('ticker', '')
+
+    # Try parsing expiry from ticker pattern like 22MAR2517 (day MON year hour)
+    if ticker:
+        match = re.search(r'(\d{2})([A-Z]{3})(\d{2})(\d{2})', ticker)
+        if match:
+            day, mon_str, yy, hour = match.groups()
+            months = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
+                      'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+            month = months.get(mon_str)
+            if month:
+                try:
+                    year = 2000 + int(yy)
+                    expiry = datetime(year, month, int(day), int(hour), 59, 59, tzinfo=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    return max(0, (expiry - now).total_seconds())
+                except (ValueError, OverflowError):
+                    pass
+
+    # Fallback: use market close_time field
+    if isinstance(market_or_ticker, dict):
+        close_time_str = market_or_ticker.get('close_time') or market_or_ticker.get('expiration_time')
+        if close_time_str:
+            try:
+                close_time_str = close_time_str.replace('Z', '+00:00')
+                close_time = datetime.fromisoformat(close_time_str)
+                now = datetime.now(timezone.utc)
+                return max(0, (close_time - now).total_seconds())
+            except:
+                pass
+    return None
 
 
 def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
-    """3 rules: moonshot at 100%, save ALL profit at 1 min, hold everything else.
+    """4 rules: 200% top exit, 100% half sell, 1min expiry save, hold.
     Returns (should_sell, sell_qty, reason)."""
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # RULE 1: Half sell at 100%+ (moonshot — lock profit, ride the rest)
+    # RULE 1: TOP EXIT — 200%+ sell EVERYTHING. This is the peak. Take it all.
+    if gain_pct >= 200:
+        return True, count, f"TOP EXIT +{gain_pct:.0f}% — selling ALL {count}"
+
+    # RULE 2: HALF SELL at 100% — lock in profit, let rest ride to 200%
     if gain_pct >= 100:
         sell_qty = max(1, count // 2)
-        return True, sell_qty, f"HALF SELL +{gain_pct:.0f}% — riding {count - sell_qty} to the moon"
+        return True, sell_qty, f"HALF SELL +{gain_pct:.0f}% — riding {count - sell_qty}"
 
-    # RULE 2: 1 minute before expiry — sell EVERYTHING profitable
-    # Any profit at all. +1%, +5%, +60%, doesn't matter. Take it.
+    # RULE 3: LAST MINUTE — 60 seconds before expiry, sell anything green
     if time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS:
         if gain_pct > 0:
-            return True, count, f"LAST MINUTE +{gain_pct:.0f}% — saving profit ({int(time_to_expiry)}s left)"
+            return True, count, f"LAST MINUTE +{gain_pct:.0f}% — {int(time_to_expiry)}s left"
 
-    # RULE 3: Everything else — HOLD. Let it ride.
+    # RULE 4: HOLD — let it ride
     return False, 0, None
 
 
@@ -894,9 +929,9 @@ def cleanup_ghosts():
 
 
 def check_sells():
-    """Smart tiered sell: 100% instant, save profits before expiry, let winners ride."""
+    """4-rule exit: 200% top exit, 100% half sell, 1min expiry save, hold."""
     global sell_history
-    logger.info("check_sells() — smart sell: 100%+ instant, expiry save, let winners ride")
+    logger.info("check_sells() — 200% top exit, 100% half sell, 1min expiry save")
 
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -992,7 +1027,7 @@ def check_sells():
         # Log position evaluation
         time_to_expiry = get_time_to_expiry(market)
         expiry_str = f"{int(time_to_expiry)}s" if time_to_expiry is not None else "unknown"
-        action_preview = "SELL" if gain_pct >= 100 or (time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS and gain_pct > 0) else "HOLD"
+        action_preview = "SELL ALL" if gain_pct >= 200 else "HALF SELL" if gain_pct >= 100 else "SELL" if (time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS and gain_pct > 0) else "HOLD"
         logger.info(f"EVAL: {ticker} {side} x{count} | entry=${entry_price:.2f} bid=${current_bid:.2f} | gain={gain_pct:+.0f}% | expiry={expiry_str} | {action_preview}")
 
         # Near-expiry alert logging (< 2 min)
@@ -1028,7 +1063,7 @@ def check_sells():
             else:
                 logger.error(f"SELL EXECUTION FAILED: {ticker} — order did not go through")
         elif gain_pct >= 50:
-            logger.info(f"RIDING: {ticker} +{gain_pct:.0f}% — holding for 100%+ (expiry={expiry_str})")
+            logger.info(f"RIDING: {ticker} +{gain_pct:.0f}% — holding for 200% top exit (expiry={expiry_str})")
 
     avg_win = (sum(sell_history) / len(sell_history)) if sell_history else 0
     logger.info(f"SELL SUMMARY: evaluated={evaluated} sold={sold} settled={settled} skipped_no_market={skipped_no_market} skipped_no_bid={skipped_no_bid} | avg_win={avg_win:.0f}%")
@@ -1646,7 +1681,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
   <div class="status-item">15M: <span class="dot-blocked"></span> BLOCKED</div>
   <div class="status-item">Max contracts: 10</div>
-  <div class="status-item">Sell: 100%+ or expiry save</div>
+  <div class="status-item">Sell: 200% top, 100% half, 1min save</div>
   <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span> protected</div>
   <div class="status-item">Ghosts: <span class="yellow" id="sb-ghosts">0</span> expired cleaned</div>
   <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
