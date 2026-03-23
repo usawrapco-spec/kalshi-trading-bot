@@ -141,6 +141,10 @@ def api_trades():
                 'is_live': t.get('order_id') not in (None, 'paper', 'forced_paper'),
                 'order_id': t.get('order_id', ''),
                 'confidence': t.get('confidence', 0),
+                'edge': t.get('edge'),
+                'pnl': t.get('pnl'),
+                'resolved': t.get('resolved', False),
+                'exit_price': t.get('exit_price'),
                 'reason': (t.get('reason') or '')[:100],
             })
         return jsonify(trades)
@@ -628,7 +632,7 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
 <div class="panel" id="swingPanel" style="margin:10px 16px;border-color:rgba(255,200,0,0.3);background:rgba(255,200,0,0.02)">
   <div class="panel-title" style="color:#ffc800;display:flex;justify-content:space-between;align-items:center">
     <span>&#x1f4c8; SWING TRADING (Paper)</span>
-    <span id="swing-summary" style="font-size:.65rem;color:rgba(255,255,255,0.3)">Loading...</span>
+    <span id="swing-summary" style="font-size:.65rem;color:rgba(255,255,255,0.3)">No data yet</span>
   </div>
   <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:0 14px 8px">
     <div class="metric"><div class="metric-label">Open</div><div class="metric-value" id="swing-open" style="color:#ffc800">—</div></div>
@@ -649,7 +653,7 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
 <div class="panel" id="cryptoPanel" style="margin:10px 16px;border-color:rgba(138,43,226,0.3);background:rgba(138,43,226,0.02)">
   <div class="panel-title" style="color:#a855f7;display:flex;justify-content:space-between;align-items:center">
     <span>&#x1fa99; CRYPTO MOMENTUM (Paper)</span>
-    <span id="crypto-summary" style="font-size:.65rem;color:rgba(255,255,255,0.3)">Loading...</span>
+    <span id="crypto-summary" style="font-size:.65rem;color:rgba(255,255,255,0.3)">No data yet</span>
   </div>
   <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;padding:0 14px 8px">
     <div class="metric"><div class="metric-label">Signals</div><div class="metric-value" id="crypto-signals" style="color:#a855f7">0</div></div>
@@ -705,7 +709,7 @@ body::after{content:'';position:fixed;top:0;left:0;right:0;bottom:0;background:r
   <div class="tab-content active" id="tab-trades">
     <div class="tab-body">
       <table class="ttable">
-        <thead><tr><th>Time</th><th>Strategy</th><th>Market</th><th>Side</th><th>Price</th><th>Status</th></tr></thead>
+        <thead><tr><th>Time</th><th>Strategy</th><th>Market</th><th>Side</th><th>Price</th><th>P&amp;L</th><th>Status</th></tr></thead>
         <tbody id="tradesBody"><tr><td colspan="6" style="color:rgba(255,255,255,0.15)">Waiting for trades...</td></tr></tbody>
       </table>
     </div>
@@ -963,11 +967,22 @@ async function refreshAll(){
       const s=(t.strategy||'?').replace(/_/g,' ');
       const side=(t.side||'').toUpperCase();
       const reason=(t.reason||'').toUpperCase();
-      const isW=reason.includes('WIN'),isL=reason.includes('LOSS');
       const isLive=t.is_live||reason.includes('[LIVE]');
-      const liveBorder=isLive?'border-left:3px solid #ff3c3c;':'';
-      const liveTag=isLive?'<span style="color:#ff3c3c;font-size:.6rem;margin-left:4px">LIVE</span>':'';
-      return`<tr style="${liveBorder}"><td style="color:rgba(255,255,255,0.2)">${fmt(t.timestamp||t.created_at)}</td><td style="color:${isLive?'#ff3c3c':'#00f0ff'}">${s}${liveTag}</td><td>${(t.ticker||'').substring(0,28)}</td><td style="color:${side==='YES'?'#39ff14':'#ff6d00'}">${side}</td><td>$${(t.price||0).toFixed(2)}</td><td style="color:${isW?'#39ff14':isL?'#ff3333':'rgba(255,255,255,0.2)'}">${isW?'WIN':isL?'LOSS':'OPEN'}</td></tr>`;
+      const isSell=reason.includes('SELL')||reason.includes('EXIT')||reason.includes('EXPIRED');
+      const isBuy=!isSell;
+      const resolved=t.resolved;
+      const pnl=t.pnl||0;
+      const isW=resolved&&pnl>0;
+      const isL=resolved&&pnl<=0;
+      const liveBorder=isLive?'border-left:3px solid #ff3c3c;':isSell?'border-left:3px solid #ff3333;':'border-left:3px solid #39ff14;';
+      const badge=isLive?'<span style="background:rgba(57,147,255,0.2);color:#3993ff;font-size:.55rem;padding:1px 4px;border-radius:2px;margin-left:4px">LIVE</span>':'<span style="background:rgba(255,255,255,0.05);color:rgba(255,255,255,0.3);font-size:.55rem;padding:1px 4px;border-radius:2px;margin-left:4px">PAPER</span>';
+      const sideColor=isSell?'#ff3333':'#39ff14';
+      const sideLabel=isSell?'SELL':side;
+      const pnlStr=resolved?(pnl>=0?'+$'+pnl.toFixed(2):'-$'+Math.abs(pnl).toFixed(2)):'—';
+      const pnlColor=resolved?(pnl>0?'#39ff14':'#ff3333'):'rgba(255,255,255,0.2)';
+      const statusStr=isW?'WIN':isL?'LOSS':isSell?'SOLD':'OPEN';
+      const statusColor=isW?'#39ff14':isL?'#ff3333':isSell?'#ff6d00':'rgba(255,255,255,0.2)';
+      return`<tr style="${liveBorder}"><td style="color:rgba(255,255,255,0.2)">${fmt(t.timestamp||t.created_at)}</td><td style="color:${isLive?'#ff3c3c':'#00f0ff'}">${s}${badge}</td><td>${(t.ticker||'').substring(0,28)}</td><td style="color:${sideColor};font-weight:600">${sideLabel}</td><td>$${(t.price||0).toFixed(2)}</td><td style="color:${pnlColor};font-weight:600">${pnlStr}</td><td style="color:${statusColor}">${statusStr}</td></tr>`;
     }).join('');
   }
 
@@ -1066,6 +1081,11 @@ async function refreshAll(){
   }
 
   // SWING TRADING PANEL
+  if(!swing){
+    document.getElementById('swing-summary').textContent='Strategy not active';
+  }else if(swing.open_positions===0&&swing.closed_trades===0){
+    document.getElementById('swing-summary').textContent='No swing trades yet';
+  }
   if(swing){
     document.getElementById('swing-open').textContent=swing.open_positions||0;
     document.getElementById('swing-sells').textContent=swing.wins||0;
@@ -1088,6 +1108,11 @@ async function refreshAll(){
   }
 
   // CRYPTO MOMENTUM PANEL
+  if(!crypto){
+    document.getElementById('crypto-summary').textContent='Strategy not active';
+  }else if(crypto.total_signals===0){
+    document.getElementById('crypto-summary').textContent='No crypto signals yet';
+  }
   if(crypto){
     document.getElementById('crypto-signals').textContent=crypto.total_signals||0;
     document.getElementById('crypto-wins').textContent=crypto.wins||0;
