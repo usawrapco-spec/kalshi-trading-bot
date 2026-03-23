@@ -370,6 +370,8 @@ def run_buys(markets, strategy='crypto'):
         # Volume filter for MM
         volume = sf(m.get('volume', 0)) or sf(m.get('volume_24h', 0))
         if strategy == 'mm_scalp' and volume < min_volume:
+            if strategy == 'mm_scalp':
+                logger.info(f"MM SKIP {ticker}: low volume ({volume:.0f} < {min_volume})")
             continue
 
         yes_bid = float(m.get('yes_bid_dollars', '0') or '0')
@@ -389,6 +391,24 @@ def run_buys(markets, strategy='crypto'):
                 candidates.append(('no', no_ask, no_bid, spread))
 
         if not candidates:
+            if strategy == 'mm_scalp':
+                # Debug: explain WHY this market was skipped
+                yes_spread = (yes_ask - yes_bid) if yes_ask > 0 and yes_bid > 0 else 999
+                no_spread = (no_ask - no_bid) if no_ask > 0 and no_bid > 0 else 999
+                reasons = []
+                if yes_ask <= 0 and no_ask <= 0:
+                    reasons.append("no asks")
+                elif yes_bid <= 0 and no_bid <= 0:
+                    reasons.append("no bids")
+                else:
+                    if yes_ask > 0 and (yes_ask < min_price or yes_ask > max_price):
+                        reasons.append(f"YES price ${yes_ask:.2f} outside {min_price}-{max_price}")
+                    if no_ask > 0 and (no_ask < min_price or no_ask > max_price):
+                        reasons.append(f"NO price ${no_ask:.2f} outside {min_price}-{max_price}")
+                    if yes_spread > max_spread and no_spread > max_spread:
+                        reasons.append(f"spreads too wide (YES={yes_spread:.2f} NO={no_spread:.2f})")
+                logger.info(f"MM SKIP {ticker}: {', '.join(reasons) or 'no qualifying side'} | "
+                           f"YES=${yes_ask:.2f}/{yes_bid:.2f} NO=${no_ask:.2f}/{no_bid:.2f} vol={volume:.0f}")
             continue
 
         # Pick side with tightest spread
@@ -791,12 +811,18 @@ def api_status():
         wins = sum(1 for t in sell_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in sell_data if sf(t['pnl']) < 0)
 
-        open_buys = db.table('trades').select('id,price,count') \
+        open_buys = db.table('trades').select('id,price,count,current_bid') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         open_data = open_buys.data or []
         open_count = len(open_data)
-        positions_value = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_data), 2)
-        cash = round(balance - positions_value, 2)
+        # Positions at market value (current_bid), fall back to entry price
+        positions_value = round(sum(
+            (sf(t.get('current_bid')) or sf(t.get('price'))) * (t.get('count') or 1)
+            for t in open_data
+        ), 2)
+        # Cost basis for comparison
+        positions_cost = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_data), 2)
+        cash = round(balance - positions_cost, 2)  # Cash = balance minus what we spent
 
         return jsonify({
             'balance': round(balance, 2),
@@ -807,6 +833,7 @@ def api_status():
             'losses': losses,
             'open_count': open_count,
             'positions_value': positions_value,
+            'positions_cost': positions_cost,
             'cash': max(0, cash),
         })
     except Exception as e:
@@ -1069,14 +1096,21 @@ async function refresh(){
 
   // Portfolio hero
   if(status&&!status.error){
-    $('p-total').textContent='$'+status.balance.toFixed(2);
+    // Portfolio = cash + positions at market value
+    var posVal=status.positions_value||0;
+    var posCost=status.positions_cost||0;
+    var cash=status.cash||0;
+    var portfolio=cash+posVal;
+    var unrealized=posVal-posCost;
+    $('p-total').textContent='$'+portfolio.toFixed(2);
 
-    var pnl=status.net_pnl;
+    var pnl=status.net_pnl+unrealized;
     var arrow=pnl>=0?'\\u25B2':'\\u25BC';
-    $('p-pnl').innerHTML='<span class="'+cls(pnl)+'">'+arrow+' '+(pnl>=0?'+':'')+pnl.toFixed(4)+'</span>';
+    $('p-pnl').innerHTML='<span class="'+cls(pnl)+'">'+arrow+' '+(pnl>=0?'+':'')+pnl.toFixed(2)+' realized</span>'
+      +(unrealized!==0?' <span class="'+cls(unrealized)+'" style="font-size:14px">'+(unrealized>=0?'+':'')+unrealized.toFixed(2)+' open</span>':'');
 
-    $('p-positions').textContent='$'+(status.positions_value||0).toFixed(2);
-    $('p-cash').textContent='$'+(status.cash||0).toFixed(2);
+    $('p-positions').textContent='$'+posVal.toFixed(2);
+    $('p-cash').textContent='$'+cash.toFixed(2);
     $('p-saved').textContent='$'+(status.saved||0).toFixed(2);
     $('p-record').innerHTML='<span class="green">'+status.wins+'W</span> <span class="gray">/</span> <span class="red">'+status.losses+'L</span>';
   }
