@@ -343,7 +343,7 @@ def run_buys(markets, strategy='crypto'):
     total_balance, trading_balance, saved_balance = get_trading_balance()
     owned = get_owned()
     num_open = len(owned)
-    logger.info(f"[{strategy}] Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f}")
+    logger.info(f"[{strategy}] Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f} (PROTECTED, never traded)")
 
     if num_open >= MAX_OPEN_POSITIONS:
         logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
@@ -824,10 +824,18 @@ def api_status():
         positions_cost = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_data), 2)
         cash = round(balance - positions_cost, 2)  # Cash = balance minus what we spent
 
+        # Saved today = 20% of today's winning sells
+        today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        today_sells = db.table('trades').select('pnl') \
+            .eq('action', 'sell').not_.is_('pnl', 'null') \
+            .gte('created_at', today_str).execute()
+        saved_today = round(sum(max(0.0, sf(t['pnl'])) for t in (today_sells.data or [])) * PROFIT_SAVE_PCT, 4)
+
         return jsonify({
             'balance': round(balance, 2),
             'trading': round(trading, 2),
             'saved': round(saved, 4),
+            'saved_today': saved_today,
             'net_pnl': round(net_pnl, 4),
             'wins': wins,
             'losses': losses,
@@ -1111,7 +1119,10 @@ async function refresh(){
 
     $('p-positions').textContent='$'+posVal.toFixed(2);
     $('p-cash').textContent='$'+cash.toFixed(2);
-    $('p-saved').textContent='$'+(status.saved||0).toFixed(2);
+    var savedToday=status.saved_today||0;
+    $('p-saved').innerHTML='$'+(status.saved||0).toFixed(2)
+      +(savedToday>0?'<div style="font-size:10px;color:#00d673;margin-top:2px">+$'+savedToday.toFixed(2)+' today</div>':'')
+      +'<div style="font-size:9px;color:#555;margin-top:2px">Protected forever</div>';
     $('p-record').innerHTML='<span class="green">'+status.wins+'W</span> <span class="gray">/</span> <span class="red">'+status.losses+'L</span>';
   }
 
