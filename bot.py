@@ -1,6 +1,6 @@
 """
 Full reset scalper. Clear DB on startup, buy cheap crypto, sell at 30%, take loss on expiry.
-$0.03-$0.20, 5 contracts, 30s cycles, paper mode.
+15M series only, $0.03-$0.45, 5 contracts, 30s cycles, paper mode.
 """
 
 import os, time, logging, traceback
@@ -23,23 +23,14 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === SETTINGS ===
 BUY_MIN = 0.03
-BUY_MAX = 0.20
+BUY_MAX = 0.45
 CYCLE_SECONDS = 30
 CONTRACTS_PER_TRADE = 5
 SELL_THRESHOLD = 0.30
 STARTING_BALANCE = 50.00
 MAX_BUYS_PER_CYCLE = 10
 
-CRYPTO_SERIES = [
-    # Direction (hourly)
-    'KXBTCD', 'KXETHD', 'KXSOLD', 'KXXRPD', 'KXDOGED', 'KXADAD',
-    # Brackets (hourly)
-    'KXBTC', 'KXETH', 'KXSOL', 'KXXRP', 'KXDOGE', 'KXADA',
-    # 15-minute
-    'KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M',
-    # Monthly/yearly
-    'KXBTCMIN', 'KXETHMIN', 'KXSOLMIN',
-]
+CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
 # Set dynamically at startup
 BOT_START_TIME = None
@@ -455,14 +446,18 @@ def api_trades():
         result = db.table('trades').select('*').eq('action', 'buy').not_.is_('pnl', 'null').gte('created_at', BOT_START_TIME).order('created_at', desc=True).limit(50).execute()
         trades = []
         for t in (result.data or []):
+            entry = sf(t.get('price'))
+            exit_price = sf(t.get('current_bid'))
+            gain_pct = round(((exit_price - entry) / entry) * 100, 1) if entry > 0 else 0
             trades.append({
                 'created_at': t.get('created_at', ''),
                 'ticker': t.get('ticker', ''),
                 'side': t.get('side', ''),
                 'count': t.get('count', 1),
-                'entry': sf(t.get('price')),
-                'exit': sf(t.get('current_bid')),
+                'entry': entry,
+                'exit': exit_price,
                 'pnl': sf(t.get('pnl')),
+                'gain_pct': gain_pct,
             })
         return jsonify(trades)
     except Exception as e:
@@ -524,7 +519,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 3-20c &mdash; sell at 30%
+  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-45c &mdash; sell at 30%
 </div>
 
 <div class="top-bar">
@@ -547,8 +542,8 @@ tr:hover{background:#1a1a1a !important}
 <div class="panel">
   <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th>
-  </tr></thead><tbody id="trades-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
+    <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Gain%</th>
+  </tr></thead><tbody id="trades-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
@@ -559,8 +554,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: all crypto (20 series) | No expiry filter | 50% stop loss</span>
-  <span>Buy: 3-20c | Sell: 30% | 5 contracts | 30s cycles</span>
+  <span>Series: 15M crypto (5 series) | No expiry filter | 50% stop loss</span>
+  <span>Buy: 3-45c | Sell: 30% | 5 contracts | 30s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
@@ -642,9 +637,11 @@ async function refresh(){
       h+='<td>$'+(t.entry||0).toFixed(2)+'</td>';
       h+='<td>$'+(t.exit||0).toFixed(2)+'</td>';
       h+='<td class="'+pc+'">'+(t.pnl>=0?'+':'')+t.pnl.toFixed(4)+'</td>';
+      var gc2=cls(t.gain_pct||0);
+      h+='<td class="'+gc2+'">'+(t.gain_pct>=0?'+':'')+(t.gain_pct||0).toFixed(0)+'%</td>';
       h+='</tr>';
     });
-    $('trades-body').innerHTML=h||'<tr><td colspan="7" class="gray" style="text-align:center">No trades yet</td></tr>';
+    $('trades-body').innerHTML=h||'<tr><td colspan="8" class="gray" style="text-align:center">No trades yet</td></tr>';
   }
 
   if(hot){
