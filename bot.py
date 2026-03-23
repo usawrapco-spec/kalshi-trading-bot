@@ -291,7 +291,7 @@ def find_buy_candidates(markets):
             continue
         if ticker in dead_tickers:
             continue
-        if any(x in ticker for x in ['MINMON', 'MAXMON', '2026250', 'MARMAD']):
+        if any(x in ticker for x in ['MINMON', 'MAXMON', '2026250', '2717', 'MARMAD']):
             continue
 
         yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
