@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === SETTINGS ===
 BUY_MIN = 0.03
-BUY_MAX = 0.45
+BUY_MAX = 0.20
 CYCLE_SECONDS = 10
 CONTRACTS_PER_TRADE = 5
 SELL_THRESHOLD = 0.30
@@ -273,12 +273,12 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        # Pick whichever side is cheaper
-        if yes_ask <= no_ask and yes_bid > 0:
+        # Pick whichever side is cheaper, $0.03-$0.20
+        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-        elif no_bid > 0:
+        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
-        elif yes_bid > 0:
+        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
         else:
             continue
@@ -556,7 +556,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <span>Series: 15M crypto (5 series) | No filters | No stop loss</span>
-  <span>Buy: 3-45c | Sell: 30% | 5 contracts | 10s cycles</span>
+  <span>Buy: 3-20c | Sell: 30% | 5 contracts | 10s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
