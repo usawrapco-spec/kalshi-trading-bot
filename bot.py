@@ -228,39 +228,34 @@ def cleanup_stale():
 
 
 # === SELL LOGIC ===
-# Tiered profit-taking: 100% / 200% / 300%. Drop protection at 20 points.
+# Sell when price stops moving. If bid is unchanged for 5s and profitable, sell.
 
-peak_gains = {}
+last_bids = {}  # trade_id -> (last_bid, timestamp)
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
+    now = time.time()
 
-    # Track peak gain
-    if trade_id not in peak_gains or gain_pct > peak_gains[trade_id]:
-        peak_gains[trade_id] = gain_pct
+    # Track bid changes
+    if trade_id in last_bids:
+        prev_bid, prev_time = last_bids[trade_id]
 
-    peak = peak_gains[trade_id]
-    drop = peak - gain_pct
+        if current_bid != prev_bid:
+            # Price moved — update and hold
+            last_bids[trade_id] = (current_bid, now)
+        else:
+            # Price hasn't moved — check how long
+            stale_seconds = now - prev_time
 
-    # 300%+ — sell everything
-    if gain_pct >= 300:
-        return True, count, f"MOON +{gain_pct:.0f}%"
-
-    # 200%+ — sell half
-    if gain_pct >= 200 and count > 1:
-        sell_qty = count // 2
-        return True, sell_qty, f"SELL HALF +{gain_pct:.0f}%"
-
-    # 100%+ — take profit (1/3)
-    if gain_pct >= 100:
-        sell_qty = max(1, count // 3)
-        return True, sell_qty, f"TAKE PROFIT +{gain_pct:.0f}%"
-
-    # Under 100% but dropped 20 points from peak — sell before it gets worse
-    if gain_pct > 0 and gain_pct < 100 and drop >= 20:
-        return True, count, f"DROP PROTECT +{gain_pct:.0f}% (peak was +{peak:.0f}%)"
+            # 5 seconds of no movement + profitable = sell
+            if stale_seconds >= 5 and gain_pct > 0:
+                del last_bids[trade_id]
+                return True, count, f"STALE +{gain_pct:.0f}% (no move {stale_seconds:.0f}s)"
+    else:
+        # First time seeing this position
+        last_bids[trade_id] = (current_bid, now)
 
     # Expiry save
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
