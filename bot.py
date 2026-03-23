@@ -36,14 +36,15 @@ def sf(val):
 # === STARTUP ===
 
 def close_all_old_positions():
-    """Resolve all open positions. Delete fake records. Run ONCE at startup."""
+    """Resolve old positions. Delete fake records. Run ONCE at startup."""
     try:
         db.table('trades').delete().eq('reason', 'CLOSED — nuclear reset').execute()
         db.table('trades').delete().eq('reason', 'RESOLVED — fresh start').execute()
         db.table('trades').delete().eq('reason', 'RESOLVED — fresh start v2').execute()
+        db.table('trades').delete().eq('reason', 'RESOLVED — activity reset').execute()
         result = db.table('trades').update({
             'pnl': 0.0,
-            'reason': 'RESOLVED — activity reset',
+            'reason': 'RESOLVED — velocity reset',
         }).eq('action', 'buy').is_('pnl', 'null').execute()
         closed = len(result.data) if result.data else 0
         logger.info(f"Resolved {closed} old positions — fresh $50 start")
@@ -106,13 +107,12 @@ CRYPTO_SERIES = [
     'KXBTC1H', 'KXETH1H', 'KXSOL1H',
     'KXBTCD', 'KXETHD', 'KXSOLD',
 ]
+CRYPTO_15M = {'KXBTC15M', 'KXETH15M', 'KXSOL15M'}
 
 
-def categorize(ticker):
+def is_crypto(ticker):
     t = ticker.upper()
-    if any(x in t for x in ['BTC', 'ETH', 'SOL']):
-        return 'crypto'
-    return 'trending'
+    return any(x in t for x in ['BTC', 'ETH', 'SOL', 'KXBTC', 'KXETH', 'KXSOL'])
 
 
 def fetch_top_activity():
@@ -121,51 +121,41 @@ def fetch_top_activity():
         resp = kalshi_get('/markets?status=open&limit=1000')
         markets = resp.get('markets', [])
         markets.sort(key=lambda m: float(m.get('volume_24h', '0') or m.get('volume_24h_fp', '0') or '0'), reverse=True)
-        top = markets[:100]
-        logger.info(f"Top activity: {len(markets)} fetched, top 100 selected")
-        return top
+        return markets[:100]
     except Exception as e:
         logger.warning(f"Top activity fetch: {e}")
         return []
 
 
-def fetch_series_markets():
-    """Source 2: 6 API calls — crypto series only."""
+def fetch_crypto_series():
+    """Source 2: 9 API calls — crypto series."""
     markets = []
     for series in CRYPTO_SERIES:
         try:
             resp = kalshi_get(f"/markets?series_ticker={series}&status=open&limit=50")
-            series_markets = resp.get('markets', [])
-            markets.extend(series_markets)
+            markets.extend(resp.get('markets', []))
         except:
             pass
-    logger.info(f"Crypto: {len(markets)} markets from {len(CRYPTO_SERIES)} series")
     return markets
 
 
-# === PAPER TRADING ===
-
-def kalshi_fee(price):
-    return math.ceil(0.07 * price * (1 - price) * 100) / 100
-
-
-CRYPTO_15M = {'KXBTC15M', 'KXETH15M', 'KXSOL15M'}
-
+# === BUY LOGIC — LIQUIDITY REQUIRED ===
 
 def get_buy_count(ticker):
     """3 contracts for 15-min crypto, 1 for everything else."""
     return 3 if any(s in ticker for s in CRYPTO_15M) else 1
 
 
-def buy(ticker, side, price, strategy, reason):
+def buy(ticker, side, price, bid, strategy, reason):
     count = get_buy_count(ticker)
-    logger.info(f"BUY: {ticker} {side} x{count} @ ${price:.2f} = ${price*count:.2f} | {reason}")
+    logger.info(f"BUY: {ticker} {side} x{count} @ ${price:.2f} (bid=${bid:.2f}) | {reason}")
     try:
         db.table('trades').insert({
             'ticker': ticker, 'side': side, 'action': 'buy',
             'price': float(price), 'count': count,
             'strategy': strategy, 'reason': reason,
-            'last_seen_bid': float(price),
+            'last_seen_bid': float(bid),
+            'current_bid': float(bid),
         }).execute()
         return True
     except Exception as e:
@@ -173,78 +163,69 @@ def buy(ticker, side, price, strategy, reason):
         return False
 
 
-def sell(trade, current_bid, reason):
-    entry_price = sf(trade['price'])
-    count = trade['count'] or 1
-    buy_fee = kalshi_fee(entry_price)
-    sell_fee = kalshi_fee(current_bid)
-    pnl = round((current_bid - entry_price - buy_fee - sell_fee) * count, 4)
-    gain_pct = round(((current_bid - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
+# === SELL LOGIC — CHECK ALL POSITIONS, STRATEGY THRESHOLDS ===
 
-    logger.info(f"SELL: {trade['ticker']} {trade['side']} @ ${current_bid:.2f} | fees ${buy_fee:.2f}+${sell_fee:.2f} | P&L ${pnl:.4f} ({gain_pct:+.0f}%) | {reason}")
-    try:
-        db.table('trades').insert({
-            'ticker': trade['ticker'], 'side': trade['side'], 'action': 'sell',
-            'price': float(current_bid), 'count': count,
-            'pnl': float(pnl), 'strategy': trade.get('strategy', ''),
-            'reason': reason, 'sell_gain_pct': float(gain_pct),
-        }).execute()
-        db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
-        return True
-    except Exception as e:
-        logger.error(f"DB sell failed: {e}")
-        return False
+def kalshi_fee(price):
+    return math.ceil(0.07 * price * (1 - price) * 100) / 100
 
-
-def log_settlement(trade, pnl, label):
-    try:
-        db.table('trades').update({
-            'pnl': float(round(pnl, 4)),
-            'reason': f"{trade.get('reason', '')} | {label}",
-        }).eq('id', trade['id']).execute()
-        logger.info(f"SETTLED: {trade['ticker']} {trade['side']} | {label} | pnl=${pnl:.4f}")
-    except Exception as e:
-        logger.error(f"Settlement log failed: {e}")
-
-
-# === POSITION MONITOR — PROFIT ONLY ===
 
 def check_positions():
-    """Check positions. Sell ONLY for profit. Never sell at a loss. Max 30 per cycle."""
+    """Check ALL positions. Crypto keeps existing thresholds, trending sells at 3%."""
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
     if not open_buys.data:
         return
 
-    total = len(open_buys.data)
-    checking = min(total, 30)
-    logger.info(f"Checking {checking}/{total} positions for profit...")
+    checked = 0
+    sold = 0
+    best_gain = 0
+    best_ticker = ''
 
-    for trade in open_buys.data[:30]:
+    for trade in open_buys.data:  # ALL positions, no limit
         ticker = trade['ticker']
         side = trade['side']
         entry_price = sf(trade['price'])
+        count = trade['count'] or 1
         if entry_price <= 0:
             continue
 
-        market = get_market(ticker)
+        try:
+            market = get_market(ticker)
+        except:
+            continue
         if not market:
             continue
+
+        checked += 1
 
         # Settlement check
         status = market.get('status', '')
         if status in ('closed', 'settled', 'finalized'):
             result = market.get('result', '')
             if result == side:
-                pnl = (1.0 - entry_price) * (trade['count'] or 1)
-                log_settlement(trade, pnl, "WIN — settled $1.00")
+                pnl = (1.0 - entry_price) * count
+                try:
+                    db.table('trades').update({
+                        'pnl': float(round(pnl, 4)),
+                        'reason': f"{trade.get('reason', '')} | WIN — settled $1.00",
+                    }).eq('id', trade['id']).execute()
+                    logger.info(f"SETTLED WIN: {ticker} {side} | pnl=${pnl:.4f}")
+                except:
+                    pass
             elif result:
-                pnl = -entry_price * (trade['count'] or 1)
-                log_settlement(trade, pnl, "LOSS — expired worthless")
+                pnl = -entry_price * count
+                try:
+                    db.table('trades').update({
+                        'pnl': float(round(pnl, 4)),
+                        'reason': f"{trade.get('reason', '')} | LOSS — expired",
+                    }).eq('id', trade['id']).execute()
+                    logger.info(f"SETTLED LOSS: {ticker} {side} | pnl=${pnl:.4f}")
+                except:
+                    pass
             continue
 
-        # Get current BID (what we'd receive if selling)
+        # Get current BID
         if side == 'yes':
             current_bid = float(market.get('yes_bid_dollars', '0') or '0')
         else:
@@ -254,26 +235,32 @@ def check_positions():
             continue
 
         gain_pct = ((current_bid - entry_price) / entry_price) * 100
-        count = trade['count'] or 1
-        last_seen = sf(trade.get('last_seen_bid'))
 
         # Update price tracking
-        db.table('trades').update({
-            'prev_bid': float(last_seen) if last_seen > 0 else None,
-            'last_seen_bid': float(current_bid),
-            'current_bid': float(current_bid),
-        }).eq('id', trade['id']).execute()
+        try:
+            db.table('trades').update({
+                'current_bid': float(current_bid),
+                'last_seen_bid': float(current_bid),
+            }).eq('id', trade['id']).execute()
+        except:
+            pass
 
-        # Net P&L after fees
-        buy_fee = kalshi_fee(entry_price)
-        sell_fee = kalshi_fee(current_bid)
-        net_pnl = (current_bid - entry_price - buy_fee - sell_fee) * count
+        # Track best for logging
+        if gain_pct > best_gain:
+            best_gain = gain_pct
+            best_ticker = ticker
 
-        # === SELL RULES — PROFIT ONLY, TIERED BY ENTRY PRICE ===
-        if gain_pct > 0 and net_pnl > 0:
-            should_sell = False
-            reason = ""
+        # NEVER sell at a loss
+        if gain_pct <= 0 or current_bid <= entry_price:
+            continue
 
+        # Strategy-based sell thresholds
+        strategy = trade.get('strategy', '')
+        should_sell = False
+        reason = ""
+
+        if strategy == 'crypto':
+            # Keep existing crypto thresholds
             if gain_pct >= 50:
                 should_sell = True
                 reason = f"BIG WIN +{gain_pct:.0f}%"
@@ -286,12 +273,49 @@ def check_positions():
             elif gain_pct >= 12:
                 should_sell = True
                 reason = f"SWING +{gain_pct:.0f}%"
+        else:
+            # Trending: low 3% threshold — farm micro-gains
+            if gain_pct >= 50:
+                should_sell = True
+                reason = f"BIG WIN +{gain_pct:.0f}%"
+            elif gain_pct >= 3:
+                should_sell = True
+                reason = f"SCALP +{gain_pct:.0f}%"
 
-            if should_sell:
-                sell(trade, current_bid, f"{reason} net=${net_pnl:.4f}")
-        elif gain_pct > 0 and net_pnl <= 0:
-            logger.info(f"SKIP: {ticker} {side} +{gain_pct:.0f}% but net=${net_pnl:.4f} (fees eat profit)")
-        # Never sell at a loss. Hold forever.
+        if should_sell:
+            # Compute P&L with fees
+            buy_fee = kalshi_fee(entry_price)
+            sell_fee = kalshi_fee(current_bid)
+            pnl = round((current_bid - entry_price - buy_fee - sell_fee) * count, 4)
+
+            # Only sell if net positive after fees
+            if pnl <= 0:
+                logger.info(f"SKIP: {ticker} {side} +{gain_pct:.0f}% but net=${pnl:.4f} (fees)")
+                continue
+
+            logger.info(f"SELL: {ticker} {side} +{gain_pct:.0f}% | ${pnl:.4f} profit ({strategy})")
+            try:
+                db.table('trades').insert({
+                    'ticker': ticker, 'side': side, 'action': 'sell',
+                    'price': float(current_bid), 'count': count,
+                    'pnl': float(pnl), 'strategy': strategy,
+                    'reason': reason, 'sell_gain_pct': float(round(gain_pct, 1)),
+                }).execute()
+                db.table('trades').update({
+                    'pnl': float(pnl),
+                    'sell_gain_pct': float(round(gain_pct, 1)),
+                }).eq('id', trade['id']).execute()
+                sold += 1
+            except Exception as e:
+                logger.error(f"Sell DB error: {e}")
+
+    total = len(open_buys.data)
+    if sold:
+        logger.info(f"Checked {checked}/{total} | Sold {sold}")
+    elif best_ticker:
+        logger.info(f"Checked {checked}/{total} | No sells — best: {best_ticker} +{best_gain:.1f}%")
+    else:
+        logger.info(f"Checked {checked}/{total} | Nothing profitable yet")
 
 
 # === MAIN CYCLE ===
@@ -312,49 +336,65 @@ def run_cycle():
     try:
         # Two sources
         top_activity = fetch_top_activity()
-        series_markets = fetch_series_markets()
+        crypto_markets = fetch_crypto_series()
 
-        # Combine and deduplicate by ticker
-        seen_tickers = set()
+        # Combine and deduplicate
+        seen = set()
         all_markets = []
-        for m in top_activity + series_markets:
-            ticker = m.get('ticker', '')
-            if ticker not in seen_tickers:
-                seen_tickers.add(ticker)
+        for m in crypto_markets + top_activity:  # Crypto first for dedup priority
+            t = m.get('ticker', '')
+            if t not in seen:
+                seen.add(t)
                 all_markets.append(m)
 
-        # Find buy opportunities
-        buys = []
+        # Find buy opportunities — LIQUIDITY REQUIRED (bid > 0)
+        crypto_buys = []
+        trending_buys = []
+
         for m in all_markets:
             ticker = m.get('ticker', '')
             if 'KXMVE' in ticker:
                 continue
 
-            yes = float(m.get('yes_ask_dollars', '0') or '0')
-            no = float(m.get('no_ask_dollars', '0') or '0')
+            yes_bid = float(m.get('yes_bid_dollars', '0') or '0')
+            yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
+            no_bid = float(m.get('no_bid_dollars', '0') or '0')
+            no_ask = float(m.get('no_ask_dollars', '0') or '0')
             vol = float(m.get('volume_24h', '0') or m.get('volume_24h_fp', '0') or '0')
             title = m.get('title', '')
-            strategy = categorize(ticker)
+            crypto = is_crypto(ticker)
+            strategy = 'crypto' if crypto else 'trending'
+            target = crypto_buys if crypto else trending_buys
 
-            if MIN_PRICE <= yes <= MAX_PRICE and (ticker, 'yes') not in owned:
-                buys.append({'ticker': ticker, 'side': 'yes', 'price': yes,
-                             'strategy': strategy, 'volume': vol,
-                             'reason': f"{strategy}: {title[:40]} YES@${yes:.2f} vol={vol:.0f}"})
-            if MIN_PRICE <= no <= MAX_PRICE and (ticker, 'no') not in owned:
-                buys.append({'ticker': ticker, 'side': 'no', 'price': no,
-                             'strategy': strategy, 'volume': vol,
-                             'reason': f"{strategy}: {title[:40]} NO@${no:.2f} vol={vol:.0f}"})
+            # YES side — bid must exist (liquidity check)
+            if yes_bid > 0 and yes_ask > 0 and MIN_PRICE <= yes_ask <= MAX_PRICE:
+                if (ticker, 'yes') not in owned:
+                    spread = yes_ask - yes_bid
+                    target.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
+                                   'bid': yes_bid, 'spread': spread,
+                                   'strategy': strategy, 'volume': vol,
+                                   'reason': f"{strategy}: {title[:35]} YES@${yes_ask:.2f} bid=${yes_bid:.2f}"})
 
-        # Crypto first (all-in), then trending (only high volume)
-        crypto_buys = sorted([b for b in buys if b['strategy'] == 'crypto'], key=lambda x: x['volume'], reverse=True)
-        trending_buys = sorted([b for b in buys if b['strategy'] == 'trending' and b['volume'] >= 100], key=lambda x: x['volume'], reverse=True)
-        ordered_buys = crypto_buys + trending_buys
+            # NO side — bid must exist
+            if no_bid > 0 and no_ask > 0 and MIN_PRICE <= no_ask <= MAX_PRICE:
+                if (ticker, 'no') not in owned:
+                    spread = no_ask - no_bid
+                    target.append({'ticker': ticker, 'side': 'no', 'price': no_ask,
+                                   'bid': no_bid, 'spread': spread,
+                                   'strategy': strategy, 'volume': vol,
+                                   'reason': f"{strategy}: {title[:35]} NO@${no_ask:.2f} bid=${no_bid:.2f}"})
 
-        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} crypto | crypto={len(crypto_buys)} trending={len(trending_buys)} (vol>100)")
+        # Sort each by spread (tightest first = easiest scalp)
+        crypto_buys.sort(key=lambda x: (x['spread'], -x['volume']))
+        trending_buys.sort(key=lambda x: (x['spread'], -x['volume']))
 
-        # Buy 1 contract each
+        # Crypto first, then trending
+        ordered = crypto_buys + trending_buys
+
+        logger.info(f"Scan: {len(top_activity)} active + {len(crypto_markets)} crypto | buyable: crypto={len(crypto_buys)} trending={len(trending_buys)}")
+
         bought = 0
-        for signal in ordered_buys:
+        for signal in ordered:
             if bought >= MAX_BUYS_PER_CYCLE:
                 break
             if trading_bal < RESERVE_BALANCE:
@@ -362,7 +402,7 @@ def run_cycle():
             cost = signal['price'] * get_buy_count(signal['ticker'])
             if cost > trading_bal - RESERVE_BALANCE:
                 continue
-            if buy(signal['ticker'], signal['side'], signal['price'],
+            if buy(signal['ticker'], signal['side'], signal['price'], signal['bid'],
                    signal['strategy'], signal['reason']):
                 owned.add((signal['ticker'], signal['side']))
                 trading_bal -= cost
@@ -413,8 +453,8 @@ DASHBOARD_HTML = """
 </head>
 <body>
     <div class="header">
-        <h1>KALSHI SCALP BOT</h1>
-        <div class="subtitle">Paper Trading — $50 — 30s cycles — Trending + Crypto</div>
+        <h1>KALSHI VELOCITY SCALP BOT</h1>
+        <div class="subtitle">Paper Trading — $50 — 30s cycles — Crypto + Trending</div>
     </div>
     <div class="stats">
         <div class="stat-box"><div class="stat-label">Balance</div><div class="stat-value green">${{balance}}</div></div>
@@ -441,7 +481,7 @@ DASHBOARD_HTML = """
     <div class="section">
         <h2>Positions & Trades</h2>
         <table>
-            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Now</th><th>P&L</th><th>%</th><th>Strategy</th></tr>
+            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th><th>Strategy</th></tr>
             {% for t in trades %}
             <tr>
                 <td>{{t.time}}</td>
@@ -471,7 +511,7 @@ def health():
 def dashboard():
     try:
         trading_bal, saved = get_balance()
-        all_trades = db.table('trades').select('*').order('created_at', desc=True).limit(300).execute()
+        all_trades = db.table('trades').select('*').order('created_at', desc=True).limit(1000).execute()
         trades = all_trades.data or []
 
         strats = {}
@@ -501,7 +541,7 @@ def dashboard():
         rpnl = sum(s['pnl'] for s in strats.values())
 
         display = []
-        for t in trades[:50]:
+        for t in trades:
             action = t['action']
             if action not in ('buy', 'sell'):
                 continue
@@ -551,7 +591,7 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — trending + crypto, 1 contract per position, max spread")
+    logger.info("Bot starting — velocity scalp: crypto + trending, liquidity required")
     close_all_old_positions()
     while True:
         try:
