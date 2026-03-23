@@ -300,11 +300,12 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker=
         clear_peak_gain(ticker, side)
         return True, count, f"SELL +{gain_pct:.0f}% (peak +{peak:.0f}%)"
 
-    # 5 min before expiry — sell anything green
+    # 5 min before expiry — sell EVERYTHING, green or red
+    # A -20% sell recovers 80%. Expiry at $0 recovers nothing.
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
-        if gain_pct > 0:
+        if current_bid > 0:
             clear_peak_gain(ticker, side)
-            return True, count, f"EXPIRY +{gain_pct:.0f}%"
+            return True, count, f"EXPIRY EXIT {gain_pct:+.0f}%"
 
     return False, 0, None
 
