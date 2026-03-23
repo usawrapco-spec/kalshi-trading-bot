@@ -32,7 +32,8 @@ MAX_SPEND_PER_CYCLE = 25
 MAX_OPEN_POSITIONS = 200
 
 # === CRYPTO SERIES — the only thing we scan ===
-CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
+CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD',
+                 'KXBTC15M', 'KXETH15M', 'KXSOL15M']
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -125,9 +126,11 @@ def place_order(ticker, side, action, price, count):
         order_id = order.get('order_id', '')
         status = order.get('status', '')
         logger.info(f"ORDER PLACED: {order_id} status={status}")
+        time.sleep(0.5)  # Rate limit: avoid Kalshi blocking
         return {'order_id': order_id, 'status': status}
     except Exception as e:
         logger.error(f"ORDER FAILED: {action.upper()} {ticker} — {e}")
+        time.sleep(0.5)  # Rate limit even on failure
         return None
 
 
@@ -267,7 +270,7 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_i
 
     # === NEVER LET PROFIT EXPIRE ===
     # 5 minutes before expiry — sell EVERYTHING green, no exceptions
-    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
+    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 120:
         if gain_pct > 0:
             peak_gains.pop(trade_id, None)
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
@@ -284,6 +287,8 @@ def find_buy_candidates(markets):
         ticker = market.get('ticker', '')
         if 'KXMVE' in ticker:
             continue
+        if '15M' not in ticker:
+            continue  # ONLY 15-minute contracts
 
         yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
         yes_bid = float(market.get('yes_bid_dollars', '0') or '0')
