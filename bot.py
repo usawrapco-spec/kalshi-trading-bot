@@ -36,18 +36,40 @@ def sf(val):
 # === STARTUP ===
 
 def close_all_old_positions():
-    """Resolve old positions. Delete fake records. Run ONCE at startup."""
+    """Resolve old positions + fix both-sides bug. Run ONCE at startup."""
     try:
-        db.table('trades').delete().eq('reason', 'CLOSED — nuclear reset').execute()
-        db.table('trades').delete().eq('reason', 'RESOLVED — fresh start').execute()
-        db.table('trades').delete().eq('reason', 'RESOLVED — fresh start v2').execute()
-        db.table('trades').delete().eq('reason', 'RESOLVED — activity reset').execute()
-        result = db.table('trades').update({
-            'pnl': 0.0,
-            'reason': 'RESOLVED — velocity reset',
-        }).eq('action', 'buy').is_('pnl', 'null').execute()
-        closed = len(result.data) if result.data else 0
-        logger.info(f"Resolved {closed} old positions — fresh $50 start")
+        # Clean up fake records from previous resets
+        for reason in ['CLOSED — nuclear reset', 'RESOLVED — fresh start',
+                       'RESOLVED — fresh start v2', 'RESOLVED — activity reset',
+                       'RESOLVED — velocity reset']:
+            db.table('trades').delete().eq('reason', reason).execute()
+
+        # Fix both-sides: find tickers where we own YES and NO, resolve the more expensive one
+        open_buys = db.table('trades').select('id,ticker,side,price') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        if open_buys.data:
+            ticker_sides = {}
+            for t in open_buys.data:
+                tk = t['ticker']
+                if tk not in ticker_sides:
+                    ticker_sides[tk] = []
+                ticker_sides[tk].append(t)
+
+            both_sides_resolved = 0
+            for tk, trades in ticker_sides.items():
+                if len(trades) >= 2:
+                    # Own multiple sides — keep cheapest, resolve rest
+                    trades.sort(key=lambda x: sf(x.get('price')))
+                    for t in trades[1:]:  # Resolve all but cheapest
+                        db.table('trades').update({
+                            'pnl': 0.0,
+                            'reason': 'RESOLVED — both-sides fix',
+                        }).eq('id', t['id']).execute()
+                        both_sides_resolved += 1
+            if both_sides_resolved:
+                logger.info(f"Fixed both-sides: resolved {both_sides_resolved} duplicate positions")
+
+        logger.info("Startup cleanup complete")
     except Exception as e:
         logger.info(f"Startup cleanup: {e}")
 
