@@ -1,7 +1,7 @@
 """
-Buy cheap crypto contracts, sell when they pop.
-$0.03-$0.15, sell at +50%, expiry save >0% @ 1min.
-No caps, no filters — just price and bid.
+Golden hour sell + price cap.
+$0.03-$0.15, adaptive sell (30% baseline, 50% of avg win), expiry save.
+Max 10 positions, 10s cycles, paper mode.
 """
 
 import os, time, logging, re, requests, traceback
@@ -26,6 +26,8 @@ BUY_MIN = 0.03
 BUY_MAX = 0.15
 CYCLE_SECONDS = 10
 MAX_CONTRACTS_PER_TRADE = 3
+MAX_POSITIONS = 10
+SELL_BASELINE_PCT = 30
 PROFIT_BANK_PCT = 0.20
 PAPER_STARTING_BALANCE = 20.00
 PAPER_RESET_TIME = '2026-03-23T21:00:00Z'
@@ -239,17 +241,34 @@ def get_owned():
         return set()
 
 
-# === SELL LOGIC ===
+# === SELL LOGIC (golden hour adaptive) ===
+
+def _get_adaptive_threshold():
+    """Start at 30%, adjust to 50% of average win gain."""
+    try:
+        wins = db.table('trades').select('sell_gain_pct') \
+            .eq('action', 'sell').gt('pnl', 0) \
+            .not_.is_('sell_gain_pct', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
+        if wins.data and len(wins.data) >= 3:
+            avg_win = sum(sf(w['sell_gain_pct']) for w in wins.data) / len(wins.data)
+            adaptive = max(SELL_BASELINE_PCT, avg_win * 0.5)
+            return adaptive
+    except Exception as e:
+        logger.error(f"Adaptive threshold error: {e}")
+    return SELL_BASELINE_PCT
+
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
+    threshold = _get_adaptive_threshold()
 
-    # +50% → SELL ALL (fast turnover, recycle cash)
-    if gain_pct >= 50:
-        return True, count, f"SELL +{gain_pct:.0f}%"
+    # Adaptive threshold → SELL ALL
+    if gain_pct >= threshold:
+        return True, count, f"SELL +{gain_pct:.0f}% (threshold {threshold:.0f}%)"
 
     # Expiry save — 1 min left + any profit → SELL ALL
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 60:
@@ -443,7 +462,7 @@ def sync_with_kalshi():
 
 def check_sells():
     global banked_profit
-    logger.info("check_sells() -- sell at 50%, expiry save >0% @ 1min")
+    logger.info("check_sells() -- adaptive sell (30%+), expiry save >0% @ 1min")
     try:
         open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null') \
@@ -611,7 +630,12 @@ def check_sells():
 def run_buys(markets):
     cash = get_balance()
     owned = get_owned()
-    logger.info(f"Balance: ${cash:.2f} | {len(owned)} positions open")
+    num_open = len(owned)
+    logger.info(f"Balance: ${cash:.2f} | {num_open} positions open")
+
+    if num_open >= MAX_POSITIONS:
+        logger.info(f"At max positions ({MAX_POSITIONS}), skipping buys")
+        return
 
     candidates = find_buy_candidates(markets)
     candidates = [c for c in candidates if c['ticker'] not in owned]
@@ -619,6 +643,9 @@ def run_buys(markets):
 
     bought = 0
     for c in candidates:
+        if num_open + bought >= MAX_POSITIONS:
+            break
+
         cost = c['price'] * MAX_CONTRACTS_PER_TRADE
 
         if cost > cash:
@@ -1077,9 +1104,9 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, sell +50%, expiry save, {CYCLE_SECONDS}s cycles")
+    logger.info(f"Bot starting [{mode}] -- golden hour: ${BUY_MIN}-${BUY_MAX}, adaptive sell ({SELL_BASELINE_PCT}%+), {CYCLE_SECONDS}s cycles")
     logger.info(f"Series: {ALL_SERIES}")
-    logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts per trade, no position cap")
+    logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, max {MAX_POSITIONS} positions")
 
     cancel_all_resting()
     sync_with_kalshi()
