@@ -248,19 +248,33 @@ def clear_non_btcd():
 
 
 # === SELL LOGIC ===
-# Random exit above 30%, instant at 100%
+# 1 contract, instant 100%+, 15s timeout above 30%
+
+entry_times = {}
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker='', side=''):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
+    now = time.time()
+
+    key = f"{ticker}_{side}"
+    if key not in entry_times:
+        entry_times[key] = now
+    age = now - entry_times[key]
 
     if gain_pct >= 100:
+        if key in entry_times: del entry_times[key]
         return True, count, f"BIG WIN +{gain_pct:.0f}%"
+
+    if age >= 15 and gain_pct >= 30:
+        if key in entry_times: del entry_times[key]
+        return True, count, f"TIMEOUT +{gain_pct:.0f}%"
 
     if gain_pct >= 30:
         sell_chance = min(0.80, 0.10 + (gain_pct - 30) * 0.005)
         if random.random() < sell_chance:
+            if key in entry_times: del entry_times[key]
             return True, count, f"TAKE PROFIT +{gain_pct:.0f}%"
 
     return False, 0, None
