@@ -201,8 +201,10 @@ def categorize(ticker):
 def scan_all_markets():
     all_markets = []
     cursor = None
-    for page in range(10):
-        url = '/markets?status=open&limit=200'
+
+    # Page through EVERYTHING — no page cap
+    while True:
+        url = '/markets?status=open&limit=1000'
         if cursor:
             url += f'&cursor={cursor}'
         try:
@@ -210,22 +212,35 @@ def scan_all_markets():
             markets = resp.get('markets', [])
             cursor = resp.get('cursor', None)
             all_markets.extend(markets)
+            logger.info(f"Fetched page: {len(markets)} markets (total: {len(all_markets)})")
             if not cursor or not markets:
                 break
         except Exception as e:
-            logger.error(f"Market fetch page {page}: {e}")
+            logger.error(f"Market fetch error: {e}")
             break
 
+    logger.info(f"Total markets on Kalshi: {len(all_markets)}")
+
     cheap = []
+    debug_logged = 0
     for m in all_markets:
         ticker = m.get('ticker', '')
         if 'KXMVE' in ticker:
             continue
+        if m.get('status') != 'open':
+            continue
+
         yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
         no_ask = float(m.get('no_ask_dollars', '0') or '0')
         volume = float(m.get('volume_24h_fp', '0') or '0')
         title = m.get('title', '')
         strat = categorize(ticker)
+
+        # Debug: log first 3 non-KXMVE markets under $0.20 to confirm parsing
+        if debug_logged < 3 and (0 < yes_ask < 0.20 or 0 < no_ask < 0.20):
+            logger.info(f"  DEBUG price check: {ticker} YES={yes_ask:.2f} NO={no_ask:.2f} | {title[:50]}")
+            debug_logged += 1
+
         if MIN_PRICE <= yes_ask <= MAX_PRICE:
             cheap.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
                           'volume': volume, 'strategy': strat,
@@ -236,7 +251,7 @@ def scan_all_markets():
                           'reason': f"{strat}: {title[:40]} NO @ ${no_ask:.2f}"})
 
     cheap.sort(key=lambda x: x['volume'], reverse=True)
-    logger.info(f"Generic scan: {len(all_markets)} markets, {len(cheap)} cheap")
+    logger.info(f"Full scan: {len(all_markets)} markets, {len(cheap)} cheap contracts")
     return cheap
 
 
