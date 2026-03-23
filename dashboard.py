@@ -114,14 +114,14 @@ def api_status():
                 'wins': live_wins,
                 'losses': live_losses,
                 'total_exposure': round(cost_basis, 2) if cost_basis else 0,
-                'max_exposure': 5.00,
+                'max_exposure': round(live_balance * 0.75, 2) if live_balance else 5.00,
             },
         })
     except Exception as e:
         return jsonify({
             'is_running': False, 'last_check': None, 'error': str(e),
             'paper': {'balance': 10000, 'daily_pnl': 0, 'positions': 0, 'roi_percent': 0, 'trades_today': 0, 'wins': 0, 'losses': 0},
-            'live': {'balance': 0, 'cash': 0, 'positions_value': 0, 'daily_pnl': 0, 'realized_pnl': 0, 'unrealized_pnl': 0, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 5.00},
+            'live': {'balance': 0, 'cash': 0, 'positions_value': 0, 'daily_pnl': 0, 'realized_pnl': 0, 'unrealized_pnl': 0, 'positions': 0, 'wins': 0, 'losses': 0, 'total_exposure': 0, 'max_exposure': 0},
         })
 
 @app.route('/api/trades')

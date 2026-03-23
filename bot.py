@@ -556,7 +556,7 @@ class KalshiBot:
                         reason = f"STOP LOSS: {unrealized_pct:.0%} (${cost_basis:.2f}->${current_bid:.2f})"
 
                     if should_sell:
-                        logger.info(f"EXIT: {ticker} — {reason}")
+                        logger.info(f"LIVE SELL TRIGGERED: {ticker} {side} x{count} — {reason}")
                         logger.info(f"  Cost: ${cost_basis:.2f} -> Bid: ${current_bid:.2f} ({unrealized_pct:+.0%})")
 
                         price_cents = int(current_bid * 100)
@@ -569,8 +569,16 @@ class KalshiBot:
                         else:
                             sell_params['no_price'] = price_cents
 
+                        logger.info(f"PLACING LIVE SELL ORDER: {sell_params}")
                         result = self.client.create_order(**sell_params)
-                        if result and result.get('order_id'):
+                        logger.info(f"SELL ORDER RESPONSE: {result}")
+
+                        # Kalshi returns {'order': {'order_id': '...'}}
+                        order_id = None
+                        if result:
+                            order_id = result.get('order', {}).get('order_id') or result.get('order_id')
+
+                        if order_id:
                             pnl = (current_bid - cost_basis) * count
                             self.db.client.table('kalshi_trades').update({
                                 'resolved': True,
@@ -580,11 +588,27 @@ class KalshiBot:
                                 'reason': f"[EXIT] {reason}",
                             }).eq('id', trade['id']).execute()
 
+                            # Log sell trade
+                            try:
+                                self.db.client.table('kalshi_trades').insert({
+                                    'ticker': ticker, 'action': 'sell', 'side': side,
+                                    'count': count, 'price': current_bid,
+                                    'strategy': trade.get('strategy', ''),
+                                    'order_id': order_id,
+                                    'reason': f"[LIVE SELL] {reason}",
+                                    'confidence': 0,
+                                    'resolved': True,
+                                    'pnl': round(pnl, 4),
+                                }).execute()
+                            except Exception:
+                                pass
+
                             exits_taken += 1
                             capital_freed += current_bid * count
-                            logger.info(f"SOLD: {ticker} P&L=${pnl:+.2f} (freed ${current_bid * count:.2f})")
+                            logger.info(f"LIVE SELL COMPLETE: {ticker} P&L=${pnl:+.2f} order={order_id}")
                         else:
-                            logger.warning(f"Sell order failed for {ticker}")
+                            err = result.get('error', str(result)) if result else 'No response'
+                            logger.error(f"LIVE SELL FAILED: {ticker} — {err}")
                     else:
                         logger.debug(f"HOLD: {ticker} cost=${cost_basis:.2f} bid=${current_bid:.2f} edge={current_edge}")
 

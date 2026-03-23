@@ -170,14 +170,18 @@ class PositionMonitor:
         # Execute the sell
         dollar_pnl = (current_price - entry_price) * count
 
+        logger.info(f"SELL CHECK: {ticker} | is_live={is_live} | order_id={trade.get('order_id')} | gain={pct_gain:.0%}")
+
         if is_live:
             # Place real sell order on Kalshi
-            success = self._place_live_sell(ticker, side, count, current_price)
-            if not success:
+            logger.info(f"LIVE SELL TRIGGERED: {ticker} {side} x{count} @ ${current_price:.2f} | {sell_reason}")
+            order_id = self._place_live_sell(ticker, side, count, current_price)
+            if not order_id:
                 summary['holds'] += 1
                 return
             summary['live_sells'] += 1
         else:
+            order_id = None
             summary['paper_sells'] += 1
 
         # Update trade in Supabase as resolved
@@ -191,6 +195,22 @@ class PositionMonitor:
             }).eq('id', trade['id']).execute()
         except Exception as e:
             logger.error(f"DB update failed for {ticker}: {e}")
+
+        # Log sell trade to DB (so dashboard shows it)
+        if is_live and order_id:
+            try:
+                self.db.client.table('kalshi_trades').insert({
+                    'ticker': ticker, 'action': 'sell', 'side': side,
+                    'count': count, 'price': round(current_price, 4),
+                    'strategy': trade.get('strategy', ''),
+                    'order_id': order_id,
+                    'reason': f"[LIVE SELL] {sell_reason}",
+                    'confidence': 0,
+                    'resolved': True,
+                    'pnl': round(dollar_pnl, 4),
+                }).execute()
+            except Exception:
+                pass
 
         # Refund paper balance
         if not is_live and self.risk:
@@ -243,7 +263,7 @@ class PositionMonitor:
         summary['pnl'] += pnl
 
     def _place_live_sell(self, ticker, side, count, price):
-        """Place a real limit sell order on Kalshi."""
+        """Place a real limit sell order on Kalshi. Returns order_id or None."""
         try:
             price_cents = int(price * 100)
             sell_params = {
@@ -258,17 +278,26 @@ class PositionMonitor:
             else:
                 sell_params['no_price'] = price_cents
 
+            logger.info(f"PLACING LIVE SELL ORDER: {sell_params}")
             result = self.client.create_order(**sell_params)
-            if result and (result.get('order', {}).get('order_id') or result.get('order_id')):
-                logger.info(f"LIVE SELL ORDER PLACED: {ticker} {side} x{count} @ ${price:.2f}")
-                return True
+            logger.info(f"SELL ORDER RESPONSE: {result}")
+
+            order_id = None
+            if result:
+                order_id = result.get('order', {}).get('order_id') or result.get('order_id')
+
+            if order_id:
+                logger.info(f"LIVE SELL ORDER PLACED: {ticker} {side} x{count} @ ${price:.2f} order={order_id}")
+                return order_id
             else:
                 err = result.get('error', str(result)) if result else 'No response'
-                logger.warning(f"LIVE SELL FAILED: {ticker} - {err}")
-                return False
+                logger.error(f"LIVE SELL FAILED: {ticker} - {err}")
+                return None
         except Exception as e:
             logger.error(f"LIVE SELL ERROR: {ticker} - {e}")
-            return False
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
 
     def _fetch_market(self, ticker):
         """Fetch market data with caching."""
