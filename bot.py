@@ -535,9 +535,20 @@ def run_buys(markets):
 
 # === MAIN CYCLE ===
 
+_stale_cleaned = False
+
 def run_cycle():
+    global _stale_cleaned
     balance = get_trading_balance()
     logger.info(f"=== CYCLE START === Balance: ${balance:.2f}")
+
+    # Force cleanup stale on first cycle in case startup missed it
+    if not _stale_cleaned:
+        try:
+            cleanup_stale()
+            _stale_cleaned = True
+        except Exception as e:
+            logger.error(f"Cleanup stale error: {e}")
 
     try:
         check_sells()
@@ -580,17 +591,19 @@ def api_status():
         open_count = len(live_positions)
         positions_value = round(sum(sf(t.get('current_bid')) * (t.get('count') or 1) for t in live_positions), 2)
         positions_cost = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in live_positions), 2)
-        cash = round(balance - positions_cost, 2)
+
+        # Kalshi balance = available cash from API (already excludes locked positions)
+        cash = round(balance, 2)
 
         return jsonify({
-            'balance': round(balance, 2),
+            'balance': round(balance + positions_cost, 2),
             'net_pnl': round(net_pnl, 4),
             'wins': wins,
             'losses': losses,
             'open_count': open_count,
             'positions_value': positions_value,
             'positions_cost': positions_cost,
-            'cash': max(0, cash),
+            'cash': cash,
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
