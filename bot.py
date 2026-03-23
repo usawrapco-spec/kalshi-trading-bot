@@ -149,7 +149,8 @@ def get_series_markets(series_ticker):
     try:
         resp = kalshi_get(f"/markets?series_ticker={series_ticker}&status=open")
         return resp.get('markets', [])
-    except:
+    except Exception as e:
+        logger.error(f"get_series_markets({series_ticker}) failed: {e}")
         return []
 
 
@@ -373,12 +374,12 @@ def get_gfs_ensemble(lat, lon, is_high=True):
         logger.error(f"GFS fetch failed: {e}")
         return {}
 
-def weather_edge_strategy():
+def weather_edge_strategy(all_weather_markets_by_series):
     """Find mispriced weather markets using GFS ensemble"""
     signals = []
 
     for series in WEATHER_SERIES:
-        markets = get_series_markets(series)
+        markets = all_weather_markets_by_series.get(series, [])
         if not markets:
             continue
 
@@ -536,7 +537,9 @@ def crypto_scalp_strategy():
     for series in CRYPTO_15M_SERIES:
         try:
             markets = get_series_markets(series)
-        except:
+            logger.info(f"Crypto series {series}: {len(markets)} open markets")
+        except Exception as e:
+            logger.error(f"Crypto series {series} fetch failed: {e}")
             continue
 
         for market in markets:
@@ -584,10 +587,23 @@ def run_cycle():
     except Exception as e:
         logger.error(f"Position check error: {e}")
 
+    # FETCH ALL WEATHER MARKETS ONCE (reuse for edge + spread strategies)
+    all_weather_by_series = {}
+    all_weather_flat = []
+    for series in WEATHER_SERIES:
+        try:
+            mkts = get_series_markets(series)
+            all_weather_by_series[series] = mkts
+            all_weather_flat.extend(mkts)
+            logger.info(f"Weather series {series}: {len(mkts)} open markets")
+        except Exception as e:
+            logger.error(f"Failed to fetch {series}: {e}")
+    logger.info(f"Total weather markets fetched: {len(all_weather_flat)}")
+
     # 2. WEATHER EDGE (live trades — GFS-informed picks)
     if open_count < MAX_POSITIONS:
         try:
-            weather_signals = weather_edge_strategy()
+            weather_signals = weather_edge_strategy(all_weather_by_series)
             logger.info(f"Weather edge: {len(weather_signals)} signals found")
             live_spent = 0
             available = balance * 0.75  # Keep 25% reserve
@@ -605,6 +621,7 @@ def run_cycle():
 
                 cost = signal['price'] * 1  # Buy 1 contract
                 if cost > available:
+                    logger.info(f"Skipping live {signal['ticker']}: cost ${cost:.2f} > available ${available:.2f}")
                     continue
 
                 buy(signal['ticker'], signal['side'], 1, signal['price'],
@@ -618,14 +635,10 @@ def run_cycle():
     # 3. WEATHER BUY-EVERYTHING (paper — 1 of every cheap bracket)
     if open_count < MAX_POSITIONS:
         try:
-            all_weather_markets = []
-            for series in WEATHER_SERIES:
-                mkts = get_series_markets(series)
-                logger.info(f"Weather series {series}: {len(mkts)} open markets")
-                all_weather_markets.extend(mkts)
-            weather_spread_signals = weather_buy_everything(all_weather_markets)
+            weather_spread_signals = weather_buy_everything(all_weather_flat)
             paper_bal = get_paper_balance()
             logger.info(f"Weather spread: {len(weather_spread_signals)} signals, paper balance=${paper_bal:.2f}")
+            bought = 0
             for signal in weather_spread_signals:
                 if open_count >= MAX_POSITIONS:
                     break
@@ -638,12 +651,15 @@ def run_cycle():
 
                 cost = signal['price'] * 1
                 if cost > paper_bal:
-                    continue
+                    logger.info(f"Paper budget exhausted: need ${cost:.2f}, have ${paper_bal:.2f}")
+                    break
 
                 buy(signal['ticker'], signal['side'], 1, signal['price'],
                     is_live=False, strategy='weather_spread', reason=signal['reason'])
                 paper_bal -= cost
                 open_count += 1
+                bought += 1
+            logger.info(f"Weather spread: bought {bought} paper contracts")
         except Exception as e:
             logger.error(f"Weather spread error: {e}")
 
@@ -675,6 +691,7 @@ def run_cycle():
                 paper_bal -= cost
                 crypto_count += 1
                 open_count += 1
+            logger.info(f"Crypto scalp: bought {crypto_count} paper contracts")
         except Exception as e:
             logger.error(f"Crypto scalp error: {e}")
 
