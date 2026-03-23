@@ -1,7 +1,8 @@
 """
-Profit maximizer: hold for big gains, protect at 50%+, no caps, no timeouts.
+Ride and protect: track peak by ticker, sell on 10pt reversal from 30%+.
 Buy cheap crypto contracts. Let winners run with no ceiling.
-Only sell when: (1) peaked above 50% and dropping back, or (2) expiry save.
+Peak gains stored in DB so restarts don't lose tracking.
+Sell when: (1) peaked above 30% and dropped 10pts, or (2) expiry save.
 """
 
 import os, time, logging, re, requests, traceback
@@ -246,34 +247,63 @@ def clear_non_btcd():
 
 
 # === SELL LOGIC ===
-# Ride and protect: track peak by ticker, sell on 10pt reversal from 30%+
+# Ride and protect: track peak by ticker in DB, sell on 10pt reversal from 30%+
 
-peak_gains = {}
+def get_peak_gain(ticker, side):
+    """Get stored peak gain from DB."""
+    key = f"{ticker}_{side}"
+    try:
+        result = db.table('peak_gains').select('peak_pct').eq('key', key).execute()
+        if result.data:
+            return sf(result.data[0].get('peak_pct'))
+    except:
+        pass
+    return None
+
+def set_peak_gain(ticker, side, peak_pct):
+    """Store peak gain in DB (survives restarts)."""
+    key = f"{ticker}_{side}"
+    try:
+        existing = db.table('peak_gains').select('key').eq('key', key).execute()
+        if existing.data:
+            db.table('peak_gains').update({'peak_pct': float(peak_pct)}).eq('key', key).execute()
+        else:
+            db.table('peak_gains').insert({'key': key, 'peak_pct': float(peak_pct)}).execute()
+    except Exception as e:
+        logger.warning(f"Peak gain DB write failed for {key}: {e}")
+
+def clear_peak_gain(ticker, side):
+    """Remove peak gain after selling."""
+    key = f"{ticker}_{side}"
+    try:
+        db.table('peak_gains').delete().eq('key', key).execute()
+    except:
+        pass
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker='', side=''):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    key = f"{ticker}_{side}"
+    # Track peak in DB (survives restarts)
+    stored_peak = get_peak_gain(ticker, side)
+    if stored_peak is None or gain_pct > stored_peak:
+        set_peak_gain(ticker, side, gain_pct)
+        peak = gain_pct
+    else:
+        peak = stored_peak
 
-    # Track peak
-    if key not in peak_gains or gain_pct > peak_gains[key]:
-        peak_gains[key] = gain_pct
-
-    peak = peak_gains[key]
     drop = peak - gain_pct
 
     # Hit 30%+ and dropped 10 points from peak — the run is over, sell
     if peak >= 30 and drop >= 10:
-        del peak_gains[key]
+        clear_peak_gain(ticker, side)
         return True, count, f"SELL +{gain_pct:.0f}% (peak +{peak:.0f}%)"
 
     # 5 min before expiry — sell anything green
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
         if gain_pct > 0:
-            if key in peak_gains:
-                del peak_gains[key]
+            clear_peak_gain(ticker, side)
             return True, count, f"EXPIRY +{gain_pct:.0f}%"
 
     return False, 0, None
@@ -549,7 +579,7 @@ def sync_with_kalshi():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — protect 50%+ gains, expiry save")
+    logger.info("check_sells() — ride and protect, 30%+ peak, 10pt drop sells")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -1125,7 +1155,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — profit maximizer, all crypto, 5s cycles, 5 contracts")
+    logger.info("Bot starting — ride and protect, all crypto, 5s cycles, peak gains in DB")
     cancel_all_resting()
     clear_dead()
     sync_with_kalshi()
