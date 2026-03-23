@@ -23,7 +23,7 @@ PORT = int(os.environ.get('PORT', 8080))
 MIN_PRICE = 0.03
 MAX_PRICE = 0.20
 CYCLE_SECONDS = 10
-MAX_CONTRACTS_PER_TRADE = 20
+MAX_CONTRACTS_PER_TRADE = 10
 MAX_BUYS_PER_CYCLE = 15
 MAX_DEPLOYMENT_PCT = 0.95
 MAX_SPEND_PER_TRADE_PCT = 0.15
@@ -166,51 +166,35 @@ def get_owned():
 
 
 # === SELL LOGIC ===
-# Smart sell: tracks momentum, sells on reversal not fixed threshold.
+# Smart sell on reversal: track momentum, sell when price turns.
 
-# Track price history per position
-price_history = {}  # trade_id -> list of recent bids
+price_history = {}
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # Track last 6 bids (about 60 seconds at 10s cycles)
     if trade_id not in price_history:
         price_history[trade_id] = []
     price_history[trade_id].append(current_bid)
-    # Keep last 6 readings
     if len(price_history[trade_id]) > 6:
         price_history[trade_id] = price_history[trade_id][-6:]
 
     history = price_history[trade_id]
 
-    # Need at least 3 readings to judge momentum
     if len(history) >= 3:
         recent = history[-3:]
-        going_up = recent[-1] > recent[-2] >= recent[-3]
         going_down = recent[-1] < recent[-2] <= recent[-3]
         peaked = recent[-1] < recent[-2] and recent[-2] >= recent[-3]
 
-        # PROFITABLE + PRICE IS DROPPING = sell now, it's reversing
-        if gain_pct >= 20 and going_down:
-            return True, count, f"REVERSING +{gain_pct:.0f}% (3 drops)"
+        if gain_pct >= 20 and (going_down or peaked):
+            return True, count, f"REVERSAL +{gain_pct:.0f}%"
 
-        # PROFITABLE + PEAKED (went up then started down) = sell now
-        if gain_pct >= 20 and peaked:
-            return True, count, f"PEAKED +{gain_pct:.0f}%"
-
-        # PROFITABLE + STILL GOING UP = hold, let it run
-        if gain_pct >= 20 and going_up:
-            pass  # hold — momentum is with us
-
-    # VERY profitable with no clear momentum = take some off the table
     if gain_pct >= 100 and count > 1:
         sell_qty = count // 2
         return True, sell_qty, f"SECURE HALF +{gain_pct:.0f}%"
 
-    # Near expiry — save anything green
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 120:
         if gain_pct > 0:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
