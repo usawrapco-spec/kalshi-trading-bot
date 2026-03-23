@@ -834,6 +834,65 @@ def get_live_bid(ticker, side):
         return 0.0
 
 
+def cleanup_ghosts():
+    """Mark expired positions that Kalshi already settled but bot missed."""
+    open_buys = db.table('trades').select('id,ticker,side,price,count,current_bid') \
+        .eq('action', 'buy').is_('pnl', 'null').execute()
+
+    cleaned = 0
+    for pos in (open_buys.data or []):
+        bid = sf(pos.get('current_bid'))
+        ticker = pos['ticker']
+        entry = sf(pos['price'])
+        count = pos.get('count') or 1
+
+        if bid > 0:
+            continue
+
+        # Bid is 0 — check if market is settled on Kalshi
+        try:
+            market = get_market(ticker)
+            if not market:
+                continue
+            status = market.get('status', '')
+            result_val = market.get('result', '')
+
+            if status in ('closed', 'settled', 'finalized') or result_val:
+                side = pos['side']
+                if result_val == side:
+                    pnl = round((1.0 - entry) * count, 4)
+                    reason = f"GHOST CLEANUP: WIN settled (entry ${entry:.2f})"
+                    settle_price = 1.0
+                elif result_val:
+                    pnl = round(-entry * count, 4)
+                    reason = f"GHOST CLEANUP: LOSS expired (entry ${entry:.2f})"
+                    settle_price = 0.0
+                else:
+                    continue
+
+                # Record the sell
+                db.table('trades').insert({
+                    'ticker': ticker, 'side': side, 'action': 'sell',
+                    'price': float(settle_price), 'count': count,
+                    'pnl': float(pnl),
+                    'strategy': pos.get('strategy', 'crypto') if 'strategy' in pos else 'crypto',
+                    'reason': reason,
+                    'sell_gain_pct': round(((settle_price - entry) / entry) * 100, 1) if entry > 0 else 0,
+                }).execute()
+                # Resolve the buy
+                db.table('trades').update({
+                    'pnl': 0.0,
+                    'current_bid': float(settle_price),
+                }).eq('id', pos['id']).execute()
+                cleaned += 1
+        except Exception as e:
+            logger.warning(f"Ghost check failed for {ticker}: {e}")
+
+    if cleaned > 0:
+        logger.info(f"Cleaned {cleaned} ghost positions (expired contracts)")
+    return cleaned
+
+
 def check_sells():
     """Smart tiered sell: 100% instant, save profits before expiry, let winners ride."""
     global sell_history
@@ -1098,6 +1157,12 @@ def run_cycle():
     total, trading, saved = get_trading_balance()
     logger.info(f"=== CYCLE START === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
 
+    # 0. Clean ghost positions (expired contracts Kalshi already settled)
+    try:
+        cleanup_ghosts()
+    except Exception as e:
+        logger.error(f"Ghost cleanup error: {e}")
+
     # 1. Check sells (universal — works for any market type)
     try:
         check_sells()
@@ -1207,14 +1272,17 @@ def api_status():
         open_buys = db.table('trades').select('id,price,count,current_bid') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         open_data = open_buys.data or []
-        open_count = len(open_data)
-        # Positions at market value (current_bid), fall back to entry price
+        # Split live (bid > 0) vs ghost (bid = 0)
+        live_positions = [t for t in open_data if sf(t.get('current_bid')) > 0]
+        ghost_count = len(open_data) - len(live_positions)
+        open_count = len(live_positions)
+        # Positions at market value — only live positions
         positions_value = round(sum(
-            (sf(t.get('current_bid')) or sf(t.get('price'))) * (t.get('count') or 1)
-            for t in open_data
+            sf(t.get('current_bid')) * (t.get('count') or 1)
+            for t in live_positions
         ), 2)
-        # Cost basis for comparison
-        positions_cost = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_data), 2)
+        # Cost basis — only live positions
+        positions_cost = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in live_positions), 2)
         cash = round(balance - positions_cost, 2)  # Cash = balance minus what we spent
 
         # Saved today = 20% of today's winning sells
@@ -1233,6 +1301,7 @@ def api_status():
             'wins': wins,
             'losses': losses,
             'open_count': open_count,
+            'ghost_count': ghost_count,
             'positions_value': positions_value,
             'positions_cost': positions_cost,
             'cash': max(0, cash),
@@ -1311,7 +1380,12 @@ def api_open():
             price = sf(t.get('price'))
             current = sf(t.get('current_bid')) or sf(t.get('last_seen_bid'))
             count = int(t.get('count') or 1)
-            if current and current > 0 and price > 0:
+
+            # Skip ghost positions (bid = 0, expired)
+            if not current or current <= 0:
+                continue
+
+            if price > 0:
                 unrealized = round((current - price) * count, 4)
                 gain_pct = round(((current - price) / price) * 100, 1)
             else:
@@ -1327,7 +1401,6 @@ def api_open():
                 'gain_pct': gain_pct,
                 'strategy': t.get('strategy', 'crypto'),
                 'category': categorize_for_dashboard(t.get('ticker', ''), t.get('strategy')),
-                'expired': current is None or current <= 0,
             })
         positions.sort(key=lambda x: x['gain_pct'], reverse=True)
         return jsonify(positions)
@@ -1575,6 +1648,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item">Max contracts: 5</div>
   <div class="status-item">Sell: 100%+ or expiry save</div>
   <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span> protected</div>
+  <div class="status-item">Ghosts: <span class="yellow" id="sb-ghosts">0</span> expired cleaned</div>
   <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
 </div>
 <div class="footer">Kalshi Scalp Bot v7 &mdash; Universal Scanner &mdash; auto-refresh 15s</div>
@@ -1639,6 +1713,7 @@ async function refresh(){
       +'<div style="font-size:9px;color:#555;margin-top:2px">Protected forever</div>';
     $('p-record').innerHTML='<span class="green">'+status.wins+'W</span> <span class="gray">/</span> <span class="red">'+status.losses+'L</span>';
     $('sb-saved').textContent='$'+(status.saved||0).toFixed(2);
+    $('sb-ghosts').textContent=(status.ghost_count||0);
   }
 
   // Dynamic category cards — only show categories that have trades or open positions
