@@ -16,13 +16,16 @@ PORT = int(os.environ.get('PORT', 8080))
 
 # Strategy settings
 MIN_PRICE = 0.03        # Only buy 3c and above
-MAX_PRICE = 0.20        # Only buy 20c and below
-TAKE_PROFIT_PCT = 50    # Sell when up 50%
-STOP_LOSS_PCT = -50     # Sell when down 50%
+MAX_PRICE = 0.15        # Only buy 15c and below
+TAKE_PROFIT_PCT = 35    # Sell when up 35% — rapid small wins
+# NO stop loss — hold until pump or expiry
 MAX_LIVE_SPEND = 3.00   # Max $3 per cycle on live trades
-MAX_POSITIONS = 30      # Max open positions total
+MAX_POSITIONS = 100     # Can hold up to 100 contracts
 CYCLE_SECONDS = 60      # Check every 60 seconds
 PAPER_STARTING_BALANCE = 10.00
+
+# Crypto 15-min series
+CRYPTO_15M_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M"]
 
 # Weather series to scan
 WEATHER_SERIES = [
@@ -76,7 +79,7 @@ def sf(val):
         return 0
 
 def get_paper_balance():
-    """Paper balance = $10 - cost of open buys + P&L from sells"""
+    """$10 - cost of open positions + realized P&L from sells + settled P&L"""
     open_buys = db.table('trades').select('price,count') \
         .eq('action', 'buy').eq('is_live', False).is_('pnl', 'null').execute()
     open_cost = sum(sf(t['price']) * t['count'] for t in (open_buys.data or []))
@@ -85,18 +88,12 @@ def get_paper_balance():
         .eq('action', 'sell').eq('is_live', False).not_.is_('pnl', 'null').execute()
     realized_pnl = sum(sf(t['pnl']) for t in (sells.data or []))
 
-    return round(PAPER_STARTING_BALANCE - open_cost + realized_pnl, 2)
+    # Settled/expired buys (pnl set by log_settlement)
+    expired = db.table('trades').select('pnl') \
+        .eq('action', 'buy').eq('is_live', False).not_.is_('pnl', 'null').execute()
+    expired_pnl = sum(sf(t['pnl']) for t in (expired.data or []))
 
-def recently_stop_lossed(ticker, hours=2):
-    """Check if we stop-lossed this ticker recently"""
-    from datetime import timedelta
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    recent = db.table('trades').select('id') \
-        .eq('ticker', ticker).eq('action', 'sell') \
-        .like('reason', '%STOP LOSS%') \
-        .gte('created_at', cutoff) \
-        .limit(1).execute()
-    return bool(recent.data)
+    return round(PAPER_STARTING_BALANCE - open_cost + realized_pnl + expired_pnl, 2)
 
 
 # ============================================================
@@ -270,8 +267,20 @@ def sell(trade, current_bid_dollars, reason):
 # POSITION MONITOR
 # ============================================================
 
+def log_settlement(trade, payout, pnl, label):
+    """Record a settled/expired contract result on the original buy"""
+    try:
+        db.table('trades').update({
+            'pnl': float(round(pnl, 4)),
+            'reason': f"{trade.get('reason', '')} | {label} payout=${payout:.2f}",
+        }).eq('id', trade['id']).execute()
+        logger.info(f"SETTLED: {trade['ticker']} {trade['side']} | {label} | pnl=${pnl:.2f}")
+    except Exception as e:
+        logger.error(f"Settlement log failed: {e}")
+
+
 def check_positions():
-    """Check all open buys, sell winners and losers"""
+    """Check all open buys — only sell winners, never sell losers"""
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy') \
         .is_('pnl', 'null') \
@@ -283,7 +292,7 @@ def check_positions():
     for trade in open_buys.data:
         ticker = trade['ticker']
         side = trade['side']
-        entry_price = float(trade['price'])
+        entry_price = sf(trade['price'])
 
         if entry_price <= 0:
             continue
@@ -292,33 +301,38 @@ def check_positions():
         if not market:
             continue
 
-        # Check if market settled
+        # CHECK 1: Has the market settled/expired?
         status = market.get('status', '')
         if status in ['closed', 'settled', 'finalized']:
             result = market.get('result', '')
             if result == side:
+                # WON — payout $1.00 per contract
                 pnl = (1.0 - entry_price) * trade['count']
-                sell(trade, 1.0, f"SETTLED WIN +${pnl:.2f}")
+                log_settlement(trade, 1.0, pnl, "WIN")
             elif result:
-                sell(trade, 0.0, f"SETTLED LOSS -${entry_price * trade['count']:.2f}")
+                # LOST — contract expired worthless
+                pnl = -entry_price * trade['count']
+                log_settlement(trade, 0.0, pnl, "LOSS (expired)")
             continue
 
-        # Get current bid (what we could sell for)
+        # CHECK 2: Has the price pumped? (ONLY reason to sell)
         if side == 'yes':
             current_bid = float(market.get('yes_bid_dollars', '0') or '0')
-        else:
+        elif side == 'no':
             current_bid = float(market.get('no_bid_dollars', '0') or '0')
+        else:
+            continue
 
         if current_bid <= 0:
             continue
 
-        # Calculate gain/loss percentage
         pct = ((current_bid - entry_price) / entry_price) * 100
 
+        # ONLY SELL IF UP 100%+ (doubled your money)
         if pct >= TAKE_PROFIT_PCT:
             sell(trade, current_bid, f"TAKE PROFIT +{pct:.0f}% ({entry_price:.2f}->{current_bid:.2f})")
-        elif pct <= STOP_LOSS_PCT:
-            sell(trade, current_bid, f"STOP LOSS {pct:.0f}% ({entry_price:.2f}->{current_bid:.2f})")
+
+        # NO STOP LOSS — if it's down, just hold. Max loss is what you paid.
 
 
 # ============================================================
@@ -482,6 +496,77 @@ def scalp_strategy():
 
 
 # ============================================================
+# STRATEGY 3: WEATHER BUY EVERYTHING CHEAP
+# ============================================================
+
+def weather_buy_everything(all_weather_markets):
+    """Buy 1 of every cheap weather contract we don't already own"""
+    signals = []
+    for market in all_weather_markets:
+        ticker = market.get('ticker', '')
+        if 'KXMVE' in ticker:
+            continue
+        if market.get('status', '') != 'open':
+            continue
+
+        yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
+        no_ask = float(market.get('no_ask_dollars', '0') or '0')
+
+        if MIN_PRICE <= yes_ask <= MAX_PRICE:
+            signals.append({
+                'ticker': ticker, 'side': 'yes', 'price': yes_ask,
+                'reason': f"Weather spread: YES @ {yes_ask:.2f}"
+            })
+        if MIN_PRICE <= no_ask <= MAX_PRICE:
+            signals.append({
+                'ticker': ticker, 'side': 'no', 'price': no_ask,
+                'reason': f"Weather spread: NO @ {no_ask:.2f}"
+            })
+    return signals
+
+
+# ============================================================
+# STRATEGY 4: CRYPTO 15-MIN SCALP
+# ============================================================
+
+def crypto_scalp_strategy():
+    """Buy 1 cheap contract on every 15-min crypto bracket"""
+    signals = []
+
+    for series in CRYPTO_15M_SERIES:
+        try:
+            markets = get_series_markets(series)
+        except:
+            continue
+
+        for market in markets:
+            ticker = market.get('ticker', '')
+            if 'KXMVE' in ticker:
+                continue
+
+            status = market.get('status', '')
+            if status != 'open':
+                continue
+
+            yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
+            no_ask = float(market.get('no_ask_dollars', '0') or '0')
+
+            if MIN_PRICE <= yes_ask <= MAX_PRICE:
+                signals.append({
+                    'ticker': ticker, 'side': 'yes', 'price': yes_ask,
+                    'reason': f"Crypto scalp: YES @ {yes_ask:.2f}"
+                })
+
+            if MIN_PRICE <= no_ask <= MAX_PRICE:
+                signals.append({
+                    'ticker': ticker, 'side': 'no', 'price': no_ask,
+                    'reason': f"Crypto scalp: NO @ {no_ask:.2f}"
+                })
+
+    return signals
+
+
+# ============================================================
 # MAIN BOT CYCLE
 # ============================================================
 
@@ -493,13 +578,13 @@ def run_cycle():
     open_count_resp = db.table('trades').select('id').eq('action', 'buy').is_('pnl', 'null').execute()
     open_count = len(open_count_resp.data) if open_count_resp.data else 0
 
-    # 1. CHECK POSITIONS FIRST (sell winners/losers)
+    # 1. CHECK POSITIONS (sell pumps, record settlements)
     try:
         check_positions()
     except Exception as e:
         logger.error(f"Position check error: {e}")
 
-    # 2. WEATHER EDGE (live trades)
+    # 2. WEATHER EDGE (live trades — GFS-informed picks)
     if open_count < MAX_POSITIONS:
         try:
             weather_signals = weather_edge_strategy()
@@ -511,52 +596,35 @@ def run_cycle():
                 if open_count >= MAX_POSITIONS:
                     break
 
-                if recently_stop_lossed(signal['ticker']):
-                    logger.info(f"  Skip {signal['ticker']}: recently stop-lossed, cooling down")
-                    continue
-
                 existing = db.table('trades').select('id') \
                     .eq('ticker', signal['ticker']).eq('side', signal['side']) \
                     .eq('action', 'buy').is_('pnl', 'null').execute()
                 if existing.data:
                     continue
 
-                count = max(1, int(1.0 / signal['price']))
-                count = min(count, 10)
-                cost = signal['price'] * count
-
-                # Check if we can afford it
+                cost = signal['price'] * 1  # Buy 1 contract
                 if cost > available:
-                    count = max(1, int(available / signal['price']))
-                    cost = signal['price'] * count
-                if cost > available or count < 1:
-                    logger.info(f"  Skip {signal['ticker']}: cost ${cost:.2f} > available ${available:.2f}")
                     continue
 
-                buy(signal['ticker'], signal['side'], count, signal['price'],
+                buy(signal['ticker'], signal['side'], 1, signal['price'],
                     is_live=True, strategy='weather_edge', reason=signal['reason'])
                 live_spent += cost
                 available -= cost
                 open_count += 1
-                logger.info(f"  Weather: {signal['ticker']} {signal['side']} x{count} @ {signal['price']:.2f} | {signal['reason']}")
         except Exception as e:
             logger.error(f"Weather strategy error: {e}")
 
-    # 3. SCALP STRATEGY (paper for now)
+    # 3. WEATHER BUY-EVERYTHING (paper — 1 of every cheap bracket)
     if open_count < MAX_POSITIONS:
         try:
-            scalp_signals = scalp_strategy()
-            paper_count = 0
+            all_weather_markets = []
+            for series in WEATHER_SERIES:
+                all_weather_markets.extend(get_series_markets(series))
+            weather_spread_signals = weather_buy_everything(all_weather_markets)
             paper_bal = get_paper_balance()
-            for signal in scalp_signals[:10]:
+            for signal in weather_spread_signals:
                 if open_count >= MAX_POSITIONS:
                     break
-                if paper_count >= 5:
-                    break
-
-                if recently_stop_lossed(signal['ticker']):
-                    logger.info(f"  Skip {signal['ticker']}: recently stop-lossed, cooling down")
-                    continue
 
                 existing = db.table('trades').select('id') \
                     .eq('ticker', signal['ticker']).eq('side', signal['side']) \
@@ -564,25 +632,46 @@ def run_cycle():
                 if existing.data:
                     continue
 
-                count = max(1, int(0.50 / signal['price']))
-                count = min(count, 5)
-                cost = signal['price'] * count
-
-                # Check paper balance
-                if cost > paper_bal * 0.20:
-                    count = max(1, int((paper_bal * 0.20) / signal['price']))
-                    cost = signal['price'] * count
-                if cost > paper_bal or count < 1:
-                    logger.info(f"  Skip {signal['ticker']}: paper balance too low (${paper_bal:.2f})")
+                cost = signal['price'] * 1
+                if cost > paper_bal:
                     continue
 
-                buy(signal['ticker'], signal['side'], count, signal['price'],
-                    is_live=False, strategy='scalp', reason=signal['reason'])
+                buy(signal['ticker'], signal['side'], 1, signal['price'],
+                    is_live=False, strategy='weather_spread', reason=signal['reason'])
                 paper_bal -= cost
-                paper_count += 1
                 open_count += 1
         except Exception as e:
-            logger.error(f"Scalp strategy error: {e}")
+            logger.error(f"Weather spread error: {e}")
+
+    # 4. CRYPTO 15-MIN SCALP (paper for now)
+    if open_count < MAX_POSITIONS:
+        try:
+            crypto_signals = crypto_scalp_strategy()
+            crypto_count = 0
+            paper_bal = get_paper_balance()
+            for signal in crypto_signals:
+                if open_count >= MAX_POSITIONS:
+                    break
+                if crypto_count >= 10:  # Max 10 crypto trades per cycle
+                    break
+
+                existing = db.table('trades').select('id') \
+                    .eq('ticker', signal['ticker']).eq('side', signal['side']) \
+                    .eq('action', 'buy').is_('pnl', 'null').execute()
+                if existing.data:
+                    continue
+
+                cost = signal['price'] * 1
+                if cost > paper_bal:
+                    continue
+
+                buy(signal['ticker'], signal['side'], 1, signal['price'],
+                    is_live=False, strategy='crypto_scalp', reason=signal['reason'])
+                paper_bal -= cost
+                crypto_count += 1
+                open_count += 1
+        except Exception as e:
+            logger.error(f"Crypto scalp error: {e}")
 
     logger.info(f"=== CYCLE END === Open positions: {open_count}")
 
@@ -666,11 +755,19 @@ def dashboard():
         live_trades = [t for t in trades if t.get('is_live')]
         paper_trades = [t for t in trades if not t.get('is_live')]
 
+        # Sells (active take-profits)
         live_sells = [t for t in live_trades if t['action'] == 'sell' and sf(t.get('pnl')) != 0]
         paper_sells = [t for t in paper_trades if t['action'] == 'sell' and sf(t.get('pnl')) != 0]
 
-        live_pnl_total = sum(sf(t['pnl']) for t in live_sells)
-        paper_pnl_total = sum(sf(t['pnl']) for t in paper_sells)
+        # Settled buys (expired/settled contracts with pnl recorded)
+        live_settled = [t for t in live_trades if t['action'] == 'buy' and t.get('pnl') is not None]
+        paper_settled = [t for t in paper_trades if t['action'] == 'buy' and t.get('pnl') is not None]
+
+        all_live_closed = live_sells + live_settled
+        all_paper_closed = paper_sells + paper_settled
+
+        live_pnl_total = sum(sf(t['pnl']) for t in all_live_closed)
+        paper_pnl_total = sum(sf(t['pnl']) for t in all_paper_closed)
         paper_roi = (paper_pnl_total / PAPER_STARTING_BALANCE) * 100
 
         # Convert numeric fields for Jinja template
@@ -684,13 +781,13 @@ def dashboard():
         return render_template_string(DASHBOARD_HTML,
             live_balance=f"{get_balance():.2f}",
             live_open=sum(1 for t in live_trades if t['action'] == 'buy' and t.get('pnl') is None),
-            live_wins=sum(1 for t in live_sells if sf(t['pnl']) > 0),
-            live_losses=sum(1 for t in live_sells if sf(t['pnl']) <= 0),
+            live_wins=sum(1 for t in all_live_closed if sf(t['pnl']) > 0),
+            live_losses=sum(1 for t in all_live_closed if sf(t['pnl']) < 0),
             live_pnl=f"{live_pnl_total:.2f}",
             paper_balance=f"{get_paper_balance():.2f}",
             paper_open=sum(1 for t in paper_trades if t['action'] == 'buy' and t.get('pnl') is None),
-            paper_wins=sum(1 for t in paper_sells if sf(t['pnl']) > 0),
-            paper_losses=sum(1 for t in paper_sells if sf(t['pnl']) <= 0),
+            paper_wins=sum(1 for t in all_paper_closed if sf(t['pnl']) > 0),
+            paper_losses=sum(1 for t in all_paper_closed if sf(t['pnl']) < 0),
             paper_pnl=f"{paper_pnl_total:.2f}",
             paper_roi=f"{paper_roi:+.1f}",
             trades=trades_display,
