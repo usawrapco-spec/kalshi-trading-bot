@@ -223,14 +223,15 @@ def check_sells():
         gain_pct = gain * 100
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        # 30% gain = SELL
-        if gain >= SELL_THRESHOLD:
+        # 30% gain = take profit, 50% loss = stop loss
+        if gain >= SELL_THRESHOLD or gain <= -0.50:
             pnl = round((current_bid - entry_price) * count, 4)
+            reason = f"+{gain_pct:.0f}% PROFIT" if gain >= SELL_THRESHOLD else f"{gain_pct:.0f}% STOP LOSS"
             result = place_order(ticker, side, 'sell', current_bid, count)
             if not result:
                 continue
 
-            logger.info(f"SELL: {ticker} {side} x{count} @ ${current_bid:.2f} | +{gain_pct:.0f}% | pnl=${pnl:.4f}")
+            logger.info(f"SELL ({reason}): {ticker} {side} x{count} @ ${current_bid:.2f} | pnl=${pnl:.4f}")
             try:
                 db.table('trades').update({
                     'pnl': float(pnl),
@@ -276,15 +277,7 @@ def buy_candidates(markets):
         if ticker in owned:
             continue
 
-        # Must expire in more than 30 minutes
-        close_time = market.get('close_time') or market.get('expected_expiration_time')
-        if close_time:
-            try:
-                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                if (close_dt - now).total_seconds() < 300:
-                    continue
-            except:
-                pass
+        # No expiry filter — buy anything with a bid in range
 
         yes_ask = sf(market.get('yes_ask_dollars', '0'))
         yes_bid = sf(market.get('yes_bid_dollars', '0'))
@@ -566,7 +559,7 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: all crypto (20 series) | Min 5m to expiry</span>
+  <span>Series: all crypto (20 series) | No expiry filter | 50% stop loss</span>
   <span>Buy: 3-20c | Sell: 30% | 5 contracts | 30s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
