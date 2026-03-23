@@ -164,10 +164,12 @@ def place_order(ticker, side, action, price, count):
 # === CRYPTO ONLY ===
 
 CRYPTO_SERIES = [
-    'KXBTC15M', 'KXETH15M', 'KXSOL15M',
-    'KXBTC1H', 'KXETH1H', 'KXSOL1H',
-    'KXBTCD', 'KXETHD', 'KXSOLD',
-    'KXBTC', 'KXETH', 'KXSOL',
+    # BTC first — the proven winners
+    'KXBTCD', 'KXBTC', 'KXBTC1H', 'KXBTC15M',
+    # ETH — brackets work well
+    'KXETHD', 'KXETH', 'KXETH1H', 'KXETH15M',
+    # SOL — weakest but keep for diversification
+    'KXSOLD', 'KXSOL', 'KXSOL1H', 'KXSOL15M',
 ]
 
 
@@ -187,12 +189,24 @@ def fetch_all_crypto():
 # === BUY LOGIC ===
 
 def get_buy_count(ticker):
-    """1 contract on 15-min, 2 on bracket, 1 on daily/hourly."""
-    if '15M' in ticker:
-        return 1
-    if ticker.startswith('KXBTC-') or ticker.startswith('KXETH-') or ticker.startswith('KXSOL-'):
-        return 2
+    """More contracts on proven winners."""
+    if 'KXBTCD' in ticker:
+        return 3    # BTC daily = 92.7% avg win
+    if ticker.startswith('KXBTC-') or ticker.startswith('KXETH-'):
+        return 2    # BTC/ETH brackets = ~47% avg win
     return 1
+
+
+def buy_priority(ticker):
+    """Lower = buy first. BTC daily is the money maker."""
+    if 'KXBTCD' in ticker: return 0
+    if ticker.startswith('KXBTC-'): return 1
+    if ticker.startswith('KXETH-'): return 2
+    if 'KXBTC15M' in ticker: return 3
+    if 'KXETHD' in ticker: return 4
+    if 'KXETH15M' in ticker: return 5
+    if 'KXSOL' in ticker: return 6
+    return 7
 
 
 def run_buys(markets):
@@ -233,8 +247,18 @@ def run_buys(markets):
             'bid': bid, 'spread': spread, 'count': count,
         })
 
-    # Sort by tightest spread
-    buys.sort(key=lambda x: x['spread'])
+    # Sort by priority (BTC daily first) then tightest spread
+    buys.sort(key=lambda x: (buy_priority(x['ticker']), x['spread']))
+
+    # Exposure limits: max 40% of balance, max 5% per trade
+    max_exposure = min(balance * 0.4, 45.0)
+    max_per_trade = min(balance * 0.05, 2.0)
+    deployed = sum(b['price'] * b['count'] for b in buys[:0])  # will track below
+
+    # Get current deployed
+    open_buys = db.table('trades').select('price,count') \
+        .eq('action', 'buy').is_('pnl', 'null').execute()
+    current_deployed = sum(sf(t['price']) * (t['count'] or 1) for t in (open_buys.data or []))
 
     bought = 0
     for b in buys:
@@ -243,6 +267,10 @@ def run_buys(markets):
         if balance < RESERVE_BALANCE:
             break
         cost = b['price'] * b['count']
+        if cost > max_per_trade:
+            continue
+        if current_deployed + cost > max_exposure:
+            continue
         if cost > balance - RESERVE_BALANCE:
             continue
 
@@ -263,11 +291,12 @@ def run_buys(markets):
             }).execute()
             owned.add(b['ticker'])
             balance -= cost
+            current_deployed += cost
             bought += 1
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
 
-    logger.info(f"Bought {bought}, balance ${balance:.2f}")
+    logger.info(f"Bought {bought}, balance ${balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
 
 
 # === SELL LOGIC — ADAPTIVE THRESHOLD, HANDLE SETTLEMENTS ===
@@ -275,16 +304,16 @@ def run_buys(markets):
 sell_history = []  # Rolling last 20 sell gain percentages
 
 def check_sells():
-    """Check ALL positions. Adaptive threshold (30% floor). Never sell at a loss."""
+    """Check ALL positions. Adaptive threshold (50% floor). Never sell at a loss."""
     global sell_history
     logger.info("check_sells() called")
 
-    # Adaptive threshold: 50% of average win, minimum 30%
+    # Adaptive threshold: 50% of average win, minimum 50%
     if len(sell_history) >= 10:
         avg_win = sum(sell_history) / len(sell_history)
-        threshold = max(30, avg_win * 0.5)
+        threshold = max(50, avg_win * 0.5)
     else:
-        threshold = 30
+        threshold = 50
         avg_win = 0
     logger.info(f"Sell threshold: {threshold:.0f}% (avg win: {avg_win:.0f}%, {len(sell_history)} sells tracked)")
 
