@@ -76,6 +76,16 @@ WEATHER_SERIES = [
     "KXLOWTNYC", "KXLOWTCHI", "KXLOWTMIA", "KXLOWTLAX", "KXLOWTDEN",
     "KXLOWTAUS", "KXLOWTPHIL"
 ]
+TRENDING_SERIES = [
+    "KXNCAAMB", "KXNBA", "KXNHL", "KXMLB",
+    "KXPRES", "KXTRUMPPARDONS", "KXSCOTUS", "KXSCOURT",
+    "KXNEXTUKPM", "KXPRESPERSON", "KXPERFORMBONDSONG",
+    "KXROASTSUBJECT", "KXBOND", "KXTERMLIMITS",
+    "POWER", "EUEXIT", "KXAGICO", "KXGTAPRICE",
+    "KXFULLTERMSKPRES", "KXDEBTGROWTH", "KXWITHDRAW",
+    "SENATECT", "KXBRUVSEAT", "KXNEWSCOTUSCONF",
+    "KXALBERTAREFYES", "KXTRILLIONAIRE",
+]
 
 
 def kalshi_get(path):
@@ -181,11 +191,10 @@ def scan_all_markets():
     return cheap
 
 
-def scan_series_markets():
-    """Fetch weather + crypto series individually (proven to work)."""
+def _scan_series(series_list, strategy):
+    """Scan a list of series tickers and return cheap contracts."""
     cheap = []
-
-    for series in CRYPTO_SERIES:
+    for series in series_list:
         markets = get_series_markets(series)
         for m in markets:
             ticker = m.get('ticker', '')
@@ -195,31 +204,22 @@ def scan_series_markets():
             no_ask = float(m.get('no_ask_dollars', '0') or '0')
             if MIN_PRICE <= yes_ask <= MAX_PRICE:
                 cheap.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
-                              'volume': 0, 'strategy': 'crypto',
-                              'reason': f"crypto: YES @ ${yes_ask:.2f}"})
+                              'volume': 0, 'strategy': strategy,
+                              'reason': f"{strategy}: YES @ ${yes_ask:.2f}"})
             if MIN_PRICE <= no_ask <= MAX_PRICE:
                 cheap.append({'ticker': ticker, 'side': 'no', 'price': no_ask,
-                              'volume': 0, 'strategy': 'crypto',
-                              'reason': f"crypto: NO @ ${no_ask:.2f}"})
+                              'volume': 0, 'strategy': strategy,
+                              'reason': f"{strategy}: NO @ ${no_ask:.2f}"})
+    return cheap
 
-    for series in WEATHER_SERIES:
-        markets = get_series_markets(series)
-        for m in markets:
-            ticker = m.get('ticker', '')
-            if 'KXMVE' in ticker:
-                continue
-            yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
-            no_ask = float(m.get('no_ask_dollars', '0') or '0')
-            if MIN_PRICE <= yes_ask <= MAX_PRICE:
-                cheap.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
-                              'volume': 0, 'strategy': 'weather',
-                              'reason': f"weather: YES @ ${yes_ask:.2f}"})
-            if MIN_PRICE <= no_ask <= MAX_PRICE:
-                cheap.append({'ticker': ticker, 'side': 'no', 'price': no_ask,
-                              'volume': 0, 'strategy': 'weather',
-                              'reason': f"weather: NO @ ${no_ask:.2f}"})
 
-    logger.info(f"Series scan: {len(cheap)} cheap (crypto+weather)")
+def scan_series_markets():
+    """Fetch crypto + weather + trending series individually."""
+    crypto = _scan_series(CRYPTO_SERIES, 'crypto')
+    weather = _scan_series(WEATHER_SERIES, 'weather')
+    trending = _scan_series(TRENDING_SERIES, 'trending')
+    cheap = crypto + weather + trending
+    logger.info(f"Series scan: {len(cheap)} cheap (crypto:{len(crypto)} weather:{len(weather)} trending:{len(trending)})")
     return cheap
 
 
