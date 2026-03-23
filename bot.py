@@ -50,23 +50,26 @@ def sf(val):
 # === EXPIRY PARSING ===
 
 def get_time_to_expiry(ticker):
-    """Parse expiry from ticker. Format: KXBTCD-26MAR2305-T68499.99"""
+    """Parse expiry from ticker. Format: KXBTCD-26MAR2316-T68499.99 = year 2026, March, day 23, hour 16"""
     if isinstance(ticker, dict):
         ticker = ticker.get('ticker', '')
     match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})(\d{2})-', ticker)
     if not match:
         return None
-    day_str, mon_str, h1, h2 = match.groups()
-    months = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
-              'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
+    g1, mon_str, g3, g4 = match.groups()
+    months = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
+              'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
     month = months.get(mon_str)
     if not month:
         return None
-    hour = int(h1)
-    minute = int(h2)
+    # 26MAR2316 = year 2026, March, day 23, hour 16
+    year = 2000 + int(g1)   # 26 -> 2026
+    day = int(g3)            # 23
+    hour = int(g4)           # 16
     try:
-        expiry = datetime(2026, month, int(day_str), hour, minute, 0, tzinfo=timezone.utc)
-        tte = max(0, (expiry - datetime.now(timezone.utc)).total_seconds())
+        expiry = datetime(year, month, day, hour, 59, 59, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        tte = max(0, (expiry - now).total_seconds())
         return tte
     except:
         return None
