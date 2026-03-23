@@ -47,6 +47,7 @@ from utils.live_validator import is_live_strategy, validate_live_trade
 from utils.signal_tier import rate_signal, size_by_tier, check_portfolio_limits, hours_until_close, TIER_CONFIG, MAX_LIVE_TRADES_PER_CYCLE
 from self_improver import SelfImprover
 from utils.position_book import PositionBook, ExitManager
+from position_monitor import PositionMonitor
 
 logger = setup_logger('main')
 
@@ -114,6 +115,9 @@ class KalshiBot:
         self.position_book = PositionBook(self.db)
         self.position_book.load_from_db()
         self.exit_manager = ExitManager(self.client, self.position_book, self.risk)
+
+        # Scalping position monitor — checks ALL positions (paper + live) every cycle
+        self.position_monitor = PositionMonitor(self.client, self.db, self.risk)
 
         self.strategies = []
         self._swing_cycle_offset = 0  # Rotate through swing positions across cycles
@@ -956,6 +960,12 @@ class KalshiBot:
         except Exception as e:
             logger.error(f"Exit manager failed: {e}")
 
+        # === SCALPING MONITOR: Check ALL positions (paper + live) for profit-taking ===
+        try:
+            self.position_monitor.run()
+        except Exception as e:
+            logger.error(f"Position monitor failed: {e}")
+
         if not self.risk.check_daily_loss_limit():
             logger.warning("Daily loss stop - halting")
             self._log_status()
@@ -1327,6 +1337,14 @@ class KalshiBot:
                 else:
                     price_for_side = price if sig['side'] == 'yes' else (1 - price)
                     price_for_side = max(0.01, min(0.99, price_for_side))
+
+                # === SCALPING PRICE FILTER: Only buy cheap contracts (3-20 cents) ===
+                # This is the core of the strategy: buy cheap, sell the pump
+                SCALP_MIN_PRICE = 0.03  # Don't buy below 3 cents (too risky/illiquid)
+                SCALP_MAX_PRICE = 0.20  # Don't buy above 20 cents (not enough upside)
+                if price_for_side < SCALP_MIN_PRICE or price_for_side > SCALP_MAX_PRICE:
+                    logger.debug(f"  SKIP {sig['ticker']}: price ${price_for_side:.2f} outside scalp range ${SCALP_MIN_PRICE}-${SCALP_MAX_PRICE}")
+                    continue
 
                 # Position sizing
                 if edge > 0 and prob > 0:
