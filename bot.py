@@ -22,12 +22,8 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === SETTINGS ===
-# Crypto brackets (cheap)
-CRYPTO_BUY_MIN = 0.03
-CRYPTO_BUY_MAX = 0.30
-# Sports/tennis moneylines (underdog side)
-SPORTS_BUY_MIN = 0.08
-SPORTS_BUY_MAX = 0.50
+BUY_MIN = 0.03
+BUY_MAX = 0.50
 CYCLE_SECONDS = 30
 MAX_CONTRACTS_PER_TRADE = 3
 MIN_CONTRACTS_PER_TRADE = 1
@@ -48,7 +44,7 @@ SPORTS_SERIES = ['KXNCAAMBGAME', 'KXNBAGAME', 'KXTENNIS', 'KXMLB', 'KXNHL']
 ALL_SERIES = CRYPTO_SERIES + SPORTS_SERIES
 
 # === HARD BLOCKS ===
-BLOCKED_PATTERNS = ['KXMVE', 'KXBTCY', 'KXETHY', 'KXSOLY', '27JAN', '2026250', 'SOL26500', 'KXSOLE']
+BLOCKED_PATTERNS = ['KXMVE']
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -279,113 +275,55 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
 
 # === BUY LOGIC ===
 
-def _is_sports(ticker):
-    return any(ticker.startswith(s) for s in SPORTS_SERIES)
-
-
-def _price_range(ticker):
-    if _is_sports(ticker):
-        return SPORTS_BUY_MIN, SPORTS_BUY_MAX
-    return CRYPTO_BUY_MIN, CRYPTO_BUY_MAX
-
-
 def find_buy_candidates(markets):
     candidates = []
-    blocked = too_soon = no_volume = wrong_price = no_bid = wide_spread = 0
+    blocked = wrong_price = no_bid = 0
 
     for market in markets:
         ticker = market.get('ticker', '')
 
-        # Hard blocks
         if any(pat in ticker for pat in BLOCKED_PATTERNS):
             blocked += 1
             continue
 
-        # Only skip if literally about to expire in under 60 seconds
-        expiry = get_time_to_expiry(ticker, market=market)
-        if expiry is not None and expiry < 60:
-            too_soon += 1
-            continue
-
-        # Price + liquidity
         yes_ask = sf(market.get('yes_ask_dollars', '0'))
         yes_bid = sf(market.get('yes_bid_dollars', '0'))
         no_ask = sf(market.get('no_ask_dollars', '0'))
         no_bid = sf(market.get('no_bid_dollars', '0'))
         volume = int(market.get('volume_24h', 0) or 0)
-
-        if volume < MIN_VOLUME:
-            no_volume += 1
-            continue
-
-        min_p, max_p = _price_range(ticker)
         added = False
 
-        # YES side
-        if min_p <= yes_ask <= max_p and yes_bid > 0:
-            spread_pct = (yes_ask - yes_bid) / yes_ask if yes_ask > 0 else 1
-            if spread_pct <= MAX_SPREAD_PCT:
-                candidates.append({
-                    'ticker': ticker, 'side': 'yes',
-                    'price': yes_ask, 'bid': yes_bid,
-                    'volume': volume
-                })
-                added = True
-            else:
-                wide_spread += 1
+        # YES side: price in range + bid exists
+        if BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            candidates.append({
+                'ticker': ticker, 'side': 'yes',
+                'price': yes_ask, 'bid': yes_bid,
+                'volume': volume
+            })
+            added = True
 
-        # NO side
-        if min_p <= no_ask <= max_p and no_bid > 0:
-            spread_pct = (no_ask - no_bid) / no_ask if no_ask > 0 else 1
-            if spread_pct <= MAX_SPREAD_PCT:
-                candidates.append({
-                    'ticker': ticker, 'side': 'no',
-                    'price': no_ask, 'bid': no_bid,
-                    'volume': volume
-                })
-                added = True
-            else:
-                wide_spread += 1
+        # NO side: price in range + bid exists
+        if BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            candidates.append({
+                'ticker': ticker, 'side': 'no',
+                'price': no_ask, 'bid': no_bid,
+                'volume': volume
+            })
+            added = True
 
         if not added:
-            # Check why it didn't pass price filter
-            if not ((min_p <= yes_ask <= max_p) or (min_p <= no_ask <= max_p)):
+            if not ((BUY_MIN <= yes_ask <= BUY_MAX) or (BUY_MIN <= no_ask <= BUY_MAX)):
                 wrong_price += 1
             elif yes_bid <= 0 and no_bid <= 0:
                 no_bid += 1
 
-    # Sort by volume descending
     candidates.sort(key=lambda x: x['volume'], reverse=True)
     total = len(markets)
-    logger.info(f"FILTER: {total} total | {blocked} blocked | {too_soon} expiring <60s | {no_volume} low vol | {wrong_price} price out of range | {no_bid} no bid | {wide_spread} wide spread | {len(candidates)} candidates")
+    logger.info(f"FILTER: {total} total | {blocked} blocked | {wrong_price} price out of range | {no_bid} no bid | {len(candidates)} candidates")
 
-    # Log samples for debugging
-    samples = []
-    for m in markets:
-        t = m.get('ticker', '')
-        ya = sf(m.get('yes_ask_dollars', '0'))
-        na = sf(m.get('no_ask_dollars', '0'))
-        yb = sf(m.get('yes_bid_dollars', '0'))
-        nb = sf(m.get('no_bid_dollars', '0'))
-        v = int(m.get('volume_24h', 0) or 0)
-        exp = get_time_to_expiry(t, market=m)
-        if v >= 5:
-            exp_str = f"{exp:.0f}s" if exp is not None else "?"
-            samples.append(f"{t}: yes={ya}/{yb} no={na}/{nb} vol={v} exp={exp_str}")
-        if len(samples) >= 5:
-            break
-    if samples:
-        logger.info(f"SAMPLES: {' | '.join(samples)}")
-    else:
-        logger.info(f"NO markets passed volume check. Loosest 3 by volume:")
-        by_vol = sorted(markets, key=lambda m: int(m.get('volume_24h', 0) or 0), reverse=True)[:3]
-        for m in by_vol:
-            t = m.get('ticker', '')
-            ya = sf(m.get('yes_ask_dollars', '0'))
-            na = sf(m.get('no_ask_dollars', '0'))
-            v = int(m.get('volume_24h', 0) or 0)
-            exp = get_time_to_expiry(t, market=m)
-            logger.info(f"  {t}: yes=${ya:.2f} no=${na:.2f} vol={v} exp={exp}")
+    # Log first 5 candidates
+    for c in candidates[:5]:
+        logger.info(f"  CANDIDATE: {c['ticker']} {c['side']} ask=${c['price']:.2f} bid=${c['bid']:.2f} vol={c['volume']}")
 
     return candidates
 
@@ -963,7 +901,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="live-dot dot-paper" id="status-dot"></span> <span id="status-mode">PAPER</span></div>
-  <div class="status-item">Buy: crypto 3-30c, sports 8-50c, vol>=5</div>
+  <div class="status-item">Buy: 3-50c, bid exists</div>
   <div class="status-item">Sell: half@100%, full@200%, expiry@25%</div>
   <div class="status-item">Max: 3 contracts, 10 positions</div>
   <div class="status-item">Series: Crypto + NCAA + NBA + Tennis + MLB + NHL</div>
@@ -1119,7 +1057,7 @@ def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
     logger.info(f"Bot starting [{mode}] -- half at 100%, full at 200%, 30s cycles, crypto + sports")
     logger.info(f"Series: {ALL_SERIES}")
-    logger.info(f"Settings: crypto={CRYPTO_BUY_MIN}-{CRYPTO_BUY_MAX}, sports={SPORTS_BUY_MIN}-{SPORTS_BUY_MAX}, vol>={MIN_VOLUME}, spread<={MAX_SPREAD_PCT:.0%}, expiry {MIN_EXPIRY_SECONDS/60:.0f}m-{MAX_EXPIRY_SECONDS/3600:.0f}h")
+    logger.info(f"Settings: price=${BUY_MIN}-${BUY_MAX}, filter=price+bid only")
     logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, {MAX_DEPLOYMENT_PCT:.0%} max deploy, {MIN_CASH_RESERVE:.0%} cash reserve, {MAX_POSITIONS} max positions")
 
     cancel_all_resting()
