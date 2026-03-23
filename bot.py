@@ -67,6 +67,17 @@ def get_owned():
 
 # === KALSHI API ===
 
+CRYPTO_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M"]
+WEATHER_SERIES = [
+    "KXHIGHNY", "KXHIGHCHI", "KXHIGHMIA", "KXHIGHLAX", "KXHIGHDEN",
+    "KXHIGHAUS", "KXHIGHTPHX", "KXHIGHTSFO", "KXHIGHTATL", "KXHIGHPHIL",
+    "KXHIGHTDC", "KXHIGHTSEA", "KXHIGHTHOU", "KXHIGHTMIN", "KXHIGHTBOS",
+    "KXHIGHTLV", "KXHIGHTOKC",
+    "KXLOWTNYC", "KXLOWTCHI", "KXLOWTMIA", "KXLOWTLAX", "KXLOWTDEN",
+    "KXLOWTAUS", "KXLOWTPHIL"
+]
+
+
 def kalshi_get(path):
     url = f"{KALSHI_HOST}/trade-api/v2{path}"
     headers = auth.get_headers("GET", f"/trade-api/v2{path}")
@@ -81,6 +92,15 @@ def get_market(ticker):
         return resp.get('market', resp)
     except:
         return None
+
+
+def get_series_markets(series_ticker):
+    try:
+        resp = kalshi_get(f"/markets?series_ticker={series_ticker}&status=open&limit=100")
+        return resp.get('markets', [])
+    except Exception as e:
+        logger.error(f"get_series_markets({series_ticker}) failed: {e}")
+        return []
 
 
 # === SCAN ALL MARKETS ===
@@ -118,7 +138,11 @@ def scan_all_markets():
             logger.error(f"Market fetch page {page}: {e}")
             break
 
-    logger.info(f"Fetched {len(all_markets)} total markets")
+    logger.info(f"Fetched {len(all_markets)} total markets from generic endpoint")
+
+    # Log first 3 markets raw prices to diagnose field names
+    for i, m in enumerate(all_markets[:3]):
+        logger.info(f"  Generic market[{i}]: {m.get('ticker','?')} yes_ask_dollars={m.get('yes_ask_dollars', 'MISSING')!r} no_ask_dollars={m.get('no_ask_dollars', 'MISSING')!r}")
 
     cheap = []
     for m in all_markets:
@@ -146,12 +170,56 @@ def scan_all_markets():
             })
 
     cheap.sort(key=lambda x: x['volume'], reverse=True)
+    if cheap:
+        logger.info(f"  Generic scan: first 3 cheap: {[(c['ticker'], c['side'], c['price']) for c in cheap[:3]]}")
 
     counts = {}
     for c in cheap:
         counts[c['strategy']] = counts.get(c['strategy'], 0) + 1
     breakdown = ', '.join(f"{k}: {v}" for k, v in sorted(counts.items()))
-    logger.info(f"Found {len(cheap)} cheap contracts ({breakdown})")
+    logger.info(f"Generic scan: {len(cheap)} cheap ({breakdown})")
+    return cheap
+
+
+def scan_series_markets():
+    """Fetch weather + crypto series individually (proven to work)."""
+    cheap = []
+
+    for series in CRYPTO_SERIES:
+        markets = get_series_markets(series)
+        for m in markets:
+            ticker = m.get('ticker', '')
+            if 'KXMVE' in ticker:
+                continue
+            yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
+            no_ask = float(m.get('no_ask_dollars', '0') or '0')
+            if MIN_PRICE <= yes_ask <= MAX_PRICE:
+                cheap.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
+                              'volume': 0, 'strategy': 'crypto',
+                              'reason': f"crypto: YES @ ${yes_ask:.2f}"})
+            if MIN_PRICE <= no_ask <= MAX_PRICE:
+                cheap.append({'ticker': ticker, 'side': 'no', 'price': no_ask,
+                              'volume': 0, 'strategy': 'crypto',
+                              'reason': f"crypto: NO @ ${no_ask:.2f}"})
+
+    for series in WEATHER_SERIES:
+        markets = get_series_markets(series)
+        for m in markets:
+            ticker = m.get('ticker', '')
+            if 'KXMVE' in ticker:
+                continue
+            yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
+            no_ask = float(m.get('no_ask_dollars', '0') or '0')
+            if MIN_PRICE <= yes_ask <= MAX_PRICE:
+                cheap.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
+                              'volume': 0, 'strategy': 'weather',
+                              'reason': f"weather: YES @ ${yes_ask:.2f}"})
+            if MIN_PRICE <= no_ask <= MAX_PRICE:
+                cheap.append({'ticker': ticker, 'side': 'no', 'price': no_ask,
+                              'volume': 0, 'strategy': 'weather',
+                              'reason': f"weather: NO @ ${no_ask:.2f}"})
+
+    logger.info(f"Series scan: {len(cheap)} cheap (crypto+weather)")
     return cheap
 
 
@@ -279,7 +347,26 @@ def run_cycle():
     logger.info(f"Own {len(owned)} positions, balance ${trading_bal:.2f}")
 
     try:
-        cheap = scan_all_markets()
+        # Combine both scans: series (proven working) + generic (more markets)
+        series_cheap = scan_series_markets()
+        generic_cheap = scan_all_markets()
+
+        # Merge: series first, then generic (dedup by ticker+side)
+        seen = set()
+        cheap = []
+        for s in series_cheap:
+            key = (s['ticker'], s['side'])
+            if key not in seen:
+                seen.add(key)
+                cheap.append(s)
+        for s in generic_cheap:
+            key = (s['ticker'], s['side'])
+            if key not in seen:
+                seen.add(key)
+                cheap.append(s)
+
+        logger.info(f"Combined: {len(cheap)} unique cheap contracts")
+
         bought = 0
         for signal in cheap:
             cost = signal['price'] * BUY_COUNT
