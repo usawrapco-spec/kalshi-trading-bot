@@ -291,7 +291,7 @@ def _price_range(ticker):
 
 def find_buy_candidates(markets):
     candidates = []
-    blocked = no_expiry = wrong_expiry = too_soon = no_volume = wrong_price = no_bid = wide_spread = 0
+    blocked = too_soon = no_volume = wrong_price = no_bid = wide_spread = 0
 
     for market in markets:
         ticker = market.get('ticker', '')
@@ -301,15 +301,9 @@ def find_buy_candidates(markets):
             blocked += 1
             continue
 
-        # Expiry check (pass market dict for sports fallback)
+        # Only skip if literally about to expire in under 60 seconds
         expiry = get_time_to_expiry(ticker, market=market)
-        if expiry is None:
-            no_expiry += 1
-            continue
-        if expiry > MAX_EXPIRY_SECONDS:
-            wrong_expiry += 1
-            continue
-        if expiry < MIN_EXPIRY_SECONDS:
+        if expiry is not None and expiry < 60:
             too_soon += 1
             continue
 
@@ -363,7 +357,7 @@ def find_buy_candidates(markets):
     # Sort by volume descending
     candidates.sort(key=lambda x: x['volume'], reverse=True)
     total = len(markets)
-    logger.info(f"FILTER: {total} total | {blocked} blocked | {no_expiry} no expiry parse | {wrong_expiry} too far | {too_soon} expiring too soon | {no_volume} low vol | {wrong_price} price out of range | {no_bid} no bid | {wide_spread} wide spread | {len(candidates)} candidates")
+    logger.info(f"FILTER: {total} total | {blocked} blocked | {too_soon} expiring <60s | {no_volume} low vol | {wrong_price} price out of range | {no_bid} no bid | {wide_spread} wide spread | {len(candidates)} candidates")
 
     # Log samples for debugging
     samples = []
@@ -375,14 +369,15 @@ def find_buy_candidates(markets):
         nb = sf(m.get('no_bid_dollars', '0'))
         v = int(m.get('volume_24h', 0) or 0)
         exp = get_time_to_expiry(t, market=m)
-        if v >= 5 and exp is not None and MIN_EXPIRY_SECONDS < exp < MAX_EXPIRY_SECONDS:
-            samples.append(f"{t}: yes={ya}/{yb} no={na}/{nb} vol={v} exp={exp:.0f}s")
+        if v >= 5:
+            exp_str = f"{exp:.0f}s" if exp is not None else "?"
+            samples.append(f"{t}: yes={ya}/{yb} no={na}/{nb} vol={v} exp={exp_str}")
         if len(samples) >= 5:
             break
     if samples:
         logger.info(f"SAMPLES: {' | '.join(samples)}")
     else:
-        logger.info(f"NO markets passed volume+expiry check. Loosest 3 by volume:")
+        logger.info(f"NO markets passed volume check. Loosest 3 by volume:")
         by_vol = sorted(markets, key=lambda m: int(m.get('volume_24h', 0) or 0), reverse=True)[:3]
         for m in by_vol:
             t = m.get('ticker', '')
