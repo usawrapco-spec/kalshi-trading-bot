@@ -32,7 +32,7 @@ MIN_CASH_RESERVE = 0.30
 MAX_POSITIONS = 10
 PROFIT_BANK_PCT = 0.20
 PAPER_STARTING_BALANCE = 20.00
-PAPER_RESET_TIME = '2026-03-23T21:45:00Z'
+PAPER_RESET_TIME = '2026-03-23T21:55:00Z'
 
 # === SERIES TO SCAN (crypto hourly brackets only — 19W/0L) ===
 ALL_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
@@ -252,13 +252,13 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # +100% → SELL ALL
-    if gain_pct >= 100:
+    # +50% → SELL ALL (fast turnover, recycle cash)
+    if gain_pct >= 50:
         return True, count, f"SELL +{gain_pct:.0f}%"
 
-    # Expiry save — 5 min left + 25% gain → SELL ALL
-    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
-        if gain_pct >= 25:
+    # Expiry save — 1 min left + any profit → SELL ALL
+    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 60:
+        if gain_pct > 0:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
     return False, 0, None
@@ -448,7 +448,7 @@ def sync_with_kalshi():
 
 def check_sells():
     global banked_profit
-    logger.info("check_sells() -- sell at 100%, expiry save 25%+")
+    logger.info("check_sells() -- sell at 50%, expiry save >0% @ 1min")
     try:
         open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null') \
@@ -968,7 +968,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; 19W/0L strategy &mdash; crypto hourly 3-15c &mdash; sell at 100%</div>
+  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; golden hour &mdash; crypto hourly 3-15c &mdash; sell at 50%, expiry save</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1008,7 +1008,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="live-dot dot-paper" id="status-dot"></span> <span id="status-mode">PAPER</span></div>
   <div class="status-item">Buy: 3-15c, bid &gt; 0, no 15M</div>
-  <div class="status-item">Sell: 100% all, expiry save 25%</div>
+  <div class="status-item">Sell: 50% all, expiry save &gt;0%@1m</div>
   <div class="status-item">Max: 3 contracts, 10 positions</div>
   <div class="status-item">Series: Crypto hourly only</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
@@ -1182,7 +1182,7 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- 19W/0L strategy, crypto hourly only, 10s cycles")
+    logger.info(f"Bot starting [{mode}] -- golden hour: 50% sell, expiry save, crypto only, 10s cycles")
     logger.info(f"Series: {ALL_SERIES}")
     logger.info(f"Settings: price=${BUY_MIN}-${BUY_MAX}, filter=price+bid only")
     logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, {MAX_DEPLOYMENT_PCT:.0%} max deploy, {MIN_CASH_RESERVE:.0%} cash reserve, {MAX_POSITIONS} max positions")
