@@ -254,8 +254,8 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker=
 
     # Above 30% — roll the dice each cycle
     if gain_pct >= 30:
-        # 30% gain = 5% chance, 100% = 12%, 200% = 22%, 500% = 52% (capped 50%)
-        sell_chance = min(0.50, 0.05 + (gain_pct - 30) * 0.001)
+        # 30% = 10%, 50% = 20%, 100% = 45%, 150%+ = 80%
+        sell_chance = min(0.80, 0.10 + (gain_pct - 30) * 0.005)
         if random.random() < sell_chance:
             return True, count, f"TAKE PROFIT +{gain_pct:.0f}%"
 
