@@ -36,8 +36,11 @@ PAPER_RESET_TIME = '2026-03-23T20:40:00Z'
 
 # === SERIES TO SCAN ===
 CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
-SPORTS_SERIES = ['KXNCAAMBGAME', 'KXNBAGAME', 'KXTENNIS', 'KXMLB', 'KXNHL']
-ALL_SERIES = CRYPTO_SERIES + SPORTS_SERIES
+INDEX_SERIES = ['KXINX', 'KXINXD', 'KXINXU', 'KXNASDAQ100', 'KXNASDAQ100U', 'KXNASDAQ100D']
+ALL_SERIES = CRYPTO_SERIES + INDEX_SERIES
+
+# Sports patterns to dump on startup (no longer trading these)
+SPORTS_DUMP_PATTERNS = ['NBAGAME', 'NCAAMBGAME', 'TENNIS', 'MLB', 'NHL']
 
 # === HARD BLOCKS ===
 BLOCKED_PATTERNS = ['KXMVE']
@@ -704,6 +707,79 @@ def run_buys(markets):
     logger.info(f"Bought {bought}, deployed ${total_deployed:.2f}")
 
 
+# === DUMP SPORTS POSITIONS ===
+
+def dump_sports_positions():
+    """Sell all open sports positions at market bid to free up cash."""
+    try:
+        open_buys = db.table('trades').select('*') \
+            .eq('action', 'buy').is_('pnl', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
+    except Exception as e:
+        logger.error(f"dump_sports: DB query failed: {e}")
+        return
+
+    if not open_buys.data:
+        return
+
+    dumped = 0
+    for trade in open_buys.data:
+        ticker = trade['ticker']
+        if not any(pat in ticker for pat in SPORTS_DUMP_PATTERNS):
+            continue
+
+        side = trade['side']
+        entry_price = sf(trade['price'])
+        count = trade.get('count') or 1
+
+        # Get current bid
+        market = get_market(ticker)
+        if market:
+            if side == 'yes':
+                current_bid = sf(market.get('yes_bid_dollars', '0'))
+            else:
+                current_bid = sf(market.get('no_bid_dollars', '0'))
+        else:
+            current_bid = 0
+
+        if current_bid <= 0:
+            current_bid = get_live_bid(ticker, side)
+
+        # Sell at whatever bid exists, even if it's a loss
+        sell_price = current_bid if current_bid > 0 else 0.0
+        pnl = round((sell_price - entry_price) * count, 4)
+
+        result = place_order(ticker, side, 'sell', sell_price, count) if sell_price > 0 else {'order_id': 'paper', 'status': 'executed'}
+        if not result:
+            continue
+
+        logger.info(f"SPORTS DUMP: {ticker} {side} x{count} @ ${sell_price:.2f} (entry ${entry_price:.2f}) pnl=${pnl:.4f}")
+
+        try:
+            db.table('trades').insert({
+                'ticker': ticker, 'side': side, 'action': 'sell',
+                'price': float(sell_price), 'count': count,
+                'pnl': float(pnl), 'strategy': 'crypto',
+                'reason': f"SPORTS DUMP @ ${sell_price:.2f}",
+                'sell_gain_pct': float(round(((sell_price - entry_price) / entry_price) * 100, 1)) if entry_price > 0 else 0,
+            }).execute()
+        except Exception as e:
+            logger.error(f"Sports dump insert failed: {e}")
+
+        try:
+            db.table('trades').update({
+                'pnl': 0.0,
+                'current_bid': float(sell_price),
+            }).eq('id', trade['id']).execute()
+        except:
+            pass
+
+        dumped += 1
+
+    if dumped > 0:
+        logger.info(f"SPORTS DUMP COMPLETE: sold {dumped} sports positions")
+
+
 # === MAIN CYCLE ===
 
 _synced = False
@@ -949,7 +1025,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item">Buy: 3-50c, bid exists</div>
   <div class="status-item">Sell: half@100%, full@200%, expiry@25%</div>
   <div class="status-item">Max: 3 contracts, 10 positions</div>
-  <div class="status-item">Series: Crypto + NCAA + NBA + Tennis + MLB + NHL</div>
+  <div class="status-item">Series: Crypto + Stock Index Brackets</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
 <div class="footer">Clean Reset &mdash; auto-refresh 15s</div>
@@ -1121,13 +1197,14 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- half at 100%, full at 200%, 10s cycles, crypto + sports")
+    logger.info(f"Bot starting [{mode}] -- half at 100%, full at 200%, 10s cycles, crypto + index brackets")
     logger.info(f"Series: {ALL_SERIES}")
     logger.info(f"Settings: price=${BUY_MIN}-${BUY_MAX}, filter=price+bid only")
     logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, {MAX_DEPLOYMENT_PCT:.0%} max deploy, {MIN_CASH_RESERVE:.0%} cash reserve, {MAX_POSITIONS} max positions")
 
     cancel_all_resting()
     sync_with_kalshi()
+    dump_sports_positions()
 
     while True:
         try:
