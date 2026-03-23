@@ -219,45 +219,16 @@ def try_buy(market, side, field, strategy, owned, trading_bal):
     return False, 0
 
 
-def count_cheap(markets, verbose=False):
-    """Count markets with at least one side priced 3-15¢."""
+def count_cheap(markets):
+    """Count markets with at least one side priced 3-15¢. API already filters status=open."""
     cheap = []
-    logged_first = False
-    skipped_kxmve = 0
-    skipped_status = 0
     for m in markets:
-        ticker = m.get('ticker', '')
-        status = m.get('status', '')
-        if 'KXMVE' in ticker:
-            skipped_kxmve += 1
+        if 'KXMVE' in m.get('ticker', ''):
             continue
-        if status != 'open':
-            skipped_status += 1
-            if verbose and not logged_first:
-                logger.info(f"  SKIPPED status={status!r} for {ticker} (expected 'open')")
-            continue
-
-        yes_raw = m.get('yes_ask_dollars', '0') or '0'
-        no_raw = m.get('no_ask_dollars', '0') or '0'
-        yes_ask = float(yes_raw)
-        no_ask = float(no_raw)
-
-        if verbose and not logged_first:
-            logger.info(f"  FIRST MARKET: {ticker} status={status!r}")
-            logger.info(f"  yes_ask_dollars={yes_raw!r} -> {yes_ask} | no_ask_dollars={no_raw!r} -> {no_ask}")
-            logger.info(f"  yes in range: {MIN_PRICE} <= {yes_ask} <= {MAX_PRICE} = {MIN_PRICE <= yes_ask <= MAX_PRICE}")
-            logger.info(f"  no in range: {MIN_PRICE} <= {no_ask} <= {MAX_PRICE} = {MIN_PRICE <= no_ask <= MAX_PRICE}")
-            logged_first = True
-
-        is_yes_cheap = MIN_PRICE <= yes_ask <= MAX_PRICE
-        is_no_cheap = MIN_PRICE <= no_ask <= MAX_PRICE
-        if is_yes_cheap or is_no_cheap:
-            if verbose:
-                logger.info(f"  CHEAP FOUND: {ticker} yes={yes_ask} no={no_ask}")
+        yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
+        no_ask = float(m.get('no_ask_dollars', '0') or '0')
+        if (MIN_PRICE <= yes_ask <= MAX_PRICE) or (MIN_PRICE <= no_ask <= MAX_PRICE):
             cheap.append(m)
-
-    if verbose:
-        logger.info(f"  count_cheap result: {len(cheap)} cheap, {skipped_kxmve} KXMVE skipped, {skipped_status} non-open skipped, {len(markets)} total")
     return cheap
 
 
@@ -276,7 +247,7 @@ def scan_and_buy():
         nonlocal trading_bal, bought
         for market in markets:
             ticker = market.get('ticker', '')
-            if 'KXMVE' in ticker or market.get('status') != 'open':
+            if 'KXMVE' in ticker:
                 continue
             for side, field in [('yes', 'yes_ask_dollars'), ('no', 'no_ask_dollars')]:
                 ok, cost = try_buy(market, side, field, strategy, owned, trading_bal)
@@ -284,36 +255,28 @@ def scan_and_buy():
                     trading_bal -= cost
                     bought += 1
 
-    # Priority 1: Crypto 15-min (with &limit=100 for more brackets)
-    first_crypto = True
+    # Priority 1: Crypto 15-min
     for series in CRYPTO_SERIES:
         markets = get_series_markets(series)
-        if first_crypto and markets:
-            # Dump ALL keys from first market so we can see every field name
-            logger.info(f"  ALL KEYS on first crypto market: {list(markets[0].keys())}")
-        cheap = count_cheap(markets, verbose=first_crypto)
+        cheap = count_cheap(markets)
         logger.info(f"Crypto {series}: {len(markets)} mkts, {len(cheap)} cheap")
-        first_crypto = False
         scan_markets(markets, 'crypto')
 
     # Priority 2: Weather
     weather_total = 0
     weather_cheap_total = 0
-    first_weather = True
     for series in WEATHER_SERIES:
         markets = get_series_markets(series)
         weather_total += len(markets)
         if not markets:
             continue
-        if first_weather:
-            logger.info(f"  ALL KEYS on first weather market: {list(markets[0].keys())}")
-        cheap = count_cheap(markets, verbose=first_weather)
+        cheap = count_cheap(markets)
         weather_cheap_total += len(cheap)
-        logger.info(f"Weather {series}: {len(markets)} mkts, {len(cheap)} cheap")
-        first_weather = False
+        if cheap:
+            logger.info(f"Weather {series}: {len(markets)} mkts, {len(cheap)} cheap")
         scan_markets(markets, 'weather')
 
-    logger.info(f"Weather total: {weather_total} mkts, {weather_cheap_total} cheap (3-15¢)")
+    logger.info(f"Weather total: {weather_total} mkts, {weather_cheap_total} cheap")
     logger.info(f"Scan complete: bought {bought} contracts, balance now ${trading_bal:.2f}")
 
 
@@ -321,21 +284,6 @@ def scan_and_buy():
 
 def run_cycle():
     logger.info("=== CYCLE START ===")
-
-    # TEMP: force a test buy if trades table is empty, to prove DB works
-    try:
-        existing = db.table('trades').select('id').limit(1).execute()
-        if not existing.data:
-            db.table('trades').insert({
-                'ticker': 'TEST-MARKET', 'side': 'yes', 'action': 'buy',
-                'price': 0.05, 'count': 1, 'strategy': 'test', 'reason': 'FORCE TEST'
-            }).execute()
-            logger.info("FORCE TEST BUY INSERTED")
-        else:
-            logger.info(f"DB has {len(existing.data)}+ rows, skipping test insert")
-    except Exception as e:
-        logger.error(f"FORCE TEST FAILED: {e}")
-    # END TEMP
 
     try:
         check_positions()
