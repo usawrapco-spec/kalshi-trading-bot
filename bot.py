@@ -91,6 +91,14 @@ def kalshi_post(path, data):
     return resp.json()
 
 
+def kalshi_delete(path):
+    url = f"{KALSHI_HOST}/trade-api/v2{path}"
+    headers = auth.get_headers("DELETE", f"/trade-api/v2{path}")
+    resp = requests.delete(url, headers=headers, timeout=10)
+    resp.raise_for_status()
+    return resp.json() if resp.text else {}
+
+
 def get_market(ticker):
     try:
         resp = kalshi_get(f"/markets/{ticker}")
@@ -117,7 +125,7 @@ def place_order(ticker, side, action, price, count):
         order_id = order.get('order_id', '')
         status = order.get('status', '')
         logger.info(f"ORDER PLACED: {order_id} status={status}")
-        return order_id
+        return {'order_id': order_id, 'status': status}
     except Exception as e:
         logger.error(f"ORDER FAILED: {action.upper()} {ticker} — {e}")
         return None
@@ -308,6 +316,26 @@ def fetch_crypto_markets():
             logger.error(f"Fetch {series} failed: {e}")
     logger.info(f"Fetched {len(all_markets)} crypto markets")
     return all_markets
+
+
+# === CANCEL ALL RESTING ORDERS — free locked cash ===
+
+def cancel_all_resting():
+    """Cancel all resting (unfilled) orders on Kalshi to free cash."""
+    try:
+        resp = kalshi_get('/portfolio/orders?status=resting')
+        orders = resp.get('orders', [])
+        cancelled = 0
+        for order in orders:
+            try:
+                kalshi_delete(f"/portfolio/orders/{order['order_id']}")
+                logger.info(f"CANCELLED: {order.get('ticker', 'unknown')} {order.get('side', '')} {order.get('action', '')}")
+                cancelled += 1
+            except Exception as e:
+                logger.error(f"Cancel order failed: {e}")
+        logger.info(f"Cancelled {cancelled} resting orders")
+    except Exception as e:
+        logger.error(f"Cancel all resting error: {e}")
 
 
 # === STARTUP PURGE ===
@@ -615,8 +643,21 @@ def run_buys(markets):
         if cost > trading_balance - current_deployed:
             continue
 
-        order_id = place_order(c['ticker'], c['side'], 'buy', c['price'], count)
-        if not order_id:
+        result = place_order(c['ticker'], c['side'], 'buy', c['price'], count)
+        if not result:
+            continue
+
+        if result['status'] == 'resting':
+            # Not filled — cancel immediately to free cash
+            try:
+                kalshi_delete(f"/portfolio/orders/{result['order_id']}")
+                logger.info(f"CANCELLED RESTING: {c['ticker']} — no instant fill")
+            except Exception as e:
+                logger.error(f"Cancel resting failed: {e}")
+            continue
+
+        if result['status'] != 'executed':
+            logger.info(f"SKIP: {c['ticker']} status={result['status']}, not logging")
             continue
 
         logger.info(f"BUY: {c['ticker']} {c['side']} x{count} @ ${c['price']:.2f} (bid=${c['bid']:.2f})")
@@ -1001,7 +1042,8 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — KXBTCD ONLY, 5s cycles, 5 contracts, sell 25% or 10s timeout")
+    logger.info("Bot starting — KXBTCD ONLY, 5s cycles, 5 contracts, executed orders only")
+    cancel_all_resting()
     startup_purge()
     resync_positions()
     clear_non_btcd()
