@@ -958,7 +958,6 @@ tr:hover{background:#1a1a1a !important}
   <div class="portfolio-breakdown">
     <div class="item"><div class="label">Positions</div><div class="val" id="p-positions">...</div></div>
     <div class="item"><div class="label">Cash</div><div class="val" id="p-cash">...</div></div>
-    <div class="item"><div class="label">Balance</div><div class="val" id="p-balance">...</div></div>
     <div class="item"><div class="label">Record</div><div class="val" id="p-record">...</div></div>
   </div>
 </div>
@@ -986,7 +985,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c, 80% spread</div>
   <div class="status-item">Strategy: hold, protect 50%+</div>
-  <div class="status-item">Expiry save: 5min</div>
+  <div class="status-item">Expiry save: 2min</div>
   <div class="status-item">Max: 5 contracts</div>
   <div class="status-item">All crypto series</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
@@ -1011,7 +1010,6 @@ async function refresh(){
   ]);
 
   if(status&&!status.error){
-    var bal=status.balance||0;
     var posVal=status.positions_value||0;
     var posCost=status.positions_cost||0;
     var cash=status.cash||0;
@@ -1026,7 +1024,6 @@ async function refresh(){
 
     $('p-positions').textContent='$'+posVal.toFixed(2);
     $('p-cash').textContent='$'+cash.toFixed(2);
-    $('p-balance').textContent='$'+bal.toFixed(2);
     $('p-record').innerHTML='<span class="green">'+status.wins+'W</span> <span class="gray">/</span> <span class="red">'+status.losses+'L</span>';
   }
 
