@@ -181,18 +181,25 @@ def get_owned():
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
+
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # Price went up 15% or more — SELL
-    if gain_pct >= 15:
-        return True, count, f"SCALP +{gain_pct:.0f}%"
+    # RULE 1: At 100%+ — sell HALF, let the rest ride unlimited
+    if gain_pct >= 100:
+        sell_qty = max(1, count // 2)
+        return True, sell_qty, f"HALF SELL +{gain_pct:.0f}%"
 
-    # Near expiry and any profit — SELL
-    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 60:
-        if gain_pct > 0:
-            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
+    # RULE 2: Near expiry — save ALL profit, no matter how small
+    # 15M contracts: 2 min before expiry
+    # Hourly contracts: 1 min before expiry
+    if time_to_expiry_seconds is not None:
+        is_15m = time_to_expiry_seconds < 900  # rough check
+        cutoff = 120 if is_15m else 60
 
-    # NEVER sell at a loss. Hold it or let it expire.
+        if time_to_expiry_seconds < cutoff and gain_pct > 0:
+            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}% — {time_to_expiry_seconds:.0f}s left"
+
+    # RULE 3: NEVER sell at a loss. NEVER sell early. Let it ride.
     return False, 0, None
 
 
@@ -268,7 +275,7 @@ def startup_purge():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — 15% scalp, expiry save, never sell at loss")
+    logger.info("check_sells() — half sell at 100%, expiry save, never sell at loss")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -642,7 +649,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 30s cycles &mdash; buy 3-20c, sell +15%</div>
+  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 30s cycles &mdash; buy 3-20c, half sell +100%, ride the rest</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -675,8 +682,8 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c with bid</div>
-  <div class="status-item">Sell: +15% scalp</div>
-  <div class="status-item">Never sell red</div>
+  <div class="status-item">Sell: half at +100%</div>
+  <div class="status-item">Expiry: save all green</div>
   <div class="status-item">Max: 5 contracts</div>
   <div class="status-item">Bank: 20% of wins</div>
   <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span></div>
@@ -827,7 +834,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — Simple crypto scalper — buy 3-20c, sell +15%, never sell at loss")
+    logger.info("Bot starting — Simple crypto scalper — buy 3-20c, half sell at 100%, save profit at expiry")
     startup_purge()
     cycle_count = 0
     while True:
