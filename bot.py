@@ -14,7 +14,7 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 
 MIN_PRICE = 0.02
-MAX_PRICE = 0.15
+MAX_PRICE = 0.35
 MAX_BUYS_PER_CYCLE = 20
 CYCLE_SECONDS = 30
 STARTING_BALANCE = 50.00
@@ -191,11 +191,9 @@ def kalshi_fee(price):
 
 def get_buy_count(price):
     """More contracts for cheaper prices — spread wide."""
-    if price <= 0.05:
-        return 5
     if price <= 0.10:
-        return 3
-    return 2
+        return 5
+    return 3
 
 
 def buy(ticker, side, price, strategy, reason):
