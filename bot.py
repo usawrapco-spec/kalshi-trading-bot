@@ -214,10 +214,10 @@ def check_sells():
         gain_pct = gain * 100
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        # 30% gain = take profit, 50% loss = stop loss
-        if gain >= SELL_THRESHOLD or gain <= -0.50:
+        # 30% gain = take profit, otherwise hold until expiry
+        if gain >= SELL_THRESHOLD:
             pnl = round((current_bid - entry_price) * count, 4)
-            reason = f"+{gain_pct:.0f}% PROFIT" if gain >= SELL_THRESHOLD else f"{gain_pct:.0f}% STOP LOSS"
+            reason = f"+{gain_pct:.0f}% PROFIT"
             result = place_order(ticker, side, 'sell', current_bid, count)
             if not result:
                 continue
@@ -560,7 +560,7 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: 15M crypto (5 series) | No expiry filter | 50% stop loss</span>
+  <span>Series: 15M crypto (5 series) | 5min minimum | No stop loss</span>
   <span>Buy: 3-45c | Sell: 30% | 5 contracts | 10s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
