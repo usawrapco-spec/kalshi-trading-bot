@@ -238,11 +238,23 @@ def run_buys(markets):
     logger.info(f"Bought {bought}, balance ${trading_bal:.2f}")
 
 
-# === SELL LOGIC — 5% THRESHOLD, HANDLE SETTLEMENTS ===
+# === SELL LOGIC — ADAPTIVE THRESHOLD, HANDLE SETTLEMENTS ===
+
+sell_history = []  # Rolling last 20 sell gain percentages
 
 def check_sells():
-    """Check ALL positions. Sell at 5%+. Handle settlements. Never sell at a loss."""
+    """Check ALL positions. Adaptive threshold (30% floor). Never sell at a loss."""
+    global sell_history
     logger.info("check_sells() called")
+
+    # Adaptive threshold: 50% of average win, minimum 30%
+    if len(sell_history) >= 10:
+        avg_win = sum(sell_history) / len(sell_history)
+        threshold = max(30, avg_win * 0.5)
+    else:
+        threshold = 30
+        avg_win = 0
+    logger.info(f"Sell threshold: {threshold:.0f}% (avg win: {avg_win:.0f}%, {len(sell_history)} sells tracked)")
 
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -333,15 +345,12 @@ def check_sells():
         if gain_pct <= 0 or current_bid <= entry_price:
             continue
 
-        # 5% threshold
+        # Adaptive threshold (30% floor)
         should_sell = False
         reason = ""
-        if gain_pct >= 50:
+        if gain_pct >= threshold:
             should_sell = True
-            reason = f"BIG WIN +{gain_pct:.0f}%"
-        elif gain_pct >= 5:
-            should_sell = True
-            reason = f"SCALP +{gain_pct:.0f}%"
+            reason = f"PROFIT +{gain_pct:.0f}% (thresh={threshold:.0f}%)"
 
         if should_sell:
             pnl = round((current_bid - entry_price) * count, 4)
@@ -370,6 +379,11 @@ def check_sells():
             except Exception as e:
                 logger.error(f"BUY UPDATE FAILED: {e}")
             sold += 1
+
+            # Track for adaptive threshold
+            sell_history.append(gain_pct)
+            if len(sell_history) > 20:
+                sell_history = sell_history[-20:]
 
     logger.info(f"Checked {len(open_buys.data)} positions | sold={sold} settled={settled}")
 
