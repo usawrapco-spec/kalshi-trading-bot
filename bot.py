@@ -18,19 +18,17 @@ MIN_PRICE = 0.02
 MAX_PRICE = 0.50
 CYCLE_SECONDS = 30
 
-# === FAST TURNOVER DEPLOYMENT — sell fast, recycle capital, repeat ===
+# === GOLDEN HOUR SETTINGS — simple, fast turnover ===
 MAX_DEPLOYMENT_PCT = 0.75       # Deploy up to 75% of balance
 MIN_CASH_RESERVE_PCT = 0.25     # 25% protected (saved profits live here)
-MAX_CONTRACTS_PER_TRADE = 10    # Max 10 contracts per trade (was 5)
-MIN_CONTRACTS_PER_TRADE = 2     # Minimum 2 contracts per trade
-MAX_SPEND_PER_TRADE_PCT = 0.15  # Max 15% of trading_balance per trade (fewer bigger bets)
+MAX_CONTRACTS_PER_TRADE = 5     # 5 contracts per trade — golden hour setting
+MAX_SPEND_PER_TRADE_PCT = 0.15  # Max 15% of trading_balance per trade
 MAX_SPEND_PER_CYCLE = 25
 MAX_TRADES_PER_CYCLE = 10       # High volume: buy everything that qualifies
 MAX_OPEN_POSITIONS = 200
 
 # === SELL THRESHOLDS ===
-# Tiered: 100%+ = instant sell, <100% near expiry + profitable = save, otherwise HOLD
-# See decide_sell() for full logic
+# Simple: 50% gain = sell ALL. 1min expiry = sell if green. That's it.
 
 # === PROFIT COMPOUNDING ===
 PROFIT_SAVE_PCT = 0.20          # 20% of every win gets banked permanently
@@ -190,9 +188,9 @@ def place_order(ticker, side, action, price, count):
     if '15M' in ticker:
         logger.warning(f"BLOCKED at order gate: {ticker} — 15-min contracts disabled")
         return None
-    # HARD SAFETY: cap buy orders at 15 contracts max (sells can be any size)
+    # HARD SAFETY: cap buy orders at 5 contracts max (golden hour setting)
     if action == 'buy':
-        count = min(count, 15)
+        count = min(count, 5)
     price_cents = int(round(price * 100))
     try:
         logger.info(f"ORDER: {action.upper()} {ticker} {side} x{count} @ ${price:.2f} ({price_cents}c)")
@@ -236,301 +234,23 @@ def categorize_market(ticker):
 CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
 
 
-# ============================================
-# 10% SKIMMER — Separate from crypto moonshot
-# Uses skimmer_trades table, own logic, own limits
-# ============================================
-
-SKIMMER_SELL_TARGET = 0.10      # Sell at +10%
-SKIMMER_STOP_LOSS = -0.15       # Cut loss at -15%
-SKIMMER_MAX_CONTRACTS = 5       # Per trade
-SKIMMER_MAX_OPEN = 20           # Max simultaneous skimmer positions
-SKIMMER_MAX_PER_CYCLE = 5       # Max new buys per cycle
-SKIMMER_MIN_VOLUME = 100        # Minimum 24h volume
-SKIMMER_MAX_SPREAD = 0.08       # Max 8 cent spread (tight enough to exit)
-SKIMMER_PRICE_RANGE = (0.15, 0.50)  # Sweet spot — enough room to move 10% either way
-
-# Skimmer stats — updated each cycle for dashboard
-last_skimmer_scan = {'total': 0, 'candidates': 0, 'bought': 0, 'timestamp': None}
 
 
-def fetch_all_markets():
-    """Fetch ALL open Kalshi markets (every category)."""
-    all_markets = []
-    cursor = None
-
-    while True:
-        params = 'status=open&limit=1000'
-        if cursor:
-            params += f'&cursor={cursor}'
-
-        try:
-            resp = kalshi_get(f'/markets?{params}')
-        except Exception as e:
-            logger.error(f"All-market fetch failed: {e}")
-            break
-
-        markets = resp.get('markets', [])
-        all_markets.extend(markets)
-
-        cursor = resp.get('cursor')
-        if not cursor or not markets:
-            break
-
-    logger.info(f"SKIMMER SCAN: fetched {len(all_markets)} total markets from Kalshi")
-    return all_markets
-
-
-def skimmer_check_sells():
-    """Check all open skimmer positions — sell at +10% or cut at -15%"""
-    open_positions = db.table('skimmer_trades').select('*').eq('action', 'buy').is_('pnl', 'null').execute()
-
-    sold = 0
-    cut = 0
-
-    for pos in (open_positions.data or []):
-        ticker = pos['ticker']
-        side = pos['side']
-        entry = float(pos['price'])
-        count = pos['count'] or 1
-
-        # Get LIVE bid from Kalshi
-        bid = get_live_bid(ticker, side)
-        if bid is None or bid <= 0:
-            continue
-
-        gain_pct = ((bid - entry) / entry) * 100
-
-        # Update current_bid in DB
-        try:
-            db.table('skimmer_trades').update({
-                'current_bid': float(bid),
-                'sell_gain_pct': round(gain_pct, 1)
-            }).eq('id', pos['id']).execute()
-        except:
-            pass
-
-        # TARGET HIT — sell at +10%
-        if gain_pct >= 10:
-            order_id = place_order(ticker, side, 'sell', bid, count)
-            if not order_id:
-                continue
-            profit = (bid - entry) * count
-            try:
-                db.table('skimmer_trades').insert({
-                    'ticker': ticker, 'side': side, 'action': 'sell',
-                    'price': float(bid), 'count': count,
-                    'pnl': round(profit, 4),
-                    'sell_gain_pct': round(gain_pct, 1),
-                    'category': pos.get('category', 'unknown'),
-                    'reason': f'TARGET +{gain_pct:.0f}%'
-                }).execute()
-                # Mark the buy as resolved
-                db.table('skimmer_trades').update({
-                    'pnl': round(profit, 4),
-                    'sell_gain_pct': round(gain_pct, 1)
-                }).eq('id', pos['id']).execute()
-            except Exception as e:
-                logger.error(f"Skimmer sell DB error: {e}")
-            sold += 1
-            logger.info(f"SKIM SOLD: {ticker} {side} x{count} | +{gain_pct:.0f}% | profit=${profit:.4f}")
-
-        # STOP LOSS — cut at -15%
-        elif gain_pct <= -15:
-            order_id = place_order(ticker, side, 'sell', bid, count)
-            if not order_id:
-                continue
-            loss = (bid - entry) * count
-            try:
-                db.table('skimmer_trades').insert({
-                    'ticker': ticker, 'side': side, 'action': 'sell',
-                    'price': float(bid), 'count': count,
-                    'pnl': round(loss, 4),
-                    'sell_gain_pct': round(gain_pct, 1),
-                    'category': pos.get('category', 'unknown'),
-                    'reason': f'STOP LOSS {gain_pct:.0f}%'
-                }).execute()
-                db.table('skimmer_trades').update({
-                    'pnl': round(loss, 4),
-                    'sell_gain_pct': round(gain_pct, 1)
-                }).eq('id', pos['id']).execute()
-            except Exception as e:
-                logger.error(f"Skimmer stop loss DB error: {e}")
-            cut += 1
-            logger.info(f"SKIM CUT: {ticker} {side} x{count} | {gain_pct:.0f}% | loss=${loss:.4f}")
-
-        # Also check for settlement (market closed)
-        else:
-            try:
-                market = get_market(ticker)
-                if market:
-                    status = market.get('status', '')
-                    result_val = market.get('result', '')
-                    if status in ('closed', 'settled', 'finalized') or result_val:
-                        if result_val == side:
-                            pnl = round((1.0 - entry) * count, 4)
-                            reason = f"WIN settled (entry ${entry:.2f})"
-                            settle_price = 1.0
-                        elif result_val:
-                            pnl = round(-entry * count, 4)
-                            reason = f"LOSS expired (entry ${entry:.2f})"
-                            settle_price = 0.0
-                        else:
-                            continue
-                        db.table('skimmer_trades').insert({
-                            'ticker': ticker, 'side': side, 'action': 'sell',
-                            'price': float(settle_price), 'count': count,
-                            'pnl': float(pnl),
-                            'sell_gain_pct': round(((settle_price - entry) / entry) * 100, 1),
-                            'category': pos.get('category', 'unknown'),
-                            'reason': reason
-                        }).execute()
-                        db.table('skimmer_trades').update({
-                            'pnl': float(pnl),
-                            'sell_gain_pct': round(((settle_price - entry) / entry) * 100, 1)
-                        }).eq('id', pos['id']).execute()
-                        logger.info(f"SKIM SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
-            except:
-                pass
-
-    if sold > 0 or cut > 0:
-        logger.info(f"SKIMMER SELLS: {sold} targets hit, {cut} stops cut")
-
-
-def skimmer_scan_and_buy(trading_balance):
-    """Scan ALL live markets, buy the most liquid ones with tight spreads"""
-    global last_skimmer_scan
-
-    # Check how many skimmer positions are already open
-    open_rows = db.table('skimmer_trades').select('id,ticker').eq('action', 'buy').is_('pnl', 'null').execute()
-    open_count = len(open_rows.data or [])
-    if open_count >= SKIMMER_MAX_OPEN:
-        logger.info(f"SKIMMER: {open_count} positions open, max {SKIMMER_MAX_OPEN} — skipping buys")
-        return
-
-    # Fetch ALL open markets
-    all_markets = fetch_all_markets()
-
-    candidates = []
-    for market in all_markets:
-        ticker = market.get('ticker', '')
-
-        # Skip stuff we don't want
-        if '15M' in ticker: continue     # 15-min crypto = bad
-        if 'KXMVE' in ticker: continue   # multivariate parlays
-
-        yes_bid = sf(market.get('yes_bid_dollars', '0'))
-        yes_ask = sf(market.get('yes_ask_dollars', '0'))
-        no_bid = sf(market.get('no_bid_dollars', '0'))
-        no_ask = sf(market.get('no_ask_dollars', '0'))
-        volume = sf(market.get('volume', 0)) or sf(market.get('volume_24h', 0))
-
-        if volume < SKIMMER_MIN_VOLUME:
-            continue
-
-        # Check YES side
-        if SKIMMER_PRICE_RANGE[0] <= yes_ask <= SKIMMER_PRICE_RANGE[1] and yes_bid > 0:
-            spread = yes_ask - yes_bid
-            if 0 < spread <= SKIMMER_MAX_SPREAD:
-                candidates.append({
-                    'ticker': ticker,
-                    'side': 'yes',
-                    'price': yes_ask,
-                    'bid': yes_bid,
-                    'spread': spread,
-                    'volume': volume,
-                    'category': categorize_market(ticker)
-                })
-
-        # Check NO side
-        if SKIMMER_PRICE_RANGE[0] <= no_ask <= SKIMMER_PRICE_RANGE[1] and no_bid > 0:
-            spread = no_ask - no_bid
-            if 0 < spread <= SKIMMER_MAX_SPREAD:
-                candidates.append({
-                    'ticker': ticker,
-                    'side': 'no',
-                    'price': no_ask,
-                    'bid': no_bid,
-                    'spread': spread,
-                    'volume': volume,
-                    'category': categorize_market(ticker)
-                })
-
-    # Sort by volume (most liquid = easiest to sell)
-    candidates.sort(key=lambda x: x['volume'], reverse=True)
-
-    # Don't buy tickers we already have open in skimmer
-    open_tickers = set(t['ticker'] for t in (open_rows.data or []))
-    candidates = [c for c in candidates if c['ticker'] not in open_tickers]
-
-    # Buy top candidates
-    buys = 0
-    spots_left = SKIMMER_MAX_OPEN - open_count
-
-    for c in candidates:
-        if buys >= min(SKIMMER_MAX_PER_CYCLE, spots_left):
-            break
-
-        contracts = min(SKIMMER_MAX_CONTRACTS, max(1, int((trading_balance * 0.05) / c['price'])))
-
-        order_id = place_order(c['ticker'], c['side'], 'buy', c['price'], contracts)
-        if not order_id:
-            continue
-
-        try:
-            db.table('skimmer_trades').insert({
-                'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
-                'price': c['price'], 'count': contracts,
-                'category': c['category'],
-                'reason': f"vol={c['volume']:.0f} spread=${c['spread']:.2f}"
-            }).execute()
-        except Exception as e:
-            logger.error(f"Skimmer buy DB insert failed: {e}")
-            continue
-
-        buys += 1
-        logger.info(f"SKIM BUY: {c['ticker']} {c['side']} x{contracts} @ ${c['price']:.2f} | "
-                    f"vol={c['volume']:.0f} | spread=${c['spread']:.2f} | {c['category']}")
-
-    last_skimmer_scan = {
-        'total': len(all_markets),
-        'candidates': len(candidates),
-        'bought': buys,
-        'timestamp': datetime.now(timezone.utc).isoformat()
-    }
-    logger.info(f"SKIMMER: scanned {len(all_markets)} markets, {len(candidates)} candidates, bought {buys}")
 
 
 def fetch_crypto_markets():
-    """Fetch crypto markets only — direction + bracket series. Skip 15M."""
+    """Fetch crypto markets by series ticker — the way that was working during golden hour."""
     all_markets = []
-    cursor = None
-
-    while True:
-        params = 'status=open&limit=1000'
-        if cursor:
-            params += f'&cursor={cursor}'
-
+    for series in CRYPTO_SERIES:
         try:
-            resp = kalshi_get(f'/markets?{params}')
+            resp = kalshi_get(f'/markets?series_ticker={series}&status=open&limit=200')
+            all_markets.extend(resp.get('markets', []))
         except Exception as e:
-            logger.error(f"Market fetch failed: {e}")
-            break
+            logger.error(f"Fetch {series} failed: {e}")
 
-        markets = resp.get('markets', [])
-        # Filter to crypto only, skip 15M
-        for m in markets:
-            ticker = m.get('ticker', '')
-            if '15M' in ticker:
-                continue
-            if any(ticker.startswith(series) or series in ticker for series in CRYPTO_SERIES):
-                all_markets.append(m)
-
-        cursor = resp.get('cursor')
-        if not cursor or not markets:
-            break
-
-    logger.info(f"CRYPTO MARKETS: {len(all_markets)} (filtered from full Kalshi catalog)")
+    # Filter out 15M
+    all_markets = [m for m in all_markets if '15M' not in m.get('ticker', '')]
+    logger.info(f"Fetched {len(all_markets)} crypto markets (hourly only)")
 
     # Categorize for dashboard
     categories = {}
@@ -552,14 +272,8 @@ def fetch_crypto_markets():
 # === BUY LOGIC ===
 
 def calculate_position_size(contract_price, available_balance, volume=0, strategy='crypto'):
-    """Default 3 contracts, max 5. Fast turnover — moderate size, quick exits."""
-    if contract_price <= 0:
-        return 3
-    target_spend = available_balance * 0.06  # 6% of balance
-    calculated = int(target_spend / contract_price)
-    result = max(MIN_CONTRACTS_PER_TRADE, min(calculated, MAX_CONTRACTS_PER_TRADE))
-    # HARD SAFETY: absolutely never exceed 5
-    return min(result, 5)
+    """Always 5 contracts — golden hour setting."""
+    return MAX_CONTRACTS_PER_TRADE
 
 
 
@@ -595,9 +309,9 @@ def run_buys(markets):
             skipped_mve += 1
             continue
 
-        # Block long-dated contracts (>24h out) — only trade short-term
+        # Only trade contracts expiring within 3 hours, min 5 min left
         expiry_secs = get_time_to_expiry(ticker)
-        if expiry_secs is None or expiry_secs > 86400:
+        if expiry_secs is None or expiry_secs > 10800 or expiry_secs < 300:
             continue
 
         if ticker in owned:
@@ -676,7 +390,7 @@ def run_buys(markets):
         cost = b['price'] * b['count']
         if cost > max_per_trade:
             affordable = int(max_per_trade / b['price'])
-            if affordable < MIN_CONTRACTS_PER_TRADE:
+            if affordable < 1:
                 continue
             b['count'] = affordable
             cost = b['price'] * b['count']
@@ -773,28 +487,23 @@ def get_time_to_expiry(market_or_ticker):
 
 
 def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
-    """4 rules: 200% top exit, 100% half sell, 1min expiry save, hold.
+    """Simple golden hour sell: 50% gain = sell ALL. 1min expiry = sell if green.
     Returns (should_sell, sell_qty, reason)."""
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # RULE 1: TOP EXIT — 200%+ sell EVERYTHING. This is the peak. Take it all.
-    if gain_pct >= 200:
-        return True, count, f"TOP EXIT +{gain_pct:.0f}% — selling ALL {count}"
+    # 50% gain — sell ALL contracts. Take the profit. Move on.
+    if gain_pct >= 50:
+        return True, count, f"SCALP +{gain_pct:.0f}%"
 
-    # RULE 2: HALF SELL at 100% — lock in profit, let rest ride to 200%
-    if gain_pct >= 100:
-        sell_qty = max(1, count // 2)
-        return True, sell_qty, f"HALF SELL +{gain_pct:.0f}% — riding {count - sell_qty}"
-
-    # RULE 3: LAST MINUTE — 60 seconds before expiry, sell anything green
+    # 1 minute before expiry — sell anything green
     if time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS:
         if gain_pct > 0:
-            return True, count, f"LAST MINUTE +{gain_pct:.0f}% — {int(time_to_expiry)}s left"
+            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
-    # RULE 4: HOLD — let it ride
+    # Otherwise hold
     return False, 0, None
 
 
@@ -929,9 +638,9 @@ def cleanup_ghosts():
 
 
 def check_sells():
-    """4-rule exit: 200% top exit, 100% half sell, 1min expiry save, hold."""
+    """Simple 50% sell-all, 1min expiry save."""
     global sell_history
-    logger.info("check_sells() — 200% top exit, 100% half sell, 1min expiry save")
+    logger.info("check_sells() — 50% sell ALL, 1min expiry save")
 
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -1027,7 +736,7 @@ def check_sells():
         # Log position evaluation
         time_to_expiry = get_time_to_expiry(market)
         expiry_str = f"{int(time_to_expiry)}s" if time_to_expiry is not None else "unknown"
-        action_preview = "SELL ALL" if gain_pct >= 200 else "HALF SELL" if gain_pct >= 100 else "SELL" if (time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS and gain_pct > 0) else "HOLD"
+        action_preview = "SELL" if gain_pct >= 50 else "SELL" if (time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS and gain_pct > 0) else "HOLD"
         logger.info(f"EVAL: {ticker} {side} x{count} | entry=${entry_price:.2f} bid=${current_bid:.2f} | gain={gain_pct:+.0f}% | expiry={expiry_str} | {action_preview}")
 
         # Near-expiry alert logging (< 2 min)
@@ -1062,128 +771,9 @@ def check_sells():
                     sell_history = sell_history[-20:]
             else:
                 logger.error(f"SELL EXECUTION FAILED: {ticker} — order did not go through")
-        elif gain_pct >= 50:
-            logger.info(f"RIDING: {ticker} +{gain_pct:.0f}% — holding for 200% top exit (expiry={expiry_str})")
 
     avg_win = (sum(sell_history) / len(sell_history)) if sell_history else 0
     logger.info(f"SELL SUMMARY: evaluated={evaluated} sold={sold} settled={settled} skipped_no_market={skipped_no_market} skipped_no_bid={skipped_no_bid} | avg_win={avg_win:.0f}%")
-
-
-# === DOUBLE DOWN ON WINNERS ===
-
-def double_down_on_winners():
-    """Check open positions. If any are up 25%+, buy MORE of the same contract.
-    Momentum is confirmed — pile on. By the time it hits 100%, we have 15-20 contracts."""
-    total_balance, trading_balance, saved_balance = get_trading_balance()
-
-    open_buys = db.table('trades').select('*') \
-        .eq('action', 'buy').is_('pnl', 'null').execute()
-
-    if not open_buys.data:
-        return
-
-    # Build lookup: how many total contracts per ticker (across all buy records)
-    ticker_contracts = {}
-    ticker_doubled = {}
-    for t in open_buys.data:
-        tk = t['ticker']
-        ticker_contracts[tk] = ticker_contracts.get(tk, 0) + (t['count'] or 1)
-        reason = t.get('reason', '') or ''
-        if 'DOUBLE DOWN' in reason:
-            ticker_doubled[tk] = True
-
-    doubled = 0
-    for trade in open_buys.data:
-        ticker = trade['ticker']
-        side = trade['side']
-        entry_price = sf(trade['price'])
-        count = trade['count'] or 1
-
-        if entry_price <= 0:
-            continue
-
-        # Skip if we already doubled down on this ticker
-        if ticker in ticker_doubled:
-            continue
-
-        # Skip if total contracts already at 20 (cap)
-        total_contracts = ticker_contracts.get(ticker, 0)
-        if total_contracts >= 20:
-            continue
-
-        # Get live bid to check current gain
-        bid = get_live_bid(ticker, side)
-        if bid is None or bid <= 0:
-            continue
-
-        gain_pct = ((bid - entry_price) / entry_price) * 100
-
-        if gain_pct < 25:
-            continue
-
-        # Check expiry — don't double down with < 10 minutes left
-        try:
-            market = get_market(ticker)
-        except:
-            continue
-        if not market:
-            continue
-
-        expiry_seconds = get_time_to_expiry(market)
-        if expiry_seconds is not None and expiry_seconds < 600:
-            continue
-
-        # Scaling ladder: scale add size with confidence
-        if gain_pct >= 50:
-            add_contracts = 5   # Strong winner, go big
-        elif gain_pct >= 35:
-            add_contracts = 3   # Good winner, moderate add
-        else:
-            add_contracts = 2   # Early winner (+25%), small add
-
-        # Cap total at 20
-        add_contracts = min(add_contracts, 20 - total_contracts)
-        if add_contracts <= 0:
-            continue
-
-        # Affordability check: max 10% of trading balance per double down
-        cost = bid * add_contracts
-        if cost > trading_balance * 0.10:
-            add_contracts = max(1, int((trading_balance * 0.10) / bid))
-            cost = bid * add_contracts
-
-        if add_contracts <= 0 or cost > trading_balance:
-            continue
-
-        logger.info(f"DOUBLE DOWN: {ticker} {side} | "
-                    f"entry=${entry_price:.2f} now=${bid:.2f} +{gain_pct:.0f}% | "
-                    f"adding {add_contracts} contracts at ${bid:.2f} | "
-                    f"total will be {total_contracts + add_contracts} contracts")
-
-        order_id = place_order(ticker, side, 'buy', bid, add_contracts)
-        if not order_id:
-            continue
-
-        # Record double-down as a separate buy in DB
-        try:
-            db.table('trades').insert({
-                'ticker': ticker, 'side': side, 'action': 'buy',
-                'price': float(bid), 'count': add_contracts,
-                'strategy': trade.get('strategy', 'crypto'),
-                'reason': f"DOUBLE DOWN +{gain_pct:.0f}%: added {add_contracts} at ${bid:.2f} (original {count} at ${entry_price:.2f})",
-                'last_seen_bid': float(bid),
-                'current_bid': float(bid),
-            }).execute()
-            ticker_doubled[ticker] = True
-            trading_balance -= cost
-            doubled += 1
-        except Exception as e:
-            logger.error(f"Double down DB insert failed: {e}")
-
-    if doubled:
-        logger.info(f"DOUBLE DOWN SUMMARY: added to {doubled} winning positions")
-    else:
-        logger.info("DOUBLE DOWN: no positions qualified (need +25% confirmed winners)")
 
 
 # === MAIN CYCLE ===
@@ -1198,50 +788,18 @@ def run_cycle():
     except Exception as e:
         logger.error(f"Ghost cleanup error: {e}")
 
-    # 1. Check sells (universal — works for any market type)
+    # 1. Check sells — simple 50% sell-all
     try:
         check_sells()
     except Exception as e:
         logger.error(f"Sell check error: {e}")
 
-    # 2. Double down on existing winners (+25%+ confirmed momentum)
-    try:
-        double_down_on_winners()
-    except Exception as e:
-        logger.error(f"Double down error: {e}")
-
-    # 3. Scan crypto markets for new focused trades (best 2 per asset, 5 contracts each)
+    # 2. Scan crypto markets for new buys
     try:
         crypto_markets = fetch_crypto_markets()
         run_buys(crypto_markets)
     except Exception as e:
         logger.error(f"Crypto buy error: {e}")
-
-    # === 10% SKIMMER (separate table, separate logic) ===
-
-    # 4. Check skimmer positions for +10% target or -15% stop loss
-    try:
-        skimmer_check_sells()
-    except Exception as e:
-        logger.error(f"Skimmer sell check error: {e}")
-
-    # 5. Scan ALL markets for skimmer buys
-    try:
-        skimmer_scan_and_buy(trading)
-    except Exception as e:
-        logger.error(f"Skimmer buy error: {e}")
-
-    # Skimmer status summary
-    try:
-        skim_open = db.table('skimmer_trades').select('id').eq('action', 'buy').is_('pnl', 'null').execute()
-        skim_sells = db.table('skimmer_trades').select('pnl').eq('action', 'sell').not_.is_('pnl', 'null').execute()
-        skim_open_count = len(skim_open.data or [])
-        skim_pnl = sum(sf(t['pnl']) for t in (skim_sells.data or []))
-        skim_wins = sum(1 for t in (skim_sells.data or []) if sf(t['pnl']) > 0)
-        skim_cuts = sum(1 for t in (skim_sells.data or []) if sf(t['pnl']) < 0)
-        logger.info(f"SKIMMER STATUS: open={skim_open_count}/{SKIMMER_MAX_OPEN} | wins={skim_wins} cuts={skim_cuts} | P&L=${skim_pnl:.4f}")
-    except:
-        pass
 
     total, trading, saved = get_trading_balance()
     logger.info(f"=== CYCLE END === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
@@ -1448,79 +1006,6 @@ def api_scanner():
     return jsonify(last_scan)
 
 
-@app.route('/api/skimmer')
-def api_skimmer():
-    try:
-        sells = db.table('skimmer_trades').select('pnl,category,sell_gain_pct') \
-            .eq('action', 'sell').not_.is_('pnl', 'null').execute()
-        sell_data = sells.data or []
-        net_pnl = sum(sf(t['pnl']) for t in sell_data)
-        wins = sum(1 for t in sell_data if sf(t['pnl']) > 0)
-        losses = sum(1 for t in sell_data if sf(t['pnl']) < 0)
-
-        open_buys = db.table('skimmer_trades').select('id,ticker,side,price,count,current_bid,category') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
-        open_data = open_buys.data or []
-        open_count = len(open_data)
-
-        # Category breakdown of open positions
-        cat_counts = {}
-        for t in open_data:
-            cat = t.get('category', 'unknown')
-            cat_counts[cat] = cat_counts.get(cat, 0) + 1
-
-        # Category breakdown of sells
-        cat_pnl = {}
-        for t in sell_data:
-            cat = t.get('category', 'unknown')
-            if cat not in cat_pnl:
-                cat_pnl[cat] = {'pnl': 0.0, 'wins': 0, 'losses': 0}
-            p = sf(t['pnl'])
-            cat_pnl[cat]['pnl'] += p
-            if p > 0:
-                cat_pnl[cat]['wins'] += 1
-            elif p < 0:
-                cat_pnl[cat]['losses'] += 1
-
-        # Open positions detail
-        positions = []
-        for t in open_data:
-            price = sf(t.get('price'))
-            current = sf(t.get('current_bid'))
-            count = int(t.get('count') or 1)
-            if current > 0 and price > 0:
-                unrealized = round((current - price) * count, 4)
-                gain_pct = round(((current - price) / price) * 100, 1)
-            else:
-                unrealized = 0
-                gain_pct = 0
-            positions.append({
-                'ticker': t.get('ticker', ''),
-                'side': t.get('side', ''),
-                'count': count,
-                'entry': price,
-                'current_bid': current,
-                'unrealized': unrealized,
-                'gain_pct': gain_pct,
-                'category': t.get('category', 'unknown'),
-            })
-        positions.sort(key=lambda x: x['gain_pct'], reverse=True)
-
-        return jsonify({
-            'net_pnl': round(net_pnl, 4),
-            'wins': wins,
-            'losses': losses,
-            'open_count': open_count,
-            'max_open': SKIMMER_MAX_OPEN,
-            'categories_open': cat_counts,
-            'categories_pnl': cat_pnl,
-            'positions': positions,
-            'scan': last_skimmer_scan,
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/dashboard')
 def dashboard():
     return DASHBOARD_HTML
@@ -1531,7 +1016,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kalshi Scalp Bot &mdash; Universal Scanner</title>
+<title>Kalshi Scalp Bot &mdash; Golden Hour</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
@@ -1639,18 +1124,9 @@ tr:hover{background:#1a1a1a !important}
   <div class="cat-card"><div class="loading">Loading categories...</div></div>
 </div>
 
-<!-- 10% Skimmer Section -->
-<div class="panel" style="margin-bottom:14px">
-  <div class="panel-header"><h2 style="color:#00d673">10% SKIMMER</h2><div class="count" id="skim-summary">Loading...</div></div>
-  <div style="padding:10px 14px;display:flex;gap:24px;flex-wrap:wrap;font-size:12px;border-bottom:1px solid #1a1a1a" id="skim-stats"></div>
-  <div class="panel-body" style="max-height:250px"><table><thead><tr>
-    <th>Cat</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Bid</th><th>P&amp;L</th><th>Gain</th>
-  </tr></thead><tbody id="skim-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
-</div>
-
 <!-- Scanner Status -->
 <div class="scanner-bar" id="scanner-bar">
-  <div class="scanner-title">Universal Scanner</div>
+  <div class="scanner-title">Crypto Scanner</div>
   <div class="scanner-cats" id="scanner-cats">Waiting for first scan...</div>
 </div>
 
@@ -1681,7 +1157,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
   <div class="status-item">15M: <span class="dot-blocked"></span> BLOCKED</div>
   <div class="status-item">Max contracts: 10</div>
-  <div class="status-item">Sell: 200% top, 100% half, 1min save</div>
+  <div class="status-item">Sell: 50% sell ALL, 1min expiry save</div>
   <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span> protected</div>
   <div class="status-item">Ghosts: <span class="yellow" id="sb-ghosts">0</span> expired cleaned</div>
   <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
@@ -1716,13 +1192,12 @@ async function fetchJSON(url){
 }
 
 async function refresh(){
-  var [status,cats,open,trades,scanner,skimmer]=await Promise.all([
+  var [status,cats,open,trades,scanner]=await Promise.all([
     fetchJSON('/api/status'),
     fetchJSON('/api/categories'),
     fetchJSON('/api/open'),
     fetchJSON('/api/trades'),
-    fetchJSON('/api/scanner'),
-    fetchJSON('/api/skimmer')
+    fetchJSON('/api/scanner')
   ]);
 
   // Portfolio hero
@@ -1845,51 +1320,6 @@ async function refresh(){
     drawEquity(completed);
   }
 
-  // 10% Skimmer section
-  if(skimmer&&!skimmer.error){
-    var sp=skimmer.net_pnl||0;
-    var spc=cls(sp);
-    $('skim-summary').innerHTML='<span class="green">'+skimmer.wins+'W</span> / <span class="red">'+skimmer.losses+'L</span> | Open: <span class="blue">'+skimmer.open_count+'/'+skimmer.max_open+'</span> | P&L: <span class="'+spc+'">'+(sp>=0?'+':'')+sp.toFixed(4)+'</span>';
-
-    // Stats row: category breakdown
-    var sh='';
-    var co=skimmer.categories_open||{};
-    var cp=skimmer.categories_pnl||{};
-    var allCats=Object.keys(co).concat(Object.keys(cp)).filter(function(v,i,a){return a.indexOf(v)===i});
-    allCats.forEach(function(cat){
-      var cnt=co[cat]||0;
-      var pd=cp[cat]||{pnl:0,wins:0,losses:0};
-      var c2=cls(pd.pnl);
-      sh+='<span style="margin-right:12px"><span class="blue" style="text-transform:uppercase;font-size:10px;font-weight:700">'+esc(cat)+'</span> ';
-      if(cnt>0)sh+='<span class="gray">'+cnt+' open</span> ';
-      sh+='<span class="'+c2+'">'+(pd.pnl>=0?'+':'')+pd.pnl.toFixed(2)+'</span>';
-      sh+=' <span class="gray">('+pd.wins+'W/'+pd.losses+'L)</span></span>';
-    });
-    if(skimmer.scan&&skimmer.scan.total){
-      sh+='<span style="margin-left:auto;color:#555;font-size:10px">Scanned '+skimmer.scan.total+' mkts, '+skimmer.scan.candidates+' candidates</span>';
-    }
-    $('skim-stats').innerHTML=sh||'<span class="gray">No skimmer activity yet</span>';
-
-    // Skimmer open positions table
-    var positions=skimmer.positions||[];
-    var h='';
-    positions.forEach(function(p){
-      var rc=p.gain_pct>2?'row-green':p.gain_pct<-2?'row-red':'row-yellow';
-      var gc=cls(p.gain_pct);
-      h+='<tr class="'+rc+'">';
-      h+='<td><span class="type-badge">'+esc((p.category||'').substring(0,8).toUpperCase())+'</span></td>';
-      h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
-      h+='<td>'+esc(p.side)+'</td>';
-      h+='<td>'+p.count+'</td>';
-      h+='<td>$'+p.entry.toFixed(2)+'</td>';
-      h+='<td>$'+(p.current_bid||0).toFixed(2)+'</td>';
-      h+='<td class="'+gc+'">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(4)+'</td>';
-      h+='<td class="'+gc+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
-      h+='</tr>';
-    });
-    $('skim-body').innerHTML=h||'<tr><td colspan="8" class="gray" style="text-align:center">No skimmer positions</td></tr>';
-  }
-
   $('last-update').textContent=new Date().toLocaleTimeString();
 }
 
@@ -1948,7 +1378,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — LIVE TRADING — ALL MARKETS — universal scanner — max 5 contracts")
+    logger.info("Bot starting — GOLDEN HOUR RESET — crypto only, 50% sell, 5 contracts, fast turnover")
     close_all_old_positions()
     while True:
         try:
