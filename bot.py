@@ -312,9 +312,9 @@ def find_buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars', '0') or '0')
         no_bid = float(market.get('no_bid_dollars', '0') or '0')
 
-        if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid > 0:
+        if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid >= yes_ask * 0.60:
             candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
-        if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid > 0:
+        if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid >= no_ask * 0.60:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
     logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (3-20c with bid)")
@@ -564,6 +564,19 @@ def check_sells():
             current_bid = get_live_bid(ticker, side)
 
         if current_bid <= 0:
+            continue
+
+        # Mark dead if bid collapsed
+        if current_bid < entry_price * 0.50 and current_bid <= 0.02:
+            loss = round(-entry_price * count, 4)
+            try:
+                db.table('trades').update({
+                    'pnl': loss,
+                    'current_bid': 0,
+                }).eq('id', trade['id']).execute()
+            except:
+                pass
+            logger.info(f"DEAD: {ticker} bid=${current_bid:.2f} too low (entry=${entry_price:.2f})")
             continue
 
         gain_pct = ((current_bid - entry_price) / entry_price) * 100
