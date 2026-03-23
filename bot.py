@@ -152,8 +152,32 @@ def _scan_series(series_list, strategy):
     return cheap
 
 
+def _scan_series_verbose(series_list, strategy):
+    """Like _scan_series but logs prices for every market (for crypto monitoring)."""
+    cheap = []
+    for series in series_list:
+        markets = get_series_markets(series)
+        for m in markets:
+            ticker = m.get('ticker', '')
+            if 'KXMVE' in ticker:
+                continue
+            yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
+            no_ask = float(m.get('no_ask_dollars', '0') or '0')
+            logger.info(f"  {ticker[-25:]}: YES={yes_ask:.2f} NO={no_ask:.2f} {'<- CHEAP' if (MIN_PRICE <= yes_ask <= MAX_PRICE or MIN_PRICE <= no_ask <= MAX_PRICE) else ''}")
+            if MIN_PRICE <= yes_ask <= MAX_PRICE:
+                cheap.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
+                              'volume': 0, 'strategy': strategy,
+                              'reason': f"{strategy}: YES @ ${yes_ask:.2f}"})
+            if MIN_PRICE <= no_ask <= MAX_PRICE:
+                cheap.append({'ticker': ticker, 'side': 'no', 'price': no_ask,
+                              'volume': 0, 'strategy': strategy,
+                              'reason': f"{strategy}: NO @ ${no_ask:.2f}"})
+    return cheap
+
+
 def scan_series_markets():
-    crypto = _scan_series(CRYPTO_SERIES, 'crypto')
+    # Crypto gets verbose logging so we can watch for cheap windows
+    crypto = _scan_series_verbose(CRYPTO_SERIES, 'crypto')
     weather = _scan_series(WEATHER_SERIES, 'weather')
     trending = _scan_series(TRENDING_SERIES, 'trending')
     cheap = crypto + weather + trending
