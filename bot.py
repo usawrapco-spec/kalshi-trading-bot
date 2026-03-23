@@ -267,10 +267,22 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_i
 # === BUY LOGIC ===
 
 def find_buy_candidates(markets):
+    now = datetime.now(timezone.utc)
+    current_hour = now.strftime('%H')
+    next_hour = f"{(now.hour + 1) % 24:02d}"
+    current_day = now.strftime('%d')
+    # Tags like "2308" for day 23, hour 08
+    current_tag = f"{current_day}{current_hour}"
+    next_tag = f"{current_day}{next_hour}"
+
     candidates = []
     for market in markets:
         ticker = market.get('ticker', '')
         if 'KXMVE' in ticker:
+            continue
+
+        # Only buy current hour or next hour contracts
+        if current_tag not in ticker and next_tag not in ticker:
             continue
 
         yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
@@ -283,7 +295,7 @@ def find_buy_candidates(markets):
         if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid > 0:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (3-20c with bid)")
+    logger.info(f"Filter: current hour {current_tag}/{next_tag} -> {len(candidates)} candidates")
     return candidates
 
 
@@ -391,7 +403,7 @@ def sync_with_kalshi():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — tiered profit: 100/200/300%, drop protection 20pts")
+    logger.info("check_sells() — sell 25% or timeout 10s")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -765,7 +777,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 10s cycles &mdash; tiered sell 100/200/300%, drop protect 20pts</div>
+  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 5s cycles &mdash; current hour only, sell 25% or 10s timeout</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -798,10 +810,10 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c with bid</div>
-  <div class="status-item">Strategy: Tiered 100/200/300%</div>
-  <div class="status-item">Drop protect: 20pts</div>
+  <div class="status-item">Strategy: 25% or 10s timeout</div>
+  <div class="status-item">Current hour only</div>
   <div class="status-item">Expiry save: 5min</div>
-  <div class="status-item">Max: 10 contracts</div>
+  <div class="status-item">Max: 3 contracts</div>
   <div class="status-item">Full balance trading</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
@@ -946,7 +958,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — Crypto scalper — tiered sell 100/200/300, drop protection 20pts")
+    logger.info("Bot starting — Crypto scalper — current hour only, sell 25% or 10s timeout, 3 contracts")
     startup_purge()
     sync_with_kalshi()
     cleanup_stale()
