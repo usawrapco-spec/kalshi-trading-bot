@@ -173,7 +173,7 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
     # ONLY sell before expiry — capture whatever profit exists
-    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 120:
+    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 60:
         if gain_pct > 0:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
