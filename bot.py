@@ -979,7 +979,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; hold for big gains, protect at 50%+</div>
+  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; ride and protect + expiry exit all positions</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
