@@ -1,6 +1,7 @@
 """
-NUCLEAR RESTART — Simple crypto price scalper.
-Buy cheap crypto contracts, sell when price goes up. That's it.
+Crypto scalper with tiered profit-taking.
+Buy cheap crypto contracts. Sell 1/3 at 100%, half at 200%, all at 300%.
+Drop protection: sell all if gain drops 20 points from peak while under 100%.
 """
 
 import os, time, logging, re, requests, traceback
@@ -165,37 +166,104 @@ def get_owned():
     return {t['ticker'] for t in (result.data or [])}
 
 
-# === SELL LOGIC ===
-# Smart sell on reversal: track momentum, sell when price turns.
+# === CLEANUP STALE POSITIONS ===
 
-price_history = {}
+STALE_TAGS = ['MINMON', 'MAXMON', '2026250', '27JAN', 'SOLD26', '2717']
+
+def cleanup_stale():
+    """Sell all stale monthly/yearly positions on startup to free cash."""
+    try:
+        open_buys = db.table('trades').select('*') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        if not open_buys.data:
+            logger.info("Cleanup: no open positions")
+            return
+
+        cleaned = 0
+        for trade in open_buys.data:
+            ticker = trade['ticker']
+            side = trade['side']
+            count = trade.get('count') or 1
+            entry_price = sf(trade['price'])
+
+            is_stale = any(tag in ticker for tag in STALE_TAGS)
+            if not is_stale:
+                continue
+
+            bid = get_live_bid(ticker, side)
+            if not bid or bid <= 0:
+                continue
+
+            sell_order_id = place_order(ticker, side, 'sell', bid, count)
+            if not sell_order_id:
+                continue
+
+            pnl = round((bid - entry_price) * count, 4)
+            gain_pct = ((bid - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+            logger.info(f"CLEANUP: {ticker} {side} x{count} @ ${bid:.2f} | pnl=${pnl:.4f}")
+
+            try:
+                db.table('trades').insert({
+                    'ticker': ticker, 'side': side, 'action': 'sell',
+                    'price': float(bid), 'count': count,
+                    'pnl': float(pnl), 'strategy': 'crypto',
+                    'reason': f"CLEANUP STALE +{gain_pct:.0f}%",
+                    'sell_gain_pct': float(round(gain_pct, 1)),
+                }).execute()
+            except Exception as e:
+                logger.error(f"Cleanup DB insert failed: {e}")
+
+            try:
+                db.table('trades').update({
+                    'pnl': 0.0,
+                    'current_bid': float(bid),
+                }).eq('id', trade['id']).execute()
+            except:
+                pass
+            cleaned += 1
+
+        logger.info(f"Cleanup: sold {cleaned} stale positions")
+    except Exception as e:
+        logger.error(f"Cleanup error: {e}")
+
+
+# === SELL LOGIC ===
+# Tiered profit-taking: 100% / 200% / 300%. Drop protection at 20 points.
+
+peak_gains = {}
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    if trade_id not in price_history:
-        price_history[trade_id] = []
-    price_history[trade_id].append(current_bid)
-    if len(price_history[trade_id]) > 6:
-        price_history[trade_id] = price_history[trade_id][-6:]
+    # Track peak gain
+    if trade_id not in peak_gains or gain_pct > peak_gains[trade_id]:
+        peak_gains[trade_id] = gain_pct
 
-    history = price_history[trade_id]
+    peak = peak_gains[trade_id]
+    drop = peak - gain_pct
 
-    if len(history) >= 3:
-        recent = history[-3:]
-        going_down = recent[-1] < recent[-2] <= recent[-3]
-        peaked = recent[-1] < recent[-2] and recent[-2] >= recent[-3]
+    # 300%+ — sell everything
+    if gain_pct >= 300:
+        return True, count, f"MOON +{gain_pct:.0f}%"
 
-        if gain_pct >= 20 and (going_down or peaked):
-            return True, count, f"REVERSAL +{gain_pct:.0f}%"
-
-    if gain_pct >= 100 and count > 1:
+    # 200%+ — sell half
+    if gain_pct >= 200 and count > 1:
         sell_qty = count // 2
-        return True, sell_qty, f"SECURE HALF +{gain_pct:.0f}%"
+        return True, sell_qty, f"SELL HALF +{gain_pct:.0f}%"
 
-    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 120:
+    # 100%+ — take profit (1/3)
+    if gain_pct >= 100:
+        sell_qty = max(1, count // 3)
+        return True, sell_qty, f"TAKE PROFIT +{gain_pct:.0f}%"
+
+    # Under 100% but dropped 20 points from peak — sell before it gets worse
+    if gain_pct > 0 and gain_pct < 100 and drop >= 20:
+        return True, count, f"DROP PROTECT +{gain_pct:.0f}% (peak was +{peak:.0f}%)"
+
+    # Expiry save
+    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
         if gain_pct > 0:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
@@ -274,7 +342,7 @@ def startup_purge():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — smart sell: momentum tracking, sell on reversal")
+    logger.info("check_sells() — tiered profit: 100/200/300%, drop protection 20pts")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -634,7 +702,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 10s cycles &mdash; buy 3-20c, hold everything, expiry save only</div>
+  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 10s cycles &mdash; tiered sell 100/200/300%, drop protect 20pts</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -667,10 +735,10 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c with bid</div>
-  <div class="status-item">Strategy: Hold, expiry save only</div>
-  <div class="status-item">5min: +10%</div>
-  <div class="status-item">2min: any green</div>
-  <div class="status-item">Max: 5 contracts</div>
+  <div class="status-item">Strategy: Tiered 100/200/300%</div>
+  <div class="status-item">Drop protect: 20pts</div>
+  <div class="status-item">Expiry save: 5min</div>
+  <div class="status-item">Max: 10 contracts</div>
   <div class="status-item">Full balance trading</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
@@ -815,8 +883,9 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — Crypto scalper — buy 3-20c, hold everything, expiry save only")
+    logger.info("Bot starting — Crypto scalper — tiered sell 100/200/300, drop protection 20pts")
     startup_purge()
+    cleanup_stale()
     cycle_count = 0
     while True:
         try:
