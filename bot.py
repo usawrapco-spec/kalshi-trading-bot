@@ -23,9 +23,10 @@ MAX_DEPLOYMENT_PCT = 0.75       # Deploy up to 75% of balance
 MIN_CASH_RESERVE_PCT = 0.25     # 25% protected (saved profits live here)
 MAX_CONTRACTS_PER_TRADE = 5     # Max 5 contracts (was 3 — sells work now)
 MIN_CONTRACTS_PER_TRADE = 2     # Minimum 2 contracts per trade
-MAX_SPEND_PER_TRADE_PCT = 0.10  # Max 10% of trading_balance per trade
+MAX_SPEND_PER_TRADE_PCT = 0.15  # Max 15% of trading_balance per trade (fewer bigger bets)
 MAX_SPEND_PER_CYCLE = 25
-MAX_TRADES_PER_CYCLE = 10
+MAX_TRADES_PER_CYCLE = 6        # Focused: max 6 buys per cycle (was 10)
+MAX_PER_ASSET = 2               # Max 2 contracts per asset group per cycle
 MAX_OPEN_POSITIONS = 200
 
 # === SELL THRESHOLDS ===
@@ -302,8 +303,64 @@ def buy_priority(ticker, strategy='crypto'):
     return 9
 
 
+def get_asset_group(ticker):
+    """Group tickers by underlying asset for focused betting."""
+    if 'KXBTC' in ticker: return 'BTC'
+    elif 'KXETH' in ticker: return 'ETH'
+    elif 'KXSOL' in ticker: return 'SOL'
+    elif any(x in ticker for x in ['KXNCAAMBGAME', 'KXNCAAMB', 'KXCBB', 'KXMARMAD', 'KXMM']): return 'BASKETBALL'
+    elif any(x in ticker for x in ['OIL', 'WTI', 'CRUDE', 'BRENT']): return 'OIL'
+    elif any(x in ticker for x in ['KXNFL', 'KXNBA', 'KXMLB', 'KXNHL']): return 'US_SPORTS'
+    elif any(x in ticker for x in ['KXSOCCER', 'KXMLS', 'KXEPL', 'KXUCL']): return 'SOCCER'
+    elif any(x in ticker for x in ['KXELECT', 'KXPRES', 'KXGOV', 'KXSEN', 'KXREFERENDUM']): return 'ELECTIONS'
+    elif any(x in ticker for x in ['KXTENNIS', 'KXATP', 'KXWTA']): return 'TENNIS'
+    elif any(x in ticker for x in ['KXFED', 'KXCPI', 'KXGDP', 'KXJOBS', 'KXINFL']): return 'ECON'
+    else: return 'OTHER_' + ticker[:8]  # unique-ish group per unknown series
+
+
+def select_focused_trades(candidates, max_per_asset=MAX_PER_ASSET, max_total=MAX_TRADES_PER_CYCLE):
+    """Pick the BEST 2 trades per asset group instead of buying everything.
+
+    Scoring: tightest spread + sweet-spot price (0.15-0.35 preferred) + volume.
+    Returns a trimmed list with count forced to MAX_CONTRACTS_PER_TRADE (5).
+    """
+    # Group by asset
+    groups = {}
+    for c in candidates:
+        asset = get_asset_group(c['ticker'])
+        groups.setdefault(asset, []).append(c)
+
+    selected = []
+    for asset, group in sorted(groups.items()):
+        # Score: lower is better
+        # Prefer 15-35c (sweet spot), tight spread, high volume
+        def score(c):
+            price_penalty = 0 if 0.15 <= c['price'] <= 0.35 else 0.05
+            return (c['spread'] + price_penalty, -c['volume'])
+
+        group.sort(key=score)
+
+        for c in group[:max_per_asset]:
+            c['count'] = MAX_CONTRACTS_PER_TRADE  # Max size on focused picks
+            selected.append(c)
+            logger.info(f"FOCUSED: {c['ticker']} {c['side']} @ ${c['price']:.2f} | "
+                        f"spread=${c['spread']:.2f} vol={c['volume']:.0f} | "
+                        f"asset={asset} | 5 contracts")
+
+    # Sort selected by volume desc, then spread asc
+    selected.sort(key=lambda x: (-x['volume'], x['spread']))
+
+    # Cap at max total
+    selected = selected[:max_total]
+
+    total = sum(len(g) for g in groups.values())
+    skipped = total - len(selected)
+    logger.info(f"FOCUS SUMMARY: {len(selected)} selected from {total} candidates across {len(groups)} assets | skipped {skipped}")
+    return selected
+
+
 def run_buys(markets):
-    """Universal buy logic — evaluates ALL live markets regardless of category."""
+    """Universal buy logic — focused bets: best 2 per asset, max size."""
     total_balance, trading_balance, saved_balance = get_trading_balance()
     owned = get_owned()
     num_open = len(owned)
@@ -313,11 +370,12 @@ def run_buys(markets):
         logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
         return
 
-    # Universal parameters: 5-45c price range, tight spreads, volume required
-    min_price = 0.05
+    # Focused parameters: 10-45c price range, real bids, tight spreads, volume
+    min_price = 0.10
     max_price = 0.45
     max_spread = 0.10
     min_volume = 50
+    min_bid = 0.05  # Must have a real bid (someone to sell to)
 
     buys = []
     for m in markets:
@@ -342,13 +400,13 @@ def run_buys(markets):
         no_bid = float(m.get('no_bid_dollars', '0') or '0')
         no_ask = float(m.get('no_ask_dollars', '0') or '0')
 
-        # Collect liquid sides
+        # Collect liquid sides — require real bid (exit liquidity)
         candidates = []
-        if yes_bid > 0 and yes_ask > 0 and min_price <= yes_ask <= max_price:
+        if yes_bid >= min_bid and yes_ask > 0 and min_price <= yes_ask <= max_price:
             spread = yes_ask - yes_bid
             if spread <= max_spread:
                 candidates.append(('yes', yes_ask, yes_bid, spread))
-        if no_bid > 0 and no_ask > 0 and min_price <= no_ask <= max_price:
+        if no_bid >= min_bid and no_ask > 0 and min_price <= no_ask <= max_price:
             spread = no_ask - no_bid
             if spread <= max_spread:
                 candidates.append(('no', no_ask, no_bid, spread))
@@ -359,16 +417,17 @@ def run_buys(markets):
         # Pick side with tightest spread
         candidates.sort(key=lambda x: x[3])
         side, price, bid, spread = candidates[0]
-        count = calculate_position_size(price, trading_balance, volume, category)
 
         buys.append({
             'ticker': ticker, 'side': side, 'price': price,
-            'bid': bid, 'spread': spread, 'count': count,
+            'bid': bid, 'spread': spread, 'count': MAX_CONTRACTS_PER_TRADE,
             'volume': volume, 'strategy': category,
         })
 
-    # Sort by volume (most liquid first), then priority, then tightest spread
-    buys.sort(key=lambda x: (-x['volume'], buy_priority(x['ticker'], x['strategy']), x['spread']))
+    logger.info(f"[UNIVERSAL] {len(buys)} candidates passed filters")
+
+    # FOCUSED SELECTION: pick best 2 per asset, max 6 total
+    buys = select_focused_trades(buys)
 
     # Limits based on trading_balance (excludes saved/protected money)
     max_exposure = trading_balance * MAX_DEPLOYMENT_PCT
