@@ -246,40 +246,36 @@ def clear_non_btcd():
 
 
 # === SELL LOGIC ===
-# Hold for big gains. Only sell on: (1) peak 50%+ and dropping back, (2) expiry save.
+# Ride and protect: track peak by ticker, sell on 10pt reversal from 30%+
 
-peak_gains = {}  # trade_id -> highest gain % seen
+peak_gains = {}
 
-def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
+def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker='', side=''):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # Track peak gain for this position
-    if trade_id not in peak_gains or gain_pct > peak_gains[trade_id]:
-        peak_gains[trade_id] = gain_pct
+    key = f"{ticker}_{side}"
 
-    peak = peak_gains[trade_id]
+    # Track peak
+    if key not in peak_gains or gain_pct > peak_gains[key]:
+        peak_gains[key] = gain_pct
+
+    peak = peak_gains[key]
     drop = peak - gain_pct
 
-    # NEVER sell below 30% — fees eat anything smaller
-    if gain_pct < 30:
-        return False, 0, None
+    # Hit 30%+ and dropped 10 points from peak — the run is over, sell
+    if peak >= 30 and drop >= 10:
+        del peak_gains[key]
+        return True, count, f"SELL +{gain_pct:.0f}% (peak +{peak:.0f}%)"
 
-    # === PROTECT BIG GAINS ===
-    # If we EVER hit 50%+ and it drops 20 points from peak — lock it in
-    if peak >= 50 and drop >= 20 and gain_pct >= 30:
-        peak_gains.pop(trade_id, None)
-        return True, count, f"PROTECT +{gain_pct:.0f}% (peak +{peak:.0f}%)"
+    # 5 min before expiry — sell anything green
+    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
+        if gain_pct > 0:
+            if key in peak_gains:
+                del peak_gains[key]
+            return True, count, f"EXPIRY +{gain_pct:.0f}%"
 
-    # === NEVER LET PROFIT EXPIRE ===
-    # 2 minutes before expiry — only if above 30%
-    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 120:
-        if gain_pct >= 30:
-            peak_gains.pop(trade_id, None)
-            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
-
-    # === OTHERWISE: HOLD. No ceiling. Let it run to 500%, 1000%, whatever. ===
     return False, 0, None
 
 
@@ -652,7 +648,7 @@ def check_sells():
             pass
 
         # Decide sell
-        do_sell, sell_qty, reason = should_sell(entry_price, current_bid, count, time_to_expiry, trade['id'])
+        do_sell, sell_qty, reason = should_sell(entry_price, current_bid, count, time_to_expiry, ticker=ticker, side=side)
 
         if do_sell and sell_qty > 0:
             pnl = round((current_bid - entry_price) * sell_qty, 4)
