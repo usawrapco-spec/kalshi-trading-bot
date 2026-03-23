@@ -35,6 +35,7 @@ MAX_SPREAD_PCT = 0.80
 MAX_EXPIRY_SECONDS = 14400      # 4 hours
 MIN_EXPIRY_SECONDS = 180        # 3 minutes
 PROFIT_BANK_PCT = 0.20
+PAPER_STARTING_BALANCE = 50.00
 
 # === SERIES TO SCAN ===
 CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
@@ -182,7 +183,7 @@ def get_live_bid(ticker, side):
 
 # === BALANCE ===
 
-def get_balance():
+def get_kalshi_balance():
     try:
         resp = kalshi_get('/portfolio/balance')
         balance_cents = resp.get('balance', 0)
@@ -192,9 +193,39 @@ def get_balance():
         return 0.0
 
 
+def get_realized_pnl():
+    try:
+        sells = db.table('trades').select('pnl') \
+            .eq('action', 'sell').not_.is_('pnl', 'null').execute()
+        return sum(sf(t['pnl']) for t in (sells.data or []))
+    except Exception as e:
+        logger.error(f"get_realized_pnl failed: {e}")
+        return 0.0
+
+
+def get_open_position_cost():
+    try:
+        open_buys = db.table('trades').select('price,count') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        return sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
+    except Exception as e:
+        logger.error(f"get_open_position_cost failed: {e}")
+        return 0.0
+
+
+def get_balance():
+    if ENABLE_TRADING:
+        return get_kalshi_balance()
+    else:
+        realized = get_realized_pnl()
+        open_cost = get_open_position_cost()
+        paper = PAPER_STARTING_BALANCE + realized - open_cost
+        return max(0, paper)
+
+
 def get_owned():
     try:
-        result = db.client.table('trades').select('ticker') \
+        result = db.table('trades').select('ticker') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         return {t['ticker'] for t in (result.data or [])}
     except Exception as e:
@@ -323,7 +354,7 @@ def cancel_all_resting():
 
 def sync_with_kalshi():
     try:
-        open_buys = db.client.table('trades').select('*') \
+        open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         if not open_buys.data:
             logger.info("Sync: no open positions in DB")
@@ -353,7 +384,7 @@ def sync_with_kalshi():
 
             loss = round(-entry_price * count, 4)
             try:
-                db.client.table('trades').update({
+                db.table('trades').update({
                     'pnl': loss,
                     'current_bid': 0,
                 }).eq('id', trade['id']).execute()
@@ -373,7 +404,7 @@ def check_sells():
     global banked_profit
     logger.info("check_sells() -- half at 100%, full at 200%, expiry save 25%+")
     try:
-        open_buys = db.client.table('trades').select('*') \
+        open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
     except Exception as e:
         logger.error(f"check_sells DB query failed: {e}")
@@ -424,7 +455,7 @@ def check_sells():
                 logger.info(f"BANKED ${banked:.4f} (20% of ${pnl:.4f} profit) | Total banked: ${banked_profit:.4f}")
 
             try:
-                db.client.table('trades').insert({
+                db.table('trades').insert({
                     'ticker': ticker, 'side': side, 'action': 'sell',
                     'price': float(settle_price), 'count': count,
                     'pnl': float(pnl), 'strategy': 'crypto',
@@ -435,7 +466,7 @@ def check_sells():
                 logger.error(f"Settle insert failed: {e}")
 
             try:
-                db.client.table('trades').update({
+                db.table('trades').update({
                     'pnl': 0.0,
                     'current_bid': float(settle_price),
                 }).eq('id', trade['id']).execute()
@@ -449,7 +480,7 @@ def check_sells():
         if time_to_expiry is not None and time_to_expiry == 0:
             loss = round(-entry_price * count, 4)
             try:
-                db.client.table('trades').update({
+                db.table('trades').update({
                     'pnl': loss,
                     'current_bid': 0,
                 }).eq('id', trade['id']).execute()
@@ -474,7 +505,7 @@ def check_sells():
 
         # Update current price in DB
         try:
-            db.client.table('trades').update({
+            db.table('trades').update({
                 'current_bid': float(current_bid),
             }).eq('id', trade['id']).execute()
         except:
@@ -498,7 +529,7 @@ def check_sells():
                 logger.info(f"BANKED ${banked:.4f} (20% of ${pnl:.4f} profit) | Total banked: ${banked_profit:.4f}")
 
             try:
-                db.client.table('trades').insert({
+                db.table('trades').insert({
                     'ticker': ticker, 'side': side, 'action': 'sell',
                     'price': float(current_bid), 'count': sell_qty,
                     'pnl': float(pnl), 'strategy': 'crypto',
@@ -512,7 +543,7 @@ def check_sells():
             remaining = count - sell_qty
             if remaining > 0:
                 try:
-                    db.client.table('trades').update({
+                    db.table('trades').update({
                         'count': remaining,
                         'current_bid': float(current_bid),
                     }).eq('id', trade['id']).execute()
@@ -520,7 +551,7 @@ def check_sells():
                     pass
             else:
                 try:
-                    db.client.table('trades').update({
+                    db.table('trades').update({
                         'pnl': 0.0,
                         'current_bid': float(current_bid),
                     }).eq('id', trade['id']).execute()
@@ -542,7 +573,7 @@ def run_buys(markets):
 
     # Get deployed capital
     try:
-        open_buys = db.client.table('trades').select('price,count') \
+        open_buys = db.table('trades').select('price,count') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         total_deployed = sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
     except Exception as e:
@@ -609,7 +640,7 @@ def run_buys(markets):
 
         logger.info(f"BUY: {c['ticker']} {c['side']} x{count} @ ${c['price']:.2f} (bid=${c['bid']:.2f}, vol={c['volume']})")
         try:
-            db.client.table('trades').insert({
+            db.table('trades').insert({
                 'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
                 'price': float(c['price']), 'count': count,
                 'strategy': 'crypto',
@@ -670,14 +701,14 @@ def api_status():
     try:
         balance = get_balance()
 
-        sells = db.client.table('trades').select('pnl') \
+        sells = db.table('trades').select('pnl') \
             .eq('action', 'sell').not_.is_('pnl', 'null').execute()
         sell_data = sells.data or []
         net_pnl = sum(sf(t['pnl']) for t in sell_data)
         wins = sum(1 for t in sell_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in sell_data if sf(t['pnl']) < 0)
 
-        open_buys = db.client.table('trades').select('id,price,count,current_bid') \
+        open_buys = db.table('trades').select('id,price,count,current_bid') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         open_data = open_buys.data or []
         live_positions = [t for t in open_data if sf(t.get('current_bid')) > 0]
@@ -701,23 +732,30 @@ def api_status():
             'mode': mode,
         })
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"API status error: {e}")
+        mode = "PAPER" if not ENABLE_TRADING else "LIVE"
+        return jsonify({
+            'balance': 0, 'net_pnl': 0, 'wins': 0, 'losses': 0,
+            'open_count': 0, 'positions_value': 0, 'positions_cost': 0,
+            'cash': 0, 'banked_profit': 0, 'mode': mode, 'error': str(e),
+        })
 
 
 @app.route('/api/trades')
 def api_trades():
     try:
-        result = db.client.table('trades').select('*') \
+        result = db.table('trades').select('*') \
             .order('created_at', desc=True).limit(200).execute()
         return jsonify(result.data or [])
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"API trades error: {e}")
+        return jsonify([])
 
 
 @app.route('/api/open')
 def api_open():
     try:
-        result = db.client.table('trades').select('*') \
+        result = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         positions = []
         for t in (result.data or []):
@@ -744,7 +782,8 @@ def api_open():
         positions.sort(key=lambda x: x['gain_pct'], reverse=True)
         return jsonify(positions)
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"API open error: {e}")
+        return jsonify([])
 
 
 @app.route('/dashboard')
