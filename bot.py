@@ -1,7 +1,6 @@
 """
-Clean reset: proven strategy + March Madness.
-Half-sell at 100%, full at 200%, expiry save at 25%+.
-30-second cycles. Paper mode (ENABLE_TRADING=false).
+Golden hour strategy: 3-15c brackets, sell ALL at 100%, expiry save 25%+.
+Crypto + index + oil hourlies. 10s cycles. Paper mode (ENABLE_TRADING=false).
 """
 
 import os, time, logging, re, requests, traceback
@@ -23,13 +22,15 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === SETTINGS ===
 BUY_MIN = 0.03
-BUY_MAX = 0.50
+BUY_MAX = 0.15
 CYCLE_SECONDS = 10
 MAX_CONTRACTS_PER_TRADE = 3
 MIN_CONTRACTS_PER_TRADE = 1
 MAX_DEPLOYMENT_PCT = 0.60
 MIN_CASH_RESERVE = 0.30
 MAX_POSITIONS = 50
+MAX_EXPIRY = 14400   # 4 hours
+MIN_EXPIRY = 60      # 1 minute
 PROFIT_BANK_PCT = 0.20
 PAPER_STARTING_BALANCE = 20.00
 PAPER_RESET_TIME = '2026-03-23T20:40:00Z'
@@ -256,21 +257,15 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # TIER 1: 200%+ = SELL EVERYTHING
-    if gain_pct >= 200:
-        return True, count, f"FULL EXIT +{gain_pct:.0f}%"
-
-    # TIER 2: 100%+ = SELL HALF
+    # +100% → SELL ALL
     if gain_pct >= 100:
-        sell_qty = max(1, count // 2)
-        return True, sell_qty, f"HALF SELL +{gain_pct:.0f}% -- selling {sell_qty}/{count}"
+        return True, count, f"SELL +{gain_pct:.0f}%"
 
-    # TIER 3: 5 min to expiry + 25%+ gain = save profit
+    # Expiry save — 5 min left + 25% gain → SELL ALL
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
         if gain_pct >= 25:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
-    # TIER 4: hold
     return False, 0, None
 
 
@@ -294,13 +289,19 @@ def find_buy_candidates(markets):
         logger.info(f"VOL FIELDS: {[k for k in sample.keys() if 'vol' in k.lower()]} = {[sample.get(k) for k in sample.keys() if 'vol' in k.lower()]}")
 
     candidates = []
-    blocked = wrong_price = no_bid = 0
+    blocked = wrong_price = no_bid = bad_expiry = 0
 
     for market in markets:
         ticker = market.get('ticker', '')
 
         if any(pat in ticker for pat in BLOCKED_PATTERNS):
             blocked += 1
+            continue
+
+        # Expiry filter: must be 1 min to 4 hours out
+        tte = get_time_to_expiry(ticker, market=market)
+        if tte is None or tte < MIN_EXPIRY or tte > MAX_EXPIRY:
+            bad_expiry += 1
             continue
 
         yes_ask = sf(market.get('yes_ask_dollars', '0'))
@@ -336,7 +337,7 @@ def find_buy_candidates(markets):
 
     candidates.sort(key=lambda x: x['volume'], reverse=True)
     total = len(markets)
-    logger.info(f"FILTER: {total} total | {blocked} blocked | {wrong_price} price out of range | {no_bid} no bid | {len(candidates)} candidates")
+    logger.info(f"FILTER: {total} total | {blocked} blocked | {bad_expiry} wrong expiry | {wrong_price} price out | {no_bid} no bid | {len(candidates)} candidates")
 
     # Log first 10 candidates
     for c in candidates[:10]:
@@ -458,7 +459,7 @@ def sync_with_kalshi():
 
 def check_sells():
     global banked_profit
-    logger.info("check_sells() -- half at 100%, full at 200%, expiry save 25%+")
+    logger.info("check_sells() -- sell at 100%, expiry save 25%+")
     try:
         open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null') \
@@ -715,27 +716,25 @@ def run_buys(markets):
     logger.info(f"Bought {bought}, deployed ${total_deployed:.2f}")
 
 
-# === DUMP SPORTS POSITIONS ===
+# === DUMP ALL POSITIONS (clean slate on startup) ===
 
-def dump_sports_positions():
-    """Sell all open sports positions at market bid to free up cash."""
+def dump_all_positions():
+    """Sell all open positions at market bid for a clean slate."""
     try:
         open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null') \
             .gte('created_at', PAPER_RESET_TIME).execute()
     except Exception as e:
-        logger.error(f"dump_sports: DB query failed: {e}")
+        logger.error(f"dump_all: DB query failed: {e}")
         return
 
     if not open_buys.data:
+        logger.info("DUMP: no open positions to clear")
         return
 
     dumped = 0
     for trade in open_buys.data:
         ticker = trade['ticker']
-        if not any(pat in ticker for pat in SPORTS_DUMP_PATTERNS):
-            continue
-
         side = trade['side']
         entry_price = sf(trade['price'])
         count = trade.get('count') or 1
@@ -753,7 +752,6 @@ def dump_sports_positions():
         if current_bid <= 0:
             current_bid = get_live_bid(ticker, side)
 
-        # Sell at whatever bid exists, even if it's a loss
         sell_price = current_bid if current_bid > 0 else 0.0
         pnl = round((sell_price - entry_price) * count, 4)
 
@@ -761,18 +759,18 @@ def dump_sports_positions():
         if not result:
             continue
 
-        logger.info(f"SPORTS DUMP: {ticker} {side} x{count} @ ${sell_price:.2f} (entry ${entry_price:.2f}) pnl=${pnl:.4f}")
+        logger.info(f"DUMP: {ticker} {side} x{count} @ ${sell_price:.2f} (entry ${entry_price:.2f}) pnl=${pnl:.4f}")
 
         try:
             db.table('trades').insert({
                 'ticker': ticker, 'side': side, 'action': 'sell',
                 'price': float(sell_price), 'count': count,
                 'pnl': float(pnl), 'strategy': 'crypto',
-                'reason': f"SPORTS DUMP @ ${sell_price:.2f}",
+                'reason': f"CLEAN SLATE DUMP @ ${sell_price:.2f}",
                 'sell_gain_pct': float(round(((sell_price - entry_price) / entry_price) * 100, 1)) if entry_price > 0 else 0,
             }).execute()
         except Exception as e:
-            logger.error(f"Sports dump insert failed: {e}")
+            logger.error(f"Dump insert failed: {e}")
 
         try:
             db.table('trades').update({
@@ -784,8 +782,7 @@ def dump_sports_positions():
 
         dumped += 1
 
-    if dumped > 0:
-        logger.info(f"SPORTS DUMP COMPLETE: sold {dumped} sports positions")
+    logger.info(f"DUMP COMPLETE: sold {dumped} positions for clean slate")
 
 
 # === MAIN CYCLE ===
@@ -991,7 +988,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; 10s cycles &mdash; half at 100%, full at 200%, expiry save 25%+</div>
+  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; 10s cycles &mdash; 3-15c brackets &mdash; sell at 100%, expiry save 25%+</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1030,9 +1027,9 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="live-dot dot-paper" id="status-dot"></span> <span id="status-mode">PAPER</span></div>
-  <div class="status-item">Buy: 3-50c, bid exists</div>
-  <div class="status-item">Sell: half@100%, full@200%, expiry@25%</div>
-  <div class="status-item">Max: 3 contracts, 50 positions</div>
+  <div class="status-item">Buy: 3-15c, bid &gt; 0, expiry 1m-4h</div>
+  <div class="status-item">Sell: 100% all, expiry save 25%</div>
+  <div class="status-item">Max: 3 contracts, cash limited</div>
   <div class="status-item">Series: Crypto + Index + Oil brackets</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
@@ -1205,14 +1202,14 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- half at 100%, full at 200%, 10s cycles, bracket contracts only")
+    logger.info(f"Bot starting [{mode}] -- 3-15c, sell at 100%, expiry save 25%, 10s cycles")
     logger.info(f"Series: {ALL_SERIES}")
     logger.info(f"Settings: price=${BUY_MIN}-${BUY_MAX}, filter=price+bid only")
     logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, {MAX_DEPLOYMENT_PCT:.0%} max deploy, {MIN_CASH_RESERVE:.0%} cash reserve, {MAX_POSITIONS} max positions")
 
     cancel_all_resting()
     sync_with_kalshi()
-    dump_sports_positions()
+    dump_all_positions()
 
     while True:
         try:
