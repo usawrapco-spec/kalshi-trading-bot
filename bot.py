@@ -313,10 +313,28 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker=
 # === BUY LOGIC ===
 
 def find_buy_candidates(markets):
+    now = datetime.now(timezone.utc)
+    # Current and next hour tags like "2315", "2316"
+    current_h = f"{now.day:02d}{now.hour:02d}"
+    next_h = f"{now.day:02d}{(now.hour + 1) % 24:02d}"
+    # Handle day rollover
+    next_day_h = f"{now.day + 1:02d}00" if now.hour == 23 else None
+
     candidates = []
     for market in markets:
         ticker = market.get('ticker', '')
         if 'KXMVE' in ticker:
+            continue
+
+        # ONLY current or next hour contracts
+        has_hour = current_h in ticker or next_h in ticker
+        if next_day_h:
+            has_hour = has_hour or next_day_h in ticker
+        if not has_hour:
+            continue
+
+        # Skip monthly/yearly
+        if any(x in ticker for x in ['MINMON', 'MAXMON', '2026', '2717']):
             continue
 
         yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
@@ -324,13 +342,12 @@ def find_buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars', '0') or '0')
         no_bid = float(market.get('no_bid_dollars', '0') or '0')
 
-        # Tight spread = active contract. Bid must be 80%+ of ask.
         if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid >= yes_ask * 0.70:
             candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
         if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid >= no_ask * 0.70:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (3-20c, 70% spread)")
+    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (current/next hour, 3-20c, 70% spread)")
     return candidates
 
 
