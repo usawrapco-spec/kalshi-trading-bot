@@ -177,6 +177,13 @@ def get_market(ticker):
 
 def place_order(ticker, side, action, price, count):
     """Place a real Kalshi order. Returns order_id or None."""
+    # HARD SAFETY: block 15M contracts at the gate
+    if '15M' in ticker:
+        logger.warning(f"BLOCKED at order gate: {ticker} — 15-min contracts disabled")
+        return None
+    # HARD SAFETY: cap buy orders at 3 contracts max (sells can be any size)
+    if action == 'buy':
+        count = min(count, 3)
     price_cents = int(round(price * 100))
     try:
         logger.info(f"ORDER: {action.upper()} {ticker} {side} x{count} @ ${price:.2f} ({price_cents}c)")
@@ -308,12 +315,14 @@ def fetch_march_madness():
 # === BUY LOGIC ===
 
 def calculate_position_size(contract_price, available_balance, volume=0, strategy='crypto'):
-    """Conservative sizing: default 2 contracts, max 3. One bad expiry shouldn't wipe gains."""
+    """Conservative sizing: default 2 contracts, HARD MAX 3. Never exceed 3."""
     if contract_price <= 0:
         return 2
-    target_spend = available_balance * 0.05  # 5% of balance (was 8%)
-    max_contracts = int(target_spend / contract_price)
-    return max(MIN_CONTRACTS_PER_TRADE, min(max_contracts, MAX_CONTRACTS_PER_TRADE))
+    target_spend = available_balance * 0.05  # 5% of balance
+    calculated = int(target_spend / contract_price)
+    result = max(MIN_CONTRACTS_PER_TRADE, min(calculated, MAX_CONTRACTS_PER_TRADE))
+    # HARD SAFETY: absolutely never exceed 3
+    return min(result, 3)
 
 
 def buy_priority(ticker, strategy='crypto'):
@@ -347,6 +356,10 @@ def run_buys(markets, strategy='crypto'):
     buys = []
     for m in markets:
         ticker = m.get('ticker', '')
+        # HARD BLOCK: 15-min contracts — disabled, they lose money
+        if '15M' in ticker:
+            logger.info(f"BLOCKED: {ticker} — 15-min contracts disabled")
+            continue
         if ticker in owned:
             continue
         if 'KXMVE' in ticker:
@@ -419,6 +432,10 @@ def run_buys(markets, strategy='crypto'):
             continue
         if cost > trading_balance - current_deployed:
             continue
+
+        # FINAL SAFETY: hard cap at 3 contracts before ANY order
+        b['count'] = min(b['count'], 3)
+        cost = b['price'] * b['count']
 
         # Place real Kalshi order
         order_id = place_order(b['ticker'], b['side'], 'buy', b['price'], b['count'])
@@ -687,6 +704,7 @@ def run_cycle():
     # 3. Scan March Madness
     try:
         mm_markets = fetch_march_madness()
+        logger.info(f"March Madness markets found: {len(mm_markets)} | Sample: {[m.get('ticker','') for m in mm_markets[:5]]}")
         if mm_markets:
             run_buys(mm_markets, strategy='mm_scalp')
     except Exception as e:
