@@ -166,65 +166,70 @@ def get_owned():
     return {t['ticker'] for t in (result.data or [])}
 
 
-# === CLEANUP STALE POSITIONS ===
+# === NUCLEAR CLEAR — sell everything on startup ===
 
-STALE_TAGS = ['MINMON', 'MAXMON', '2026250', '27JAN', 'SOLD26', '2717']
-
-def cleanup_stale():
-    """Sell all stale monthly/yearly positions on startup to free cash."""
+def nuclear_clear():
+    """Sell ALL open positions at whatever bid is available. Clean slate."""
     try:
         open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         if not open_buys.data:
-            logger.info("Cleanup: no open positions")
+            logger.info("Nuclear clear: no open positions")
             return
 
-        cleaned = 0
+        sold = 0
+        dead = 0
         for trade in open_buys.data:
             ticker = trade['ticker']
             side = trade['side']
             count = trade.get('count') or 1
             entry_price = sf(trade['price'])
 
-            is_stale = any(tag in ticker for tag in STALE_TAGS)
-            if not is_stale:
-                continue
-
             bid = get_live_bid(ticker, side)
-            if not bid or bid <= 0:
-                continue
+            if bid and bid > 0:
+                sell_order_id = place_order(ticker, side, 'sell', bid, count)
+                if not sell_order_id:
+                    continue
 
-            sell_order_id = place_order(ticker, side, 'sell', bid, count)
-            if not sell_order_id:
-                continue
+                pnl = round((bid - entry_price) * count, 4)
+                gain_pct = ((bid - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+                logger.info(f"CLEAR: {ticker} {side} x{count} @ ${bid:.2f} | pnl=${pnl:.4f}")
 
-            pnl = round((bid - entry_price) * count, 4)
-            gain_pct = ((bid - entry_price) / entry_price) * 100 if entry_price > 0 else 0
-            logger.info(f"CLEANUP: {ticker} {side} x{count} @ ${bid:.2f} | pnl=${pnl:.4f}")
+                try:
+                    db.table('trades').insert({
+                        'ticker': ticker, 'side': side, 'action': 'sell',
+                        'price': float(bid), 'count': count,
+                        'pnl': float(pnl), 'strategy': 'crypto',
+                        'reason': f"NUCLEAR CLEAR {gain_pct:+.0f}%",
+                        'sell_gain_pct': float(round(gain_pct, 1)),
+                    }).execute()
+                except Exception as e:
+                    logger.error(f"Nuclear clear DB insert failed: {e}")
 
-            try:
-                db.table('trades').insert({
-                    'ticker': ticker, 'side': side, 'action': 'sell',
-                    'price': float(bid), 'count': count,
-                    'pnl': float(pnl), 'strategy': 'crypto',
-                    'reason': f"CLEANUP STALE +{gain_pct:.0f}%",
-                    'sell_gain_pct': float(round(gain_pct, 1)),
-                }).execute()
-            except Exception as e:
-                logger.error(f"Cleanup DB insert failed: {e}")
+                try:
+                    db.table('trades').update({
+                        'pnl': 0.0,
+                        'current_bid': float(bid),
+                    }).eq('id', trade['id']).execute()
+                except:
+                    pass
+                sold += 1
+            else:
+                # No bid — mark as dead
+                loss = round(-entry_price * count, 4)
+                try:
+                    db.table('trades').update({
+                        'pnl': loss,
+                        'current_bid': 0,
+                    }).eq('id', trade['id']).execute()
+                except:
+                    pass
+                logger.info(f"CLEAR: {ticker} no bid, marked dead (loss=${loss:.4f})")
+                dead += 1
 
-            try:
-                db.table('trades').update({
-                    'pnl': 0.0,
-                    'current_bid': float(bid),
-                }).eq('id', trade['id']).execute()
-            except:
-                pass
-            cleaned += 1
-
-        logger.info(f"Cleanup: sold {cleaned} stale positions")
+        logger.info(f"NUCLEAR CLEAR DONE: sold {sold}, dead {dead}")
     except Exception as e:
-        logger.error(f"Cleanup error: {e}")
+        logger.error(f"Nuclear clear error: {e}")
 
 
 # === SELL LOGIC ===
@@ -603,14 +608,13 @@ def run_cycle():
     balance = get_trading_balance()
     logger.info(f"=== CYCLE START === Balance: ${balance:.2f}")
 
-    # Force sync + cleanup on first cycle in case startup missed it
+    # Force sync on first cycle in case startup missed it
     if not _stale_cleaned:
         try:
             sync_with_kalshi()
-            cleanup_stale()
             _stale_cleaned = True
         except Exception as e:
-            logger.error(f"First cycle sync/cleanup error: {e}")
+            logger.error(f"First cycle sync error: {e}")
 
     try:
         check_sells()
@@ -958,10 +962,10 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — Crypto scalper — current hour only, sell 25% or 10s timeout, 3 contracts")
+    logger.info("Bot starting — NUCLEAR CLEAR then current hour only, sell 25% or 10s timeout, 3 contracts")
     startup_purge()
     sync_with_kalshi()
-    cleanup_stale()
+    nuclear_clear()
     cycle_count = 0
     while True:
         try:
