@@ -29,15 +29,10 @@ MAX_CONTRACTS_PER_TRADE = 3
 MIN_CONTRACTS_PER_TRADE = 1
 MAX_DEPLOYMENT_PCT = 0.60
 MIN_CASH_RESERVE = 0.30
-MAX_POSITIONS = 10
+MAX_POSITIONS = 50
 PROFIT_BANK_PCT = 0.20
 PAPER_STARTING_BALANCE = 20.00
 PAPER_RESET_TIME = '2026-03-23T20:40:00Z'
-
-# === SERIES TO SCAN ===
-CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
-INDEX_SERIES = ['KXINX', 'KXINXD', 'KXINXU', 'KXNASDAQ100', 'KXNASDAQ100U', 'KXNASDAQ100D']
-ALL_SERIES = CRYPTO_SERIES + INDEX_SERIES
 
 # Sports patterns to dump on startup (no longer trading these)
 SPORTS_DUMP_PATTERNS = ['NBAGAME', 'NCAAMBGAME', 'TENNIS', 'MLB', 'NHL']
@@ -348,13 +343,25 @@ def find_buy_candidates(markets):
 
 def fetch_all_markets():
     all_markets = []
-    for series in ALL_SERIES:
+    cursor = None
+    pages = 0
+    max_pages = 3
+    while pages < max_pages:
         try:
-            resp = kalshi_get(f'/markets?series_ticker={series}&status=open&limit=200')
-            all_markets.extend(resp.get('markets', []))
+            path = '/markets?status=open&limit=1000'
+            if cursor:
+                path += f'&cursor={cursor}'
+            resp = kalshi_get(path)
+            batch = resp.get('markets', [])
+            all_markets.extend(batch)
+            pages += 1
+            cursor = resp.get('cursor')
+            if not cursor or len(batch) < 1000:
+                break
         except Exception as e:
-            logger.error(f"Fetch {series} failed: {e}")
-    logger.info(f"Fetched {len(all_markets)} markets from {len(ALL_SERIES)} series")
+            logger.error(f"Fetch all markets page {pages+1} failed: {e}")
+            break
+    logger.info(f"Fetched {len(all_markets)} markets across {pages} pages")
     return all_markets
 
 
@@ -375,6 +382,12 @@ def _update_hot_markets(markets):
         }
         for m in by_vol
     ]
+    for h in by_vol[:10]:
+        vol = _get_volume(h)
+        ticker = h.get('ticker', '')
+        yes = h.get('yes_ask_dollars', '?')
+        no = h.get('no_ask_dollars', '?')
+        logger.info(f"HOT: {ticker} vol={vol} yes=${yes} no=${no}")
 
 
 # === CANCEL ALL RESTING ORDERS ===
@@ -1024,8 +1037,8 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item"><span class="live-dot dot-paper" id="status-dot"></span> <span id="status-mode">PAPER</span></div>
   <div class="status-item">Buy: 3-50c, bid exists</div>
   <div class="status-item">Sell: half@100%, full@200%, expiry@25%</div>
-  <div class="status-item">Max: 3 contracts, 10 positions</div>
-  <div class="status-item">Series: Crypto + Stock Index Brackets</div>
+  <div class="status-item">Max: 3 contracts, 50 positions</div>
+  <div class="status-item">Series: ALL (auto-discover by volume)</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
 <div class="footer">Clean Reset &mdash; auto-refresh 15s</div>
@@ -1197,9 +1210,8 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- half at 100%, full at 200%, 10s cycles, crypto + index brackets")
-    logger.info(f"Series: {ALL_SERIES}")
-    logger.info(f"Settings: price=${BUY_MIN}-${BUY_MAX}, filter=price+bid only")
+    logger.info(f"Bot starting [{mode}] -- half at 100%, full at 200%, 10s cycles, scan ALL markets")
+    logger.info(f"Settings: price=${BUY_MIN}-${BUY_MAX}, filter=price+bid only, auto-discover by volume")
     logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, {MAX_DEPLOYMENT_PCT:.0%} max deploy, {MIN_CASH_RESERVE:.0%} cash reserve, {MAX_POSITIONS} max positions")
 
     cancel_all_resting()
