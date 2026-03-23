@@ -37,14 +37,21 @@ def sf(val):
 # === STARTUP: CLOSE OLD POSITIONS ===
 
 def close_all_old_positions():
-    """Mark all existing open positions as resolved. Run ONCE at startup."""
+    """Mark all existing open positions as resolved and clean up fake records. Run ONCE at startup."""
     try:
+        # Delete any fake sell records from previous mass-close attempts
+        del_result = db.table('trades').delete().eq('reason', 'CLOSED — nuclear reset').execute()
+        deleted = len(del_result.data) if del_result.data else 0
+        if deleted:
+            logger.info(f"Deleted {deleted} fake close records")
+
+        # Mark remaining open buys as resolved (pnl=0, not a sell — just resolved)
         result = db.table('trades').update({
             'pnl': 0.0,
-            'reason': 'CLOSED — nuclear reset',
+            'reason': 'RESOLVED — fresh start',
         }).eq('action', 'buy').is_('pnl', 'null').execute()
         closed = len(result.data) if result.data else 0
-        logger.info(f"Closed {closed} old positions — starting fresh")
+        logger.info(f"Resolved {closed} old positions — starting fresh at $50")
     except Exception as e:
         logger.info(f"Close old positions: {e}")
 
@@ -373,11 +380,7 @@ def check_positions():
 
         elif gain_pct > 0 and net_pnl <= 0:
             logger.info(f"SKIP: {ticker} {side} +{gain_pct:.0f}% but net=${net_pnl:.4f} (fees eat profit)")
-
-        # === STOP LOSS — only allowed loss sell ===
-        stop = -30 if strategy == 'crypto' else -50
-        if gain_pct <= stop:
-            sell(trade, current_bid, f"STOP LOSS {gain_pct:.0f}% ({entry_price:.2f}->{current_bid:.2f})")
+        # No stop loss — hold forever. A 3¢ contract can't lose more than 3¢ but can pay $1.
 
 
 # === MAIN CYCLE ===
