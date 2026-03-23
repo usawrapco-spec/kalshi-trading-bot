@@ -32,7 +32,7 @@ MIN_CASH_RESERVE = 0.30
 MAX_POSITIONS = 10
 PROFIT_BANK_PCT = 0.20
 PAPER_STARTING_BALANCE = 20.00
-PAPER_RESET_TIME = '2026-03-23T21:55:00Z'
+PAPER_RESET_TIME = '2026-03-23T21:00:00Z'
 
 # === SERIES TO SCAN (crypto hourly brackets only — 19W/0L) ===
 ALL_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
@@ -236,8 +236,7 @@ def get_balance():
 def get_owned():
     try:
         result = db.table('trades').select('ticker') \
-            .eq('action', 'buy').is_('pnl', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
+            .eq('action', 'buy').is_('pnl', 'null').execute()
         return {t['ticker'] for t in (result.data or [])}
     except Exception as e:
         logger.error(f"get_owned failed: {e}")
@@ -252,8 +251,8 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # +50% → SELL ALL (fast turnover, recycle cash)
-    if gain_pct >= 50:
+    # +100% → SELL ALL (clears fees easily)
+    if gain_pct >= 100:
         return True, count, f"SELL +{gain_pct:.0f}%"
 
     # Expiry save — 1 min left + any profit → SELL ALL
@@ -448,7 +447,7 @@ def sync_with_kalshi():
 
 def check_sells():
     global banked_profit
-    logger.info("check_sells() -- sell at 50%, expiry save >0% @ 1min")
+    logger.info("check_sells() -- sell at 100%, expiry save >0% @ 1min")
     try:
         open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null') \
