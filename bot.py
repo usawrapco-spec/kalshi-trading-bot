@@ -16,8 +16,10 @@ PORT = int(os.environ.get('PORT', 8080))
 MIN_PRICE = 0.03
 MAX_PRICE = 0.15
 TAKE_PROFIT_PCT = 100
-CYCLE_SECONDS = 60
+CYCLE_SECONDS = 30
 STARTING_BALANCE = 10.00
+
+CRYPTO_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M"]
 
 WEATHER_SERIES = [
     "KXHIGHNY", "KXHIGHCHI", "KXHIGHMIA", "KXHIGHLAX", "KXHIGHDEN",
@@ -27,8 +29,6 @@ WEATHER_SERIES = [
     "KXLOWTNYC", "KXLOWTCHI", "KXLOWTMIA", "KXLOWTLAX", "KXLOWTDEN",
     "KXLOWTAUS", "KXLOWTPHIL"
 ]
-
-CRYPTO_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M"]
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -47,32 +47,25 @@ def sf(val):
 # === BALANCE ===
 
 def get_balance():
-    """Returns (trading_balance, saved_amount).
-
-    saved = 25% of all positive sell pnl (never reinvested)
-    trading = $10 - open_cost + 75% of positive sell pnl + all negative pnl
-    """
+    """Returns (trading_balance, saved_amount)."""
     open_buys = db.table('trades').select('price,count') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
     open_cost = sum(sf(t['price']) * (t['count'] or 1) for t in (open_buys.data or []))
 
-    # Sells with pnl
     sells = db.table('trades').select('pnl') \
         .eq('action', 'sell').not_.is_('pnl', 'null').execute()
     sell_pnls = [sf(t['pnl']) for t in (sells.data or [])]
 
-    # Settled/expired buys (pnl set by settlement)
     settled = db.table('trades').select('pnl') \
         .eq('action', 'buy').not_.is_('pnl', 'null').execute()
     settled_pnls = [sf(t['pnl']) for t in (settled.data or [])]
 
     all_pnls = sell_pnls + settled_pnls
-    positive_pnl = sum(p for p in all_pnls if p > 0)
-    negative_pnl = sum(p for p in all_pnls if p < 0)
+    total_profit = sum(p for p in all_pnls if p > 0)
+    total_loss = abs(sum(p for p in all_pnls if p < 0))
 
-    total_loss = abs(negative_pnl)
-    saved = round(0.25 * positive_pnl, 4)
-    trading = round(STARTING_BALANCE - open_cost - saved + 0.75 * positive_pnl - total_loss, 2)
+    saved = round(total_profit * 0.25, 4)
+    trading = round(STARTING_BALANCE - open_cost + total_profit * 0.75 - total_loss, 2)
 
     return trading, saved
 
@@ -104,16 +97,27 @@ def get_series_markets(series_ticker):
         return []
 
 
+def get_trending_markets():
+    """Get top 200 open markets (sorted by volume on Kalshi's end)."""
+    try:
+        resp = kalshi_get("/markets?status=open&limit=200")
+        return resp.get('markets', [])
+    except Exception as e:
+        logger.error(f"get_trending_markets failed: {e}")
+        return []
+
+
 # === PAPER TRADING ===
 
 def buy(ticker, side, price, strategy, reason):
-    """Paper buy 1 contract. Returns True on success."""
+    """Paper buy 1 contract."""
     logger.info(f"BUY: {ticker} {side} @ ${price:.2f} | {reason}")
     try:
         db.table('trades').insert({
             'ticker': ticker, 'side': side, 'action': 'buy',
             'price': float(price), 'count': 1,
             'strategy': strategy, 'reason': reason,
+            'last_seen_bid': float(price),
         }).execute()
         return True
     except Exception as e:
@@ -122,7 +126,7 @@ def buy(ticker, side, price, strategy, reason):
 
 
 def sell(trade, current_bid, reason):
-    """Paper sell a position. Updates original buy row with P&L."""
+    """Paper sell. Insert sell row + update original buy's pnl."""
     entry_price = sf(trade['price'])
     pnl = round((current_bid - entry_price) * (trade['count'] or 1), 4)
 
@@ -142,7 +146,7 @@ def sell(trade, current_bid, reason):
 
 
 def log_settlement(trade, pnl, label):
-    """Record a settled/expired contract result on the original buy."""
+    """Record a settled/expired contract on the original buy."""
     try:
         db.table('trades').update({
             'pnl': float(round(pnl, 4)),
@@ -156,7 +160,7 @@ def log_settlement(trade, pnl, label):
 # === POSITION MONITOR ===
 
 def check_positions():
-    """Check all open buys — sell winners at 100%+ (doubled), hold losers, record settlements."""
+    """Check open buys — smart sell at 100%+ when momentum fades, record settlements."""
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -186,7 +190,7 @@ def check_positions():
                 log_settlement(trade, pnl, "LOSS — expired worthless")
             continue
 
-        # Take profit check
+        # Get current bid (what we'd sell for)
         if side == 'yes':
             current_bid = float(market.get('yes_bid_dollars', '0') or '0')
         else:
@@ -196,60 +200,69 @@ def check_positions():
             continue
 
         pct = ((current_bid - entry_price) / entry_price) * 100
+        last_seen = sf(trade.get('last_seen_bid'))
+
         if pct >= TAKE_PROFIT_PCT:
-            sell(trade, current_bid, f"TAKE PROFIT +{pct:.0f}% ({entry_price:.2f}->{current_bid:.2f})")
-        # No stop loss — hold until pump or expiry
+            if current_bid > last_seen and last_seen > 0:
+                # Still climbing — hold for more gains
+                logger.info(f"HOLD: {ticker} {side} +{pct:.0f}% — still climbing ({last_seen:.2f}->{current_bid:.2f})")
+                db.table('trades').update({'last_seen_bid': float(current_bid)}).eq('id', trade['id']).execute()
+            else:
+                # Peaked or dropping — sell now
+                sell(trade, current_bid, f"TAKE PROFIT +{pct:.0f}% peaked ({entry_price:.2f}->{current_bid:.2f})")
+        else:
+            # Not at 100% yet, just update last_seen_bid
+            db.table('trades').update({'last_seen_bid': float(current_bid)}).eq('id', trade['id']).execute()
 
 
 # === SCANNER ===
 
+def try_buy(market, side, field, strategy, owned, trading_bal):
+    """Try to buy one side of a market if cheap and not owned. Returns (bought, cost)."""
+    ticker = market.get('ticker', '')
+    ask = float(market.get(field, '0') or '0')
+    if MIN_PRICE <= ask <= MAX_PRICE and (ticker, side) not in owned:
+        if ask <= trading_bal:
+            if buy(ticker, side, ask, strategy, f"{strategy.title()}: {side.upper()} @ ${ask:.2f}"):
+                owned.add((ticker, side))
+                return True, ask
+    return False, 0
+
+
 def scan_and_buy():
-    """Scan weather + crypto markets, buy 1 of every cheap contract we don't own."""
+    """Scan crypto, trending, and weather markets. Buy cheap contracts."""
     trading_bal, _ = get_balance()
     logger.info(f"Paper balance: ${trading_bal:.2f}")
 
-    # Get all open positions to avoid duplicates
     open_positions = db.table('trades').select('ticker,side') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
     owned = {(t['ticker'], t['side']) for t in (open_positions.data or [])}
-
     bought = 0
 
-    # Weather markets
-    for series in WEATHER_SERIES:
-        markets = get_series_markets(series)
+    def scan_markets(markets, strategy):
+        nonlocal trading_bal, bought
         for market in markets:
             ticker = market.get('ticker', '')
             if 'KXMVE' in ticker or market.get('status') != 'open':
                 continue
-
             for side, field in [('yes', 'yes_ask_dollars'), ('no', 'no_ask_dollars')]:
-                ask = float(market.get(field, '0') or '0')
-                if MIN_PRICE <= ask <= MAX_PRICE and (ticker, side) not in owned:
-                    if ask > trading_bal:
-                        continue
-                    if buy(ticker, side, ask, 'weather', f"Weather: {side.upper()} @ ${ask:.2f}"):
-                        owned.add((ticker, side))
-                        trading_bal -= ask
-                        bought += 1
+                ok, cost = try_buy(market, side, field, strategy, owned, trading_bal)
+                if ok:
+                    trading_bal -= cost
+                    bought += 1
 
-    # Crypto 15-min markets
+    # Priority 1: Crypto 15-min
     for series in CRYPTO_SERIES:
-        markets = get_series_markets(series)
-        for market in markets:
-            ticker = market.get('ticker', '')
-            if 'KXMVE' in ticker or market.get('status') != 'open':
-                continue
+        scan_markets(get_series_markets(series), 'crypto')
 
-            for side, field in [('yes', 'yes_ask_dollars'), ('no', 'no_ask_dollars')]:
-                ask = float(market.get(field, '0') or '0')
-                if MIN_PRICE <= ask <= MAX_PRICE and (ticker, side) not in owned:
-                    if ask > trading_bal:
-                        continue
-                    if buy(ticker, side, ask, 'crypto', f"Crypto: {side.upper()} @ ${ask:.2f}"):
-                        owned.add((ticker, side))
-                        trading_bal -= ask
-                        bought += 1
+    # Priority 2: Trending/high-volume
+    trending = get_trending_markets()
+    trending.sort(key=lambda m: float(m.get('volume_24h_fp', '0') or '0'), reverse=True)
+    scan_markets(trending, 'trending')
+
+    # Priority 3: Weather
+    for series in WEATHER_SERIES:
+        scan_markets(get_series_markets(series), 'weather')
 
     logger.info(f"Scan complete: bought {bought} contracts, balance now ${trading_bal:.2f}")
 
@@ -278,10 +291,11 @@ DASHBOARD_HTML = """
     <title>Kalshi Scalp Bot</title>
     <meta http-equiv="refresh" content="30">
     <style>
-        body { background: #0a0a0f; color: #e8e8e8; font-family: monospace; padding: 20px; max-width: 900px; margin: 0 auto; }
+        body { background: #0a0a0f; color: #e8e8e8; font-family: monospace; padding: 20px; max-width: 960px; margin: 0 auto; }
         .panel { background: #1a1a2e; border-radius: 8px; padding: 20px; margin: 10px 0; }
         .green { color: #2ecc71; }
         .red { color: #e74c3c; }
+        .yellow { color: #f1c40f; }
         h1 { color: #e63946; }
         h2 { color: #457b9d; margin: 0 0 10px 0; }
         table { width: 100%; border-collapse: collapse; margin: 10px 0; }
@@ -290,27 +304,44 @@ DASHBOARD_HTML = """
         .stat { font-size: 24px; font-weight: bold; }
         .row { display: flex; gap: 20px; flex-wrap: wrap; }
         .col { flex: 1; min-width: 200px; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+        .badge-crypto { background: #f39c12; color: #000; }
+        .badge-trending { background: #9b59b6; color: #fff; }
+        .badge-weather { background: #3498db; color: #fff; }
     </style>
 </head>
 <body>
-    <h1>KALSHI SCALP BOT (paper)</h1>
+    <h1>KALSHI SCALP BOT — Paper Trading</h1>
     <div class="row">
         <div class="col panel">
             <h2>BALANCE</h2>
-            <div>Trading: <span class="stat {{ 'green' if trading_bal >= 10 else 'red' }}">${{ trading_bal }}</span></div>
+            <div>Trading: <span class="stat {{ 'green' if trading_bal|float >= 10 else 'red' }}">${{ trading_bal }}</span></div>
             <div>Saved: <span class="green">${{ saved }}</span></div>
+            <div style="color:#888; margin-top:4px">Started: $10.00</div>
         </div>
         <div class="col panel">
-            <h2>STATS</h2>
-            <div>Open: <span class="stat">{{ open_count }}</span></div>
+            <h2>PERFORMANCE</h2>
+            <div>Total P&L: <span class="stat {{ 'green' if total_pnl|float >= 0 else 'red' }}">${{ total_pnl }}</span></div>
+            <div>Open: {{ open_count }} positions</div>
             <div>Wins: <span class="green">{{ wins }}</span> | Losses: <span class="red">{{ losses }}</span> | Win rate: {{ win_rate }}%</div>
-            <div>Total P&L: <span class="{{ 'green' if total_pnl >= 0 else 'red' }}">${{ total_pnl }}</span></div>
+        </div>
+    </div>
+    <div class="panel">
+        <h2>BY STRATEGY</h2>
+        <div class="row">
+            {% for s in strategies %}
+            <div class="col" style="text-align:center">
+                <span class="badge badge-{{ s.name }}">{{ s.name }}</span><br>
+                <span style="font-size:18px; {{ 'color:#2ecc71' if s.pnl >= 0 else 'color:#e74c3c' }}">${{ "%.2f"|format(s.pnl) }}</span><br>
+                <span style="color:#888">{{ s.wins }}W / {{ s.losses }}L</span>
+            </div>
+            {% endfor %}
         </div>
     </div>
     <div class="panel">
         <h2>RECENT TRADES</h2>
         <table>
-            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Price</th><th>P&L</th><th>Reason</th></tr>
+            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Price</th><th>P&L</th><th>Strategy</th></tr>
             {% for t in trades %}
             <tr>
                 <td>{{ t.time }}</td>
@@ -319,7 +350,7 @@ DASHBOARD_HTML = """
                 <td>{{ t.side }}</td>
                 <td>${{ t.price }}</td>
                 <td class="{{ 'green' if t.pnl and t.pnl > 0 else 'red' if t.pnl and t.pnl < 0 else '' }}">{{ ("$%.4f"|format(t.pnl)) if t.pnl else "---" }}</td>
-                <td>{{ t.reason }}</td>
+                <td><span class="badge badge-{{ t.strategy }}">{{ t.strategy }}</span></td>
             </tr>
             {% endfor %}
         </table>
@@ -339,10 +370,9 @@ def dashboard():
     try:
         trading_bal, saved = get_balance()
 
-        all_trades = db.table('trades').select('*').order('created_at', desc=True).limit(50).execute()
+        all_trades = db.table('trades').select('*').order('created_at', desc=True).limit(100).execute()
         trades = all_trades.data or []
 
-        # Closed trades = sells + settled buys (buys with pnl set)
         sells = [t for t in trades if t['action'] == 'sell' and t.get('pnl') is not None]
         settled_buys = [t for t in trades if t['action'] == 'buy' and t.get('pnl') is not None]
         closed = sells + settled_buys
@@ -353,8 +383,20 @@ def dashboard():
         open_count = sum(1 for t in trades if t['action'] == 'buy' and t.get('pnl') is None)
         win_rate = round(wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
 
+        # Strategy breakdown
+        strat_names = ['crypto', 'trending', 'weather']
+        strategies = []
+        for name in strat_names:
+            s_closed = [t for t in closed if t.get('strategy') == name]
+            strategies.append({
+                'name': name,
+                'pnl': sum(sf(t['pnl']) for t in s_closed),
+                'wins': sum(1 for t in s_closed if sf(t['pnl']) > 0),
+                'losses': sum(1 for t in s_closed if sf(t['pnl']) < 0),
+            })
+
         trades_display = []
-        for t in trades[:30]:
+        for t in trades[:40]:
             trades_display.append({
                 'time': (t.get('created_at') or '')[:19],
                 'action': t['action'].upper(),
@@ -362,7 +404,7 @@ def dashboard():
                 'side': t['side'],
                 'price': f"{sf(t['price']):.2f}",
                 'pnl': sf(t['pnl']) if t.get('pnl') is not None else None,
-                'reason': (t.get('reason') or '')[:60],
+                'strategy': t.get('strategy') or '',
             })
 
         return render_template_string(DASHBOARD_HTML,
@@ -373,6 +415,7 @@ def dashboard():
             losses=losses,
             win_rate=win_rate,
             total_pnl=f"{total_pnl:.2f}",
+            strategies=strategies,
             trades=trades_display,
         )
     except Exception as e:
@@ -382,7 +425,7 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — paper trading mode")
+    logger.info("Bot starting — paper trading, 30s cycles")
     while True:
         try:
             run_cycle()

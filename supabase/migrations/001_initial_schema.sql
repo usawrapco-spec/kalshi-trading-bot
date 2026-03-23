@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS trades (
     pnl NUMERIC,
     strategy TEXT,
     reason TEXT,
+    last_seen_bid NUMERIC,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
