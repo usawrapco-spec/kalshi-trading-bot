@@ -18,15 +18,19 @@ MIN_PRICE = 0.02
 MAX_PRICE = 0.50
 CYCLE_SECONDS = 30
 
-# === AGGRESSIVE DEPLOYMENT ===
+# === CONSERVATIVE DEPLOYMENT (reverted — 10-contract trades caused $21 swing) ===
 MAX_DEPLOYMENT_PCT = 0.75       # Deploy up to 75% of balance
 MIN_CASH_RESERVE_PCT = 0.25     # 25% protected (saved profits live here)
-MAX_CONTRACTS_PER_TRADE = 10
-MIN_CONTRACTS_PER_TRADE = 3
+MAX_CONTRACTS_PER_TRADE = 3     # Hard cap 3 (was 10 — one bad expiry wiped 10 wins)
+MIN_CONTRACTS_PER_TRADE = 1     # Allow 1-contract trades
 MAX_SPEND_PER_TRADE_PCT = 0.10  # Max 10% of trading_balance per trade
 MAX_SPEND_PER_CYCLE = 25
 MAX_TRADES_PER_CYCLE = 10
 MAX_OPEN_POSITIONS = 200
+
+# === SELL THRESHOLDS ===
+BASE_SELL_PCT = 50              # Sell at 50% gain (proven profitable)
+EXPIRY_SELL_SECONDS = 300       # Sell anything profitable with <5 min to expiry
 
 # === PROFIT COMPOUNDING ===
 PROFIT_SAVE_PCT = 0.20          # 20% of every win gets banked permanently
@@ -304,17 +308,12 @@ def fetch_march_madness():
 # === BUY LOGIC ===
 
 def calculate_position_size(contract_price, available_balance, volume=0, strategy='crypto'):
-    """Deploy more capital per trade. Target 8% of balance per trade.
-    Cheap contracts = more contracts. Floor 3, cap 10.
-    For MM: cap at 5 if moderate volume (<500)."""
-    target_spend = available_balance * 0.08
+    """Conservative sizing: default 2 contracts, max 3. One bad expiry shouldn't wipe gains."""
     if contract_price <= 0:
-        return MIN_CONTRACTS_PER_TRADE
+        return 2
+    target_spend = available_balance * 0.05  # 5% of balance (was 8%)
     max_contracts = int(target_spend / contract_price)
-    contracts = max(MIN_CONTRACTS_PER_TRADE, min(max_contracts, MAX_CONTRACTS_PER_TRADE))
-    if strategy == 'mm_scalp' and volume < 500:
-        contracts = min(contracts, 5)
-    return contracts
+    return max(MIN_CONTRACTS_PER_TRADE, min(max_contracts, MAX_CONTRACTS_PER_TRADE))
 
 
 def buy_priority(ticker, strategy='crypto'):
@@ -448,13 +447,10 @@ def run_buys(markets, strategy='crypto'):
     logger.info(f"[{strategy}] Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
 
 
-# === SELL LOGIC — ADAPTIVE THRESHOLD, HANDLE SETTLEMENTS ===
+# === SELL LOGIC — 50% BASE + MOMENTUM RIDING + 5-MIN EXPIRY SELL ===
 
 sell_history = []  # Rolling last 20 sell gain percentages
 peak_bids = {}     # trade_id -> highest bid seen, for trailing stop
-
-TRAILING_STOP_PCT = 0.50  # Sell if price drops to 50% of peak gain
-TRAILING_STOP_ACTIVATE = 50  # Only activate trailing stop after 50% gain
 
 
 def get_time_to_expiry(market):
@@ -463,7 +459,6 @@ def get_time_to_expiry(market):
     if not close_time_str:
         return None
     try:
-        # Kalshi returns ISO 8601 timestamps
         close_time_str = close_time_str.replace('Z', '+00:00')
         close_time = datetime.fromisoformat(close_time_str)
         now = datetime.now(timezone.utc)
@@ -473,50 +468,37 @@ def get_time_to_expiry(market):
 
 
 def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
-    """Tiered profit-taking + trailing stop + emergency exit.
+    """Simple sell logic: 50% base, ride momentum, always exit before expiry.
     Returns (should_sell, sell_qty, reason)."""
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # Track peak bid for trailing stop
+    # Track peak bid for momentum riding
     prev_peak = peak_bids.get(trade_id, current_bid)
     if current_bid > prev_peak:
         peak_bids[trade_id] = current_bid
     peak = peak_bids.get(trade_id, current_bid)
     peak_gain_pct = ((peak - entry_price) / entry_price) * 100
 
-    # === EMERGENCY EXIT: < 60 seconds to expiry, dump everything ===
-    if time_to_expiry is not None and time_to_expiry < 60 and gain_pct > 0:
-        return True, count, f"EMERGENCY EXIT <60s, locking +{gain_pct:.0f}%"
-
-    # === EXPIRY APPROACHING: < 120 seconds, sell all if profitable ===
-    if time_to_expiry is not None and time_to_expiry < 120 and gain_pct > 0:
-        return True, count, f"EXPIRY <2min, locking +{gain_pct:.0f}%"
-
-    # === TRAILING STOP: once up 50%+, sell if dropped to 50% of peak ===
-    if peak_gain_pct >= TRAILING_STOP_ACTIVATE and gain_pct > 0:
-        trailing_threshold = peak_gain_pct * TRAILING_STOP_PCT
-        if gain_pct <= trailing_threshold:
-            return True, count, f"TRAILING STOP: peak +{peak_gain_pct:.0f}% -> now +{gain_pct:.0f}%"
+    # === #1 PRIORITY: EXPIRY SELL — any profit with <5 min left, DUMP IT ===
+    if time_to_expiry is not None and time_to_expiry < EXPIRY_SELL_SECONDS and gain_pct > 0:
+        return True, count, f"EXPIRY SELL <5min, locking +{gain_pct:.0f}% ({int(time_to_expiry)}s left)"
 
     # === NEVER sell at a loss ===
     if gain_pct <= 0 or current_bid <= entry_price:
         return False, 0, None
 
-    # === SINGLE CONTRACT: hold for 150% minimum ===
-    if count == 1:
-        if gain_pct >= 150:
-            return True, 1, f"PROFIT +{gain_pct:.0f}% (single contract, 150% target)"
+    # === MOMENTUM RIDING: if we're past 50%, let it ride but protect gains ===
+    # Once past 100%, use trailing stop at 50% of peak to let big runs develop
+    if peak_gain_pct >= 100 and gain_pct >= 50:
+        trailing_floor = peak_gain_pct * 0.50
+        if gain_pct <= trailing_floor:
+            return True, count, f"TRAILING STOP: peak +{peak_gain_pct:.0f}% -> now +{gain_pct:.0f}%"
+        # Still above trailing floor — let it ride
         return False, 0, None
 
-    # === MULTI-CONTRACT: tiered exits ===
-    if gain_pct >= 300:
-        return True, count, f"MOONSHOT +{gain_pct:.0f}% — selling all {count}"
-    if gain_pct >= 200:
-        sell_qty = max(1, count // 3)
-        return True, sell_qty, f"TIER 2: +{gain_pct:.0f}% — partial {sell_qty}/{count}"
-    if gain_pct >= 100:
-        sell_qty = max(1, count // 3)
-        return True, sell_qty, f"TIER 1: +{gain_pct:.0f}% — partial {sell_qty}/{count}"
+    # === BASE THRESHOLD: sell at 50%+ gain ===
+    if gain_pct >= BASE_SELL_PCT:
+        return True, count, f"PROFIT +{gain_pct:.0f}% (>={BASE_SELL_PCT}% target)"
 
     return False, 0, None
 
@@ -573,9 +555,9 @@ def execute_sell(trade, ticker, side, entry_price, current_bid, sell_qty, total_
 
 
 def check_sells():
-    """Tiered exits, trailing stop, emergency dump. Never sell at a loss."""
+    """50% base sell + momentum riding + 5-min expiry sell. Never sell at a loss."""
     global sell_history
-    logger.info("check_sells() called — tiered exits + trailing stop")
+    logger.info("check_sells() called — 50% base + momentum riding + 5-min expiry")
 
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -754,7 +736,7 @@ DASHBOARD_HTML = """
 <body>
     <div class="header">
         <h1>SCALP BOT</h1>
-        <div class="subtitle">LIVE — 30s cycles — Crypto + March Madness — Tiered exits + trailing stop + 20% profit banking</div>
+        <div class="subtitle">LIVE — 30s cycles — Crypto + March Madness — 50% sell + momentum riding + 5-min expiry exit + 20% banking</div>
     </div>
     <div class="stats">
         <div class="stat-box"><div class="stat-label">Balance</div><div class="stat-value green">${{balance}}</div></div>
@@ -872,7 +854,7 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — LIVE TRADING — crypto + March Madness — tiered exits + trailing stop + 20% profit banking")
+    logger.info("Bot starting — LIVE TRADING — crypto + March Madness — 50% sell + momentum riding + 5-min expiry exit")
     close_all_old_positions()
     while True:
         try:
