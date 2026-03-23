@@ -1,4 +1,5 @@
 import os, time, logging, math, requests, traceback
+from datetime import datetime, timezone
 from flask import Flask, render_template_string
 from threading import Thread
 from supabase import create_client
@@ -15,9 +16,17 @@ PORT = int(os.environ.get('PORT', 8080))
 
 MIN_PRICE = 0.02
 MAX_PRICE = 0.50
-MAX_BUYS_PER_CYCLE = 50
 CYCLE_SECONDS = 30
-RESERVE_BALANCE = 3.00
+
+# === AGGRESSIVE DEPLOYMENT ===
+MAX_DEPLOYMENT_PCT = 0.80       # Deploy up to 80% of balance
+MIN_CASH_RESERVE_PCT = 0.20     # Keep 20% cash
+MAX_CONTRACTS_PER_TRADE = 10
+MIN_CONTRACTS_PER_TRADE = 3
+MAX_SPEND_PER_TRADE_PCT = 0.10  # Max 10% of balance on single trade
+MAX_SPEND_PER_CYCLE = 20        # $ max spend per cycle
+MAX_TRADES_PER_CYCLE = 10
+MAX_OPEN_POSITIONS = 200
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -188,13 +197,14 @@ def fetch_all_crypto():
 
 # === BUY LOGIC ===
 
-def get_buy_count(ticker):
-    """More contracts on proven winners."""
-    if 'KXBTCD' in ticker:
-        return 3    # BTC daily = 92.7% avg win
-    if ticker.startswith('KXBTC-') or ticker.startswith('KXETH-'):
-        return 2    # BTC/ETH brackets = ~47% avg win
-    return 1
+def calculate_position_size(contract_price, available_balance):
+    """Deploy more capital per trade. Target 8% of balance per trade.
+    Cheap contracts = more contracts. Floor 3, cap 10."""
+    target_spend = available_balance * 0.08
+    if contract_price <= 0:
+        return MIN_CONTRACTS_PER_TRADE
+    max_contracts = int(target_spend / contract_price)
+    return max(MIN_CONTRACTS_PER_TRADE, min(max_contracts, MAX_CONTRACTS_PER_TRADE))
 
 
 def buy_priority(ticker):
@@ -212,7 +222,12 @@ def buy_priority(ticker):
 def run_buys(markets):
     balance = get_balance()
     owned = get_owned()
-    logger.info(f"Own {len(owned)} tickers, balance ${balance:.2f}")
+    num_open = len(owned)
+    logger.info(f"Own {num_open} tickers, balance ${balance:.2f}")
+
+    if num_open >= MAX_OPEN_POSITIONS:
+        logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
+        return
 
     buys = []
     for m in markets:
@@ -240,7 +255,7 @@ def run_buys(markets):
         # Pick side with tightest spread
         candidates.sort(key=lambda x: x[3])
         side, price, bid, spread = candidates[0]
-        count = get_buy_count(ticker)
+        count = calculate_position_size(price, balance)
 
         buys.append({
             'ticker': ticker, 'side': side, 'price': price,
@@ -250,10 +265,10 @@ def run_buys(markets):
     # Sort by priority (BTC daily first) then tightest spread
     buys.sort(key=lambda x: (buy_priority(x['ticker']), x['spread']))
 
-    # Exposure limits: max 40% of balance, max 5% per trade
-    max_exposure = min(balance * 0.4, 45.0)
-    max_per_trade = min(balance * 0.05, 2.0)
-    deployed = sum(b['price'] * b['count'] for b in buys[:0])  # will track below
+    # Aggressive deployment: 80% of balance, 10% per trade
+    max_exposure = balance * MAX_DEPLOYMENT_PCT
+    max_per_trade = balance * MAX_SPEND_PER_TRADE_PCT
+    reserve = balance * MIN_CASH_RESERVE_PCT
 
     # Get current deployed
     open_buys = db.table('trades').select('price,count') \
@@ -261,17 +276,25 @@ def run_buys(markets):
     current_deployed = sum(sf(t['price']) * (t['count'] or 1) for t in (open_buys.data or []))
 
     bought = 0
+    cycle_spent = 0.0
     for b in buys:
-        if bought >= MAX_BUYS_PER_CYCLE:
+        if bought >= MAX_TRADES_PER_CYCLE:
             break
-        if balance < RESERVE_BALANCE:
+        if cycle_spent >= MAX_SPEND_PER_CYCLE:
+            break
+        if num_open + bought >= MAX_OPEN_POSITIONS:
             break
         cost = b['price'] * b['count']
         if cost > max_per_trade:
-            continue
+            # Try fewer contracts instead of skipping entirely
+            affordable = int(max_per_trade / b['price'])
+            if affordable < MIN_CONTRACTS_PER_TRADE:
+                continue
+            b['count'] = affordable
+            cost = b['price'] * b['count']
         if current_deployed + cost > max_exposure:
             continue
-        if cost > balance - RESERVE_BALANCE:
+        if cost > balance - reserve:
             continue
 
         # Place real Kalshi order
@@ -292,30 +315,138 @@ def run_buys(markets):
             owned.add(b['ticker'])
             balance -= cost
             current_deployed += cost
+            cycle_spent += cost
             bought += 1
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
 
-    logger.info(f"Bought {bought}, balance ${balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
+    logger.info(f"Bought {bought}, spent ${cycle_spent:.2f}, balance ${balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
 
 
 # === SELL LOGIC — ADAPTIVE THRESHOLD, HANDLE SETTLEMENTS ===
 
 sell_history = []  # Rolling last 20 sell gain percentages
+peak_bids = {}     # trade_id -> highest bid seen, for trailing stop
+
+TRAILING_STOP_PCT = 0.50  # Sell if price drops to 50% of peak gain
+TRAILING_STOP_ACTIVATE = 50  # Only activate trailing stop after 50% gain
+
+
+def get_time_to_expiry(market):
+    """Returns seconds until market closes, or None if unknown."""
+    close_time_str = market.get('close_time') or market.get('expiration_time')
+    if not close_time_str:
+        return None
+    try:
+        # Kalshi returns ISO 8601 timestamps
+        close_time_str = close_time_str.replace('Z', '+00:00')
+        close_time = datetime.fromisoformat(close_time_str)
+        now = datetime.now(timezone.utc)
+        return max(0, (close_time - now).total_seconds())
+    except:
+        return None
+
+
+def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
+    """Tiered profit-taking + trailing stop + emergency exit.
+    Returns (should_sell, sell_qty, reason)."""
+    gain_pct = ((current_bid - entry_price) / entry_price) * 100
+
+    # Track peak bid for trailing stop
+    prev_peak = peak_bids.get(trade_id, current_bid)
+    if current_bid > prev_peak:
+        peak_bids[trade_id] = current_bid
+    peak = peak_bids.get(trade_id, current_bid)
+    peak_gain_pct = ((peak - entry_price) / entry_price) * 100
+
+    # === EMERGENCY EXIT: < 60 seconds to expiry, dump everything ===
+    if time_to_expiry is not None and time_to_expiry < 60 and gain_pct > 0:
+        return True, count, f"EMERGENCY EXIT <60s, locking +{gain_pct:.0f}%"
+
+    # === EXPIRY APPROACHING: < 120 seconds, sell all if profitable ===
+    if time_to_expiry is not None and time_to_expiry < 120 and gain_pct > 0:
+        return True, count, f"EXPIRY <2min, locking +{gain_pct:.0f}%"
+
+    # === TRAILING STOP: once up 50%+, sell if dropped to 50% of peak ===
+    if peak_gain_pct >= TRAILING_STOP_ACTIVATE and gain_pct > 0:
+        trailing_threshold = peak_gain_pct * TRAILING_STOP_PCT
+        if gain_pct <= trailing_threshold:
+            return True, count, f"TRAILING STOP: peak +{peak_gain_pct:.0f}% -> now +{gain_pct:.0f}%"
+
+    # === NEVER sell at a loss ===
+    if gain_pct <= 0 or current_bid <= entry_price:
+        return False, 0, None
+
+    # === SINGLE CONTRACT: hold for 150% minimum ===
+    if count == 1:
+        if gain_pct >= 150:
+            return True, 1, f"PROFIT +{gain_pct:.0f}% (single contract, 150% target)"
+        return False, 0, None
+
+    # === MULTI-CONTRACT: tiered exits ===
+    if gain_pct >= 300:
+        return True, count, f"MOONSHOT +{gain_pct:.0f}% — selling all {count}"
+    if gain_pct >= 200:
+        sell_qty = max(1, count // 3)
+        return True, sell_qty, f"TIER 2: +{gain_pct:.0f}% — partial {sell_qty}/{count}"
+    if gain_pct >= 100:
+        sell_qty = max(1, count // 3)
+        return True, sell_qty, f"TIER 1: +{gain_pct:.0f}% — partial {sell_qty}/{count}"
+
+    return False, 0, None
+
+
+def execute_sell(trade, ticker, side, entry_price, current_bid, sell_qty, total_count, gain_pct, reason):
+    """Execute a sell order and update DB. Returns True on success."""
+    pnl = round((current_bid - entry_price) * sell_qty, 4)
+
+    sell_order_id = place_order(ticker, side, 'sell', current_bid, sell_qty)
+    if not sell_order_id:
+        logger.error(f"SELL ORDER FAILED — skipping {ticker}")
+        return False
+
+    logger.info(f"SELL: {ticker} {side} x{sell_qty} +{gain_pct:.0f}% pnl=${pnl:.4f} | {reason}")
+    try:
+        db.table('trades').insert({
+            'ticker': ticker, 'side': side, 'action': 'sell',
+            'price': float(current_bid), 'count': sell_qty,
+            'pnl': float(pnl), 'strategy': 'crypto',
+            'reason': reason,
+            'sell_gain_pct': float(round(gain_pct, 1)),
+        }).execute()
+    except Exception as e:
+        logger.error(f"SELL INSERT FAILED: {e}")
+        logger.error(f"SELL traceback: {traceback.format_exc()}")
+
+    remaining = total_count - sell_qty
+    try:
+        if remaining <= 0:
+            # Fully sold — resolve the buy record
+            db.table('trades').update({
+                'pnl': 0.0,
+                'current_bid': float(current_bid),
+                'sell_gain_pct': float(round(gain_pct, 1)),
+            }).eq('id', trade['id']).execute()
+            # Clean up peak tracking
+            peak_bids.pop(trade['id'], None)
+            logger.info(f"BUY RESOLVED: id={trade['id']}")
+        else:
+            # Partial sell — update remaining count on buy record
+            db.table('trades').update({
+                'count': remaining,
+                'current_bid': float(current_bid),
+            }).eq('id', trade['id']).execute()
+            logger.info(f"PARTIAL SELL: {sell_qty} sold, {remaining} remaining for id={trade['id']}")
+    except Exception as e:
+        logger.error(f"BUY UPDATE FAILED: {e}")
+
+    return True
+
 
 def check_sells():
-    """Check ALL positions. Adaptive threshold (50% floor). Never sell at a loss."""
+    """Tiered exits, trailing stop, emergency dump. Never sell at a loss."""
     global sell_history
-    logger.info("check_sells() called")
-
-    # Adaptive threshold: 50% of average win, minimum 50%
-    if len(sell_history) >= 10:
-        avg_win = sum(sell_history) / len(sell_history)
-        threshold = max(50, avg_win * 0.5)
-    else:
-        threshold = 50
-        avg_win = 0
-    logger.info(f"Sell threshold: {threshold:.0f}% (avg win: {avg_win:.0f}%, {len(sell_history)} sells tracked)")
+    logger.info("check_sells() called — tiered exits + trailing stop")
 
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -360,7 +491,6 @@ def check_sells():
 
             logger.info(f"SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
             try:
-                logger.info(f"INSERTING SETTLE: {ticker}")
                 db.table('trades').insert({
                     'ticker': ticker, 'side': side, 'action': 'sell',
                     'price': float(settle_price), 'count': count,
@@ -368,12 +498,10 @@ def check_sells():
                     'reason': reason,
                     'sell_gain_pct': float(round(((settle_price - entry_price) / entry_price) * 100, 1)),
                 }).execute()
-                logger.info(f"SETTLE SAVED: {ticker}")
             except Exception as e:
                 logger.error(f"SETTLE INSERT FAILED: {e}")
 
             try:
-                # Mark buy as resolved with pnl=0 — sell record is the single source of truth
                 db.table('trades').update({
                     'pnl': 0.0,
                     'current_bid': float(settle_price),
@@ -381,6 +509,7 @@ def check_sells():
                 }).eq('id', trade['id']).execute()
             except:
                 pass
+            peak_bids.pop(trade.get('id'), None)
             settled += 1
             continue
 
@@ -404,58 +533,25 @@ def check_sells():
         except:
             pass
 
-        # NEVER sell at a loss
-        if gain_pct <= 0 or current_bid <= entry_price:
-            continue
+        # === DECIDE SELL ===
+        time_to_expiry = get_time_to_expiry(market)
+        should_sell, sell_qty, reason = decide_sell(
+            entry_price, current_bid, count, time_to_expiry, trade.get('id')
+        )
 
-        # Adaptive threshold (30% floor)
-        should_sell = False
-        reason = ""
-        if gain_pct >= threshold:
-            should_sell = True
-            reason = f"PROFIT +{gain_pct:.0f}% (thresh={threshold:.0f}%)"
+        if should_sell and sell_qty > 0:
+            success = execute_sell(
+                trade, ticker, side, entry_price, current_bid,
+                sell_qty, count, gain_pct, reason
+            )
+            if success:
+                sold += 1
+                sell_history.append(gain_pct)
+                if len(sell_history) > 20:
+                    sell_history = sell_history[-20:]
 
-        if should_sell:
-            pnl = round((current_bid - entry_price) * count, 4)
-
-            # Place real Kalshi sell order
-            sell_order_id = place_order(ticker, side, 'sell', current_bid, count)
-            if not sell_order_id:
-                logger.error(f"SELL ORDER FAILED — skipping {ticker}")
-                continue
-
-            logger.info(f"SELL: {ticker} {side} +{gain_pct:.0f}% pnl=${pnl:.4f}")
-            try:
-                sell_result = db.table('trades').insert({
-                    'ticker': ticker, 'side': side, 'action': 'sell',
-                    'price': float(current_bid), 'count': count,
-                    'pnl': float(pnl), 'strategy': 'crypto',
-                    'reason': reason,
-                    'sell_gain_pct': float(round(gain_pct, 1)),
-                }).execute()
-                logger.info(f"SELL SAVED: {len(sell_result.data) if sell_result.data else 0} rows")
-            except Exception as e:
-                logger.error(f"SELL INSERT FAILED: {e}")
-                logger.error(f"SELL traceback: {traceback.format_exc()}")
-
-            try:
-                # Mark buy as resolved with pnl=0 — sell record is single source of truth
-                db.table('trades').update({
-                    'pnl': 0.0,
-                    'current_bid': float(current_bid),
-                    'sell_gain_pct': float(round(gain_pct, 1)),
-                }).eq('id', trade['id']).execute()
-                logger.info(f"BUY RESOLVED: id={trade['id']}")
-            except Exception as e:
-                logger.error(f"BUY UPDATE FAILED: {e}")
-            sold += 1
-
-            # Track for adaptive threshold
-            sell_history.append(gain_pct)
-            if len(sell_history) > 20:
-                sell_history = sell_history[-20:]
-
-    logger.info(f"Checked {len(open_buys.data)} positions | sold={sold} settled={settled}")
+    avg_win = (sum(sell_history) / len(sell_history)) if sell_history else 0
+    logger.info(f"Checked {len(open_buys.data)} positions | sold={sold} settled={settled} | avg_win={avg_win:.0f}%")
 
 
 # === MAIN CYCLE ===
@@ -518,7 +614,7 @@ DASHBOARD_HTML = """
 <body>
     <div class="header">
         <h1>CRYPTO SCALP BOT</h1>
-        <div class="subtitle">LIVE Trading — 30s cycles — BTC/ETH/SOL — Adaptive sell threshold</div>
+        <div class="subtitle">LIVE Trading — 30s cycles — BTC/ETH/SOL — Tiered exits + trailing stop</div>
     </div>
     <div class="stats">
         <div class="stat-box"><div class="stat-label">Balance</div><div class="stat-value green">${{balance}}</div></div>
@@ -622,7 +718,7 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — LIVE TRADING — crypto only — adaptive threshold (30% floor)")
+    logger.info("Bot starting — LIVE TRADING — crypto only — tiered exits + trailing stop")
     close_all_old_positions()
     while True:
         try:
