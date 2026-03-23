@@ -101,18 +101,9 @@ def get_market(ticker):
 
 # === TWO DATA SOURCES ===
 
-SERIES_TICKERS = [
-    # Crypto 15-min and hourly
+CRYPTO_SERIES = [
     'KXBTC15M', 'KXETH15M', 'KXSOL15M',
     'KXBTC1H', 'KXETH1H', 'KXSOL1H',
-    # Weather highs
-    'KXHIGHNY', 'KXHIGHCHI', 'KXHIGHMIA', 'KXHIGHLAX', 'KXHIGHDEN',
-    'KXHIGHAUS', 'KXHIGHTPHX', 'KXHIGHTSFO', 'KXHIGHTATL', 'KXHIGHPHIL',
-    'KXHIGHTDC', 'KXHIGHTSEA', 'KXHIGHTHOU', 'KXHIGHTMIN', 'KXHIGHTBOS',
-    'KXHIGHTLV', 'KXHIGHTOKC',
-    # Weather lows
-    'KXLOWTNYC', 'KXLOWTCHI', 'KXLOWTMIA', 'KXLOWTLAX', 'KXLOWTDEN',
-    'KXLOWTAUS', 'KXLOWTPHIL',
 ]
 
 
@@ -120,8 +111,6 @@ def categorize(ticker):
     t = ticker.upper()
     if any(x in t for x in ['BTC', 'ETH', 'SOL']):
         return 'crypto'
-    if 'KXHIGH' in t or 'KXLOWT' in t:
-        return 'weather'
     return 'trending'
 
 
@@ -140,16 +129,16 @@ def fetch_top_activity():
 
 
 def fetch_series_markets():
-    """Source 2: ~30 API calls — crypto + weather series."""
+    """Source 2: 6 API calls — crypto series only."""
     markets = []
-    for series in SERIES_TICKERS:
+    for series in CRYPTO_SERIES:
         try:
             resp = kalshi_get(f"/markets?series_ticker={series}&status=open&limit=50")
             series_markets = resp.get('markets', [])
             markets.extend(series_markets)
         except:
             pass
-    logger.info(f"Series: {len(markets)} markets from {len(SERIES_TICKERS)} series")
+    logger.info(f"Crypto: {len(markets)} markets from {len(CRYPTO_SERIES)} series")
     return markets
 
 
@@ -346,15 +335,13 @@ def run_cycle():
                              'strategy': strategy, 'volume': vol,
                              'reason': f"{strategy}: {title[:40]} NO@${no:.2f} vol={vol:.0f}"})
 
-        # Split by strategy and sort each by volume
-        trending_buys = sorted([b for b in buys if b['strategy'] == 'trending'], key=lambda x: x['volume'], reverse=True)
-        crypto_buys = sorted([b for b in buys if b['strategy'] == 'crypto'], key=lambda x: x['volume'], reverse=True)
-        weather_buys = sorted([b for b in buys if b['strategy'] == 'weather'], key=lambda x: x['volume'], reverse=True)
+        # Sort by volume — most active first
+        buys.sort(key=lambda x: x['volume'], reverse=True)
+        ordered_buys = buys
 
-        # Allocate: trending first (20), crypto (20), weather (10)
-        ordered_buys = trending_buys[:20] + crypto_buys[:20] + weather_buys[:10]
-
-        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} series | trending={len(trending_buys)} crypto={len(crypto_buys)} weather={len(weather_buys)}")
+        trending_ct = sum(1 for b in buys if b['strategy'] == 'trending')
+        crypto_ct = sum(1 for b in buys if b['strategy'] == 'crypto')
+        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} crypto | trending={trending_ct} crypto={crypto_ct}")
 
         # Buy 1 contract each
         bought = 0
@@ -410,7 +397,6 @@ DASHBOARD_HTML = """
         .badge-buy { background: #003300; color: #00ff88; }
         .badge-sell { background: #330000; color: #ff4444; }
         .badge-settled { background: #222; color: #888; }
-        .badge-weather { background: #002233; color: #44aaff; }
         .badge-crypto { background: #332200; color: #ffaa00; }
         .badge-trending { background: #333300; color: #ffff44; }
         .badge-unknown { background: #222; color: #888; }
@@ -419,7 +405,7 @@ DASHBOARD_HTML = """
 <body>
     <div class="header">
         <h1>KALSHI SCALP BOT</h1>
-        <div class="subtitle">Paper Trading — $50 — 30s cycles — Activity-based scalping</div>
+        <div class="subtitle">Paper Trading — $50 — 30s cycles — Trending + Crypto</div>
     </div>
     <div class="stats">
         <div class="stat-box"><div class="stat-label">Balance</div><div class="stat-value green">${{balance}}</div></div>
@@ -556,7 +542,7 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — activity-based scalping, 1 contract per position, max spread")
+    logger.info("Bot starting — trending + crypto, 1 contract per position, max spread")
     close_all_old_positions()
     while True:
         try:
