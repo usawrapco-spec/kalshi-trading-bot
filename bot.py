@@ -19,8 +19,8 @@ MAX_PRICE = 0.20
 CYCLE_SECONDS = 30
 
 # === GOLDEN HOUR SETTINGS — simple, fast turnover ===
-MAX_DEPLOYMENT_PCT = 0.75       # Deploy up to 75% of balance
-MIN_CASH_RESERVE_PCT = 0.25     # 25% protected (saved profits live here)
+MAX_DEPLOYMENT_PCT = 0.90       # Deploy up to 90% of balance — keep capital working
+MIN_CASH_RESERVE_PCT = 0.10     # 10% cash reserve
 MAX_CONTRACTS_PER_TRADE = 5     # 5 contracts per trade — golden hour setting
 MAX_SPEND_PER_TRADE_PCT = 0.15  # Max 15% of trading_balance per trade
 MAX_SPEND_PER_CYCLE = 25
@@ -616,6 +616,87 @@ def cleanup_ghosts():
     if cleaned > 0:
         logger.info(f"Cleaned {cleaned} ghost positions (expired contracts)")
     return cleaned
+
+
+def cleanup_stale_positions():
+    """Sell old underwater positions to free capital for new scalps.
+    If open 6+ hours AND down 30%+, cut it."""
+    open_buys = db.table('trades').select('*') \
+        .eq('action', 'buy').is_('pnl', 'null').execute()
+
+    if not open_buys.data:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    cut = 0
+
+    for trade in open_buys.data:
+        ticker = trade['ticker']
+        side = trade['side']
+        entry_price = sf(trade['price'])
+        count = trade.get('count') or 1
+        if entry_price <= 0:
+            continue
+
+        # Check age — must be 6+ hours old
+        created_str = trade.get('created_at', '')
+        if not created_str:
+            continue
+        try:
+            created_str = created_str.replace('Z', '+00:00')
+            created = datetime.fromisoformat(created_str)
+            age_hours = (now - created).total_seconds() / 3600
+        except (ValueError, TypeError):
+            continue
+
+        if age_hours < 6:
+            continue
+
+        # Get live bid
+        current_bid = get_live_bid(ticker, side)
+        if not current_bid or current_bid <= 0:
+            continue
+
+        gain_pct = ((current_bid - entry_price) / entry_price) * 100
+
+        # Cut if down 30%+
+        if gain_pct >= -30:
+            continue
+
+        pnl = round((current_bid - entry_price) * count, 4)
+        reason = f"CUT STALE: {age_hours:.0f}h old, {gain_pct:.0f}% — freeing capital"
+
+        sell_order_id = place_order(ticker, side, 'sell', current_bid, count)
+        if not sell_order_id:
+            continue
+
+        logger.info(f"CUT STALE: {ticker} {side} x{count} @ ${current_bid:.2f} | {gain_pct:.0f}% | {age_hours:.0f}h old | pnl=${pnl:.4f}")
+
+        try:
+            db.table('trades').insert({
+                'ticker': ticker, 'side': side, 'action': 'sell',
+                'price': float(current_bid), 'count': count,
+                'pnl': float(pnl), 'strategy': trade.get('strategy', 'crypto'),
+                'reason': reason,
+                'sell_gain_pct': float(round(gain_pct, 1)),
+            }).execute()
+        except Exception as e:
+            logger.error(f"Stale sell insert failed: {e}")
+
+        try:
+            db.table('trades').update({
+                'pnl': 0.0,
+                'current_bid': float(current_bid),
+                'sell_gain_pct': float(round(gain_pct, 1)),
+            }).eq('id', trade['id']).execute()
+        except Exception as e:
+            logger.error(f"Stale buy resolve failed: {e}")
+
+        cut += 1
+
+    if cut > 0:
+        logger.info(f"Cut {cut} stale positions to free capital")
+    return cut
 
 
 def check_sells():
@@ -1369,11 +1450,24 @@ def bot_loop():
     logger.info("Bot starting — Scalper v2 — 3-20c entries, 15% on 15M, 50% on hourly, never let profit expire")
     close_all_old_positions()
     cleanup_ghosts()
+    # Cut stale positions at startup to free capital immediately
+    try:
+        cleanup_stale_positions()
+    except Exception as e:
+        logger.error(f"Startup stale cleanup error: {e}")
+    cycle_count = 0
     while True:
         try:
             run_cycle()
         except Exception as e:
             logger.error(f"Cycle error: {e}")
+        cycle_count += 1
+        # Every 10 cycles (~5 min), cut stale underwater positions
+        if cycle_count % 10 == 0:
+            try:
+                cleanup_stale_positions()
+            except Exception as e:
+                logger.error(f"Stale cleanup error: {e}")
         time.sleep(CYCLE_SECONDS)
 
 
