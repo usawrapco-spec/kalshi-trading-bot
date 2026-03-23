@@ -24,7 +24,7 @@ MIN_CASH_RESERVE_PCT = 0.25     # 25% protected (saved profits live here)
 MAX_CONTRACTS_PER_TRADE = 5     # 5 contracts per trade — golden hour setting
 MAX_SPEND_PER_TRADE_PCT = 0.15  # Max 15% of trading_balance per trade
 MAX_SPEND_PER_CYCLE = 25
-MAX_TRADES_PER_CYCLE = 10       # High volume: buy everything that qualifies
+MAX_BUYS_PER_CYCLE = 15         # High volume: golden hour did ~2.7/cycle at 30s
 MAX_OPEN_POSITIONS = 200
 
 # === SELL THRESHOLDS ===
@@ -309,9 +309,21 @@ def run_buys(markets):
             skipped_mve += 1
             continue
 
-        # Only trade contracts expiring within 3 hours, min 5 min left
+        # HARD BLOCKS: yearly, monthly, long-dated junk
+        if 'KXBTCY' in ticker: continue
+        if 'KXETHY' in ticker: continue
+        if 'KXSOLY' in ticker: continue
+        if 'MAXMON' in ticker: continue
+        if 'MINMON' in ticker: continue
+        if '27JAN' in ticker: continue
+        if '2026250' in ticker: continue
+        if 'SOL26500' in ticker: continue
+        if 'SOLD26' in ticker: continue
+        if 'KXSOLE' in ticker: continue
+
+        # Only trade contracts expiring within 3 hours, min 3 min left
         expiry_secs = get_time_to_expiry(ticker)
-        if expiry_secs is None or expiry_secs > 10800 or expiry_secs < 300:
+        if expiry_secs is None or expiry_secs > 10800 or expiry_secs < 180:
             continue
 
         if ticker in owned:
@@ -333,14 +345,14 @@ def run_buys(markets):
             no_ask = sf(m.get('no_ask', 0)) / 100.0 if sf(m.get('no_ask', 0)) > 1 else sf(m.get('no_ask', 0))
             no_bid = sf(m.get('no_bid', 0)) / 100.0 if sf(m.get('no_bid', 0)) > 1 else sf(m.get('no_bid', 0))
 
-        # Collect qualifying sides: price 5-45 cents, has ANY bid
-        candidates = []
-        if 0.05 <= yes_ask <= 0.45 and yes_bid > 0:
-            candidates.append(('yes', yes_ask, yes_bid))
-        if 0.05 <= no_ask <= 0.45 and no_bid > 0:
-            candidates.append(('no', no_ask, no_bid))
+        # Collect qualifying sides: price 3-50 cents, has ANY bid
+        side_candidates = []
+        if 0.03 <= yes_ask <= 0.50 and yes_bid > 0:
+            side_candidates.append(('yes', yes_ask, yes_bid))
+        if 0.03 <= no_ask <= 0.50 and no_bid > 0:
+            side_candidates.append(('no', no_ask, no_bid))
 
-        if not candidates:
+        if not side_candidates:
             # Track why it failed for debug
             has_any_ask = yes_ask > 0 or no_ask > 0
             has_any_bid = yes_bid > 0 or no_bid > 0
@@ -349,25 +361,23 @@ def run_buys(markets):
             elif not has_any_bid:
                 no_bid += 1
             else:
-                price_ok += 1  # Has price but outside 5-45c range
+                price_ok += 1  # Has price but outside 3-50c range
             continue
 
-        # Pick cheapest side (more room to grow)
-        candidates.sort(key=lambda x: x[1])
-        side, price, bid = candidates[0]
-
-        buys.append({
-            'ticker': ticker, 'side': side, 'price': price,
-            'bid': bid, 'spread': price - bid, 'count': MAX_CONTRACTS_PER_TRADE,
-            'volume': volume, 'strategy': category,
-        })
+        # Add BOTH qualifying sides as separate buy candidates
+        for side, price, bid in side_candidates:
+            buys.append({
+                'ticker': ticker, 'side': side, 'price': price,
+                'bid': bid, 'spread': price - bid, 'count': MAX_CONTRACTS_PER_TRADE,
+                'volume': volume, 'strategy': category,
+            })
 
     logger.info(f"FILTER DEBUG: total={len(markets)} | 15m_blocked={skipped_15m} | mve_skip={skipped_mve} | "
                 f"owned={already_owned} | no_price={no_price} | no_bid={no_bid} | "
                 f"out_of_range={price_ok} | final_candidates={len(buys)}")
 
-    # Sort by cheapest first (most upside potential)
-    buys.sort(key=lambda x: x['price'])
+    # Sort by highest bid first (most liquid)
+    buys.sort(key=lambda x: x['bid'], reverse=True)
 
     # Limits based on trading_balance (excludes saved/protected money)
     max_exposure = trading_balance * MAX_DEPLOYMENT_PCT
@@ -381,7 +391,7 @@ def run_buys(markets):
     bought = 0
     cycle_spent = 0.0
     for b in buys:
-        if bought >= MAX_TRADES_PER_CYCLE:
+        if bought >= MAX_BUYS_PER_CYCLE:
             break
         if cycle_spent >= MAX_SPEND_PER_CYCLE:
             break
@@ -448,25 +458,34 @@ EXPIRY_WINDOW_SECONDS = 60  # 1 minute — sell anything green before close
 def get_time_to_expiry(market_or_ticker):
     """Returns seconds until market closes, or None if unknown.
     Accepts a market dict OR a ticker string. Tries ticker parsing first,
-    falls back to market close_time field."""
+    falls back to market close_time field.
+
+    Ticker format: KXBTCD-26MAR2305-T68499.99
+    The date segment after the dash is: YYmmmDDHH
+      26=year(2026), MAR=month, 23=day, 05=hour
+    """
     ticker = None
     if isinstance(market_or_ticker, str):
         ticker = market_or_ticker
     elif isinstance(market_or_ticker, dict):
         ticker = market_or_ticker.get('ticker', '')
 
-    # Try parsing expiry from ticker pattern like 22MAR2517 (day MON year hour)
     if ticker:
-        match = re.search(r'(\d{2})([A-Z]{3})(\d{2})(\d{2})', ticker)
-        if match:
-            day, mon_str, yy, hour = match.groups()
+        # Match: -26MAR2305- where 26=year, MAR=month, 2305=day+hour
+        date_match = re.search(r'-(\d{2})([A-Z]{3})(\d{4})', ticker)
+        if date_match:
+            yy = int(date_match.group(1))
+            mon_str = date_match.group(2)
+            dayhr = date_match.group(3)
             months = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
                       'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
             month = months.get(mon_str)
             if month:
                 try:
-                    year = 2000 + int(yy)
-                    expiry = datetime(year, month, int(day), int(hour), 59, 59, tzinfo=timezone.utc)
+                    year = 2000 + yy
+                    day = int(dayhr[:2])
+                    hour = int(dayhr[2:])
+                    expiry = datetime(year, month, day, hour, 59, 59, tzinfo=timezone.utc)
                     now = datetime.now(timezone.utc)
                     return max(0, (expiry - now).total_seconds())
                 except (ValueError, OverflowError):
@@ -1081,7 +1100,7 @@ tr:hover{background:#1a1a1a !important}
 
 <!-- Portfolio Hero -->
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; Universal Scanner &mdash; ALL markets</div>
+  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; Crypto Scanner &mdash; Expiry Save Only</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1129,13 +1148,13 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
   <div class="status-item">15M: <span class="dot-blocked"></span> BLOCKED</div>
-  <div class="status-item">Max contracts: 10</div>
+  <div class="status-item">Max contracts: 5</div>
   <div class="status-item">Sell: no ceiling, 1min expiry save only</div>
   <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span> protected</div>
   <div class="status-item">Ghosts: <span class="yellow" id="sb-ghosts">0</span> expired cleaned</div>
   <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
 </div>
-<div class="footer">Kalshi Scalp Bot v7 &mdash; Universal Scanner &mdash; auto-refresh 15s</div>
+<div class="footer">Kalshi Scalp Bot v8 &mdash; Master Reset &mdash; auto-refresh 15s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
@@ -1351,8 +1370,9 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — GOLDEN HOUR — no ceiling sell, 5 contracts, let winners ride to $1.00")
+    logger.info("Bot starting — MASTER RESET — expiry save only, 5 contracts, let winners ride to $1.00")
     close_all_old_positions()
+    cleanup_ghosts()
     while True:
         try:
             run_cycle()
