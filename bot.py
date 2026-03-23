@@ -296,6 +296,12 @@ def run_buys(markets):
     no_bid = 0
     price_ok = 0
 
+    # TEMPORARY DEBUG — log first 5 tickers and what expiry parsing returns
+    for m in markets[:5]:
+        t = m.get('ticker', '')
+        exp = get_time_to_expiry(t)
+        logger.info(f"DEBUG EXPIRY: {t} → {exp}")
+
     for m in markets:
         ticker = m.get('ticker', '')
 
@@ -321,10 +327,11 @@ def run_buys(markets):
         if 'SOLD26' in ticker: continue
         if 'KXSOLE' in ticker: continue
 
-        # Only trade contracts expiring within 3 hours, min 3 min left
+        # Only block contracts we KNOW are too far out or too close
+        # If expiry is None (can't parse), let it through — don't block unknown tickers
         expiry_secs = get_time_to_expiry(ticker)
-        if expiry_secs is None or expiry_secs > 10800 or expiry_secs < 180:
-            continue
+        if expiry_secs is not None and expiry_secs > 10800: continue
+        if expiry_secs is not None and expiry_secs < 180: continue
 
         if ticker in owned:
             already_owned += 1
