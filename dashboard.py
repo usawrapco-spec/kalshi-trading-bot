@@ -878,15 +878,18 @@ function updateEquity(data){
 // === DATA REFRESH ===
 let prevTradeIds=new Set(),prevBal=null;
 
-async function fetchJ(url){try{const r=await fetch(url);return r.ok?await r.json():null}catch(e){return null}}
+async function fetchJ(url){try{const r=await fetch(url);return r.ok?await r.json():null}catch(e){console.error('fetchJ error:',url,e);return null}}
+function N(v){return Number(v)||0}
 
 async function refreshAll(){
-  scanPulse();
+  try{scanPulse()}catch(e){}
   const[status,trades,strats,equity,signals,live,debates,improvements,swing,crypto]=await Promise.all([
     fetchJ('/api/status'),fetchJ('/api/trades'),fetchJ('/api/strategies'),fetchJ('/api/equity'),fetchJ('/api/signals'),fetchJ('/api/live_status'),fetchJ('/api/debates'),fetchJ('/api/improvements'),fetchJ('/api/swing'),fetchJ('/api/crypto')
   ]);
+  console.log('API /api/status response:',JSON.stringify(status));
 
   // LIVE STATUS — header shows portfolio value (cash + positions)
+  try{
   if(live&&live.enable_trading&&live.live_strategies&&live.live_strategies.length){
     document.getElementById('liveBadge').style.display='inline';
     document.getElementById('modeBadge').textContent='HYBRID';
@@ -894,49 +897,57 @@ async function refreshAll(){
     if(hdrBal!==null&&hdrBal!==undefined){
       document.getElementById('realBalLabel').style.display='inline';
       document.getElementById('realBal').style.display='inline';
-      document.getElementById('realBal').textContent='$'+hdrBal.toFixed(2);
+      document.getElementById('realBal').textContent='$'+N(hdrBal).toFixed(2);
     }else if(live.real_balance!==null&&live.real_balance!==undefined){
       document.getElementById('realBalLabel').style.display='inline';
       document.getElementById('realBal').style.display='inline';
-      document.getElementById('realBal').textContent='$'+live.real_balance.toFixed(2);
+      document.getElementById('realBal').textContent='$'+N(live.real_balance).toFixed(2);
     }
   }
+  }catch(e){console.error('Live header error:',e)}
 
   // STATUS - Now separated into live/paper
   if(status){
+   try{
     // PAPER TRADING
     const paper=status.paper||{};
-    const pb=paper.balance||0,ppnl=paper.daily_pnl||0,proi=paper.roi_percent||0;
+    const pb=N(paper.balance),ppnl=N(paper.daily_pnl),proi=N(paper.roi_percent);
     document.getElementById('paper-balance').textContent='$'+pb.toFixed(2);
     document.getElementById('paper-pnl').textContent=(ppnl>=0?'+$':'-$')+Math.abs(ppnl).toFixed(2);
     document.getElementById('paper-pnl').className='metric-value '+(ppnl>=0?'profit':'loss');
     document.getElementById('paper-roi').textContent=(proi>=0?'+':'')+proi.toFixed(1)+'%';
     document.getElementById('paper-roi').className='metric-sub '+(proi>=0?'profit':'loss');
-    document.getElementById('paper-trades').textContent=(paper.trades_today||0)+' trades today';
-    document.getElementById('paper-positions').textContent=paper.positions||0;
-    const pwr=(paper.wins+paper.losses)>0?((paper.wins/(paper.wins+paper.losses))*100).toFixed(0):'—';
+    document.getElementById('paper-trades').textContent=N(paper.trades_today)+' trades today';
+    document.getElementById('paper-positions').textContent=N(paper.positions);
+    const pw=N(paper.wins),pl=N(paper.losses);
+    const pwr=(pw+pl)>0?((pw/(pw+pl))*100).toFixed(0):'—';
     document.getElementById('paper-win-rate').textContent=pwr+'%';
-    document.getElementById('paper-wl-record').textContent=(paper.wins||0)+'W / '+(paper.losses||0)+'L';
+    document.getElementById('paper-wl-record').textContent=pw+'W / '+pl+'L';
+   }catch(e){console.error('Paper panel error:',e)}
 
+   try{
     // LIVE TRADING — portfolio value = cash + positions (from snapshot)
     const live_s=status.live||{};
-    const lb=live_s.balance||0;
-    const lCash=live_s.cash||0;
-    const lPos=live_s.positions_value||0;
-    const lpnl=live_s.daily_pnl||0;
-    const lRpnl=live_s.realized_pnl||0;
-    const lUnreal=live_s.unrealized_pnl||0;
-    document.getElementById('live-balance').textContent=lb!==null?'$'+lb.toFixed(2):'—';
+    const lb=N(live_s.balance);
+    const lCash=N(live_s.cash);
+    const lPos=N(live_s.positions_value);
+    const lRpnl=N(live_s.realized_pnl);
+    const lUnreal=N(live_s.unrealized_pnl);
+    document.getElementById('live-balance').textContent='$'+lb.toFixed(2);
     document.getElementById('live-exposure').textContent='Cash: $'+lCash.toFixed(2)+' | Pos: $'+lPos.toFixed(2);
     document.getElementById('live-pnl').textContent=(lRpnl>=0?'+$':'-$')+Math.abs(lRpnl).toFixed(2);
     document.getElementById('live-pnl').className='metric-value '+(lRpnl>=0?'profit':'loss');
     document.getElementById('live-trades').textContent='Unrealized: '+(lUnreal>=0?'+$':'-$')+Math.abs(lUnreal).toFixed(2);
-    document.getElementById('live-positions').textContent=live_s.positions||0;
-    const lwr=(live_s.wins+live_s.losses)>0?((live_s.wins/(live_s.wins+live_s.losses))*100).toFixed(0):'—';
+    document.getElementById('live-positions').textContent=N(live_s.positions);
+    const lw=N(live_s.wins),ll=N(live_s.losses);
+    const lwr=(lw+ll)>0?((lw/(lw+ll))*100).toFixed(0):'—';
     document.getElementById('live-win-rate').textContent=lwr+'%';
-    document.getElementById('live-wl-record').textContent=(live_s.wins||0)+'W / '+(live_s.losses||0)+'L';
+    document.getElementById('live-wl-record').textContent=lw+'W / '+ll+'L';
+   }catch(e){console.error('Live panel error:',e)}
 
+   try{
     // Header balance (paper)
+    const pb=N((status.paper||{}).balance);
     document.querySelectorAll('[data-field="balance"]').forEach(el=>{el.textContent='$'+pb.toFixed(2);el.style.color='#00f0ff'});
     document.querySelectorAll('[data-field="last_scan"]').forEach(el=>{el.textContent=fmt(status.last_check)});
     document.title='$'+pb.toFixed(0)+' | KALSHI ALPHA';
@@ -945,9 +956,11 @@ async function refreshAll(){
       if(pb>prevBal)burstWin(pb-prevBal);else burstLoss(prevBal-pb);
     }
     prevBal=pb;
+   }catch(e){console.error('Header update error:',e)}
   }
 
   // TRADES
+  try{
   if(trades&&trades.length){
     const tbody=document.getElementById('tradesBody');
     // Detect new trades
@@ -985,8 +998,10 @@ async function refreshAll(){
       return`<tr style="${liveBorder}"><td style="color:rgba(255,255,255,0.2)">${fmt(t.timestamp||t.created_at)}</td><td style="color:${isLive?'#ff3c3c':'#00f0ff'}">${s}${badge}</td><td>${(t.ticker||'').substring(0,28)}</td><td style="color:${sideColor};font-weight:600">${sideLabel}</td><td>$${(t.price||0).toFixed(2)}</td><td style="color:${pnlColor};font-weight:600">${pnlStr}</td><td style="color:${statusColor}">${statusStr}</td></tr>`;
     }).join('');
   }
+  }catch(e){console.error('Trades render error:',e)}
 
   // STRATEGIES
+  try{
   if(strats&&strats.length){
     const el=document.getElementById('stratLayers');
     const liveStrats=(live&&live.live_strategies)||[];
@@ -1002,11 +1017,13 @@ async function refreshAll(){
       return`<div class="strat-row"><span class="strat-name">${name}${badge}</span><span class="strat-count">${countText}</span></div>`;
     }).join('');
   }
+  }catch(e){console.error('Strategies error:',e)}
 
   // EQUITY
-  if(equity)updateEquity(equity);
+  try{if(equity)updateEquity(equity)}catch(e){console.error('Equity error:',e)}
 
   // SIGNALS → Training Log
+  try{
   if(signals&&signals.length){
     const log=document.getElementById('trainingLog');
     let html='<div class="panel-title" style="padding:12px 12px 8px">Training Log</div>';
@@ -1022,8 +1039,10 @@ async function refreshAll(){
     });
     log.innerHTML=html;
   }
+  }catch(e){console.error('Training log error:',e)}
 
   // SIGNALS TAB
+  try{
   if(signals&&signals.length){
     const el=document.getElementById('signalFeed');
     el.innerHTML=signals.slice(0,40).map(s=>{
@@ -1040,8 +1059,10 @@ async function refreshAll(){
       </div>`;
     }).join('');
   }
+  }catch(e){console.error('Signals tab error:',e)}
 
   // DEBATES TAB
+  try{
   if(debates&&debates.length){
     const el=document.getElementById('debatesFeed');
     el.innerHTML=debates.map(d=>{
@@ -1057,8 +1078,10 @@ async function refreshAll(){
       </div>`;
     }).join('');
   }
+  }catch(e){console.error('Debates tab error:',e)}
 
   // LEARNING LAB TAB
+  try{
   if(improvements&&improvements.length){
     const el=document.getElementById('learnFeed');
     el.innerHTML=improvements.map(imp=>{
@@ -1079,8 +1102,10 @@ async function refreshAll(){
     const nextRun=new Date();nextRun.setHours(nextRun.getHours()+(6-nextRun.getHours()%6),0,0,0);
     el.innerHTML='<div style="color:rgba(255,255,255,0.15)">Self-improvement analysis runs every 6 hours. Next run: '+nextRun.toLocaleTimeString()+'</div>';
   }
+  }catch(e){console.error('Learning lab error:',e)}
 
   // SWING TRADING PANEL
+  try{
   if(!swing){
     document.getElementById('swing-summary').textContent='Strategy not active';
   }else if(swing.open_positions===0&&swing.closed_trades===0){
@@ -1138,6 +1163,7 @@ async function refreshAll(){
       cb.innerHTML='<tr><td colspan="6" style="color:rgba(255,255,255,0.15)">No crypto signals yet</td></tr>';
     }
   }
+  }catch(e){console.error('Swing/Crypto panel error:',e)}
 }
 
 // === LEADERBOARDS ===

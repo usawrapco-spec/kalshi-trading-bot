@@ -1529,9 +1529,9 @@ class KalshiBot:
 
             logger.info(f"Cycle done: {trades_placed} trades, ${cycle_spent:.2f} spent")
 
-            # === EXPLORATION TRADES (paper only, aggressive mode) ===
-            if _aggressive_paper:
-                self._exploration_trades(markets, trades_placed)
+            # === EXPLORATION TRADES — DISABLED (was losing money: 973 losses) ===
+            # if _aggressive_paper:
+            #     self._exploration_trades(markets, trades_placed)
 
         # Forced paper trade if nothing fired
         if len(all_signals) == 0:
