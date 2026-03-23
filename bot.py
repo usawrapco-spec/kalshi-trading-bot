@@ -268,12 +268,12 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker=
         if key in entry_times: del entry_times[key]
         return True, count, f"BIG WIN +{gain_pct:.0f}%"
 
-    if age >= 15 and gain_pct >= 15:
+    if age >= 15 and gain_pct >= 30:
         if key in entry_times: del entry_times[key]
         return True, count, f"TIMEOUT +{gain_pct:.0f}%"
 
-    if gain_pct >= 15:
-        sell_chance = min(0.80, 0.10 + (gain_pct - 15) * 0.005)
+    if gain_pct >= 30:
+        sell_chance = min(0.80, 0.10 + (gain_pct - 30) * 0.005)
         if random.random() < sell_chance:
             if key in entry_times: del entry_times[key]
             return True, count, f"TAKE PROFIT +{gain_pct:.0f}%"
@@ -554,7 +554,7 @@ def sync_with_kalshi():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — random exit above 15%, instant 100%")
+    logger.info("check_sells() — random exit above 30%, instant 100%")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -970,7 +970,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; random exit above 15%, instant 100%, 85% spread</div>
+  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; random exit above 30%, instant 100%, 85% spread</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1002,7 +1002,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c, 85% spread</div>
-  <div class="status-item">Strategy: random exit 15%+, instant 100%</div>
+  <div class="status-item">Strategy: random exit 30%+, instant 100%</div>
   <div class="status-item">Max: 1 contract</div>
   <div class="status-item">All crypto series</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
@@ -1174,7 +1174,7 @@ def cash_out_all():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — random exit above 15%, instant 100%, 1 contract, 85% spread")
+    logger.info("Bot starting — random exit above 30%, instant 100%, 1 contract, 85% spread")
     clear_dead()
     sync_with_kalshi()
     cycle_count = 0
