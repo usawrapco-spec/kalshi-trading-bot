@@ -282,7 +282,7 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker=
 
     # Expiry exit
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
-        if current_bid > 0:
+        if gain_pct > 0:
             entry_times.pop(key, None)
             return True, count, f"EXPIRY EXIT {gain_pct:+.0f}%"
 
