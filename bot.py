@@ -191,9 +191,9 @@ def place_order(ticker, side, action, price, count):
     if '15M' in ticker:
         logger.warning(f"BLOCKED at order gate: {ticker} — 15-min contracts disabled")
         return None
-    # HARD SAFETY: cap buy orders at 5 contracts max (sells can be any size)
+    # HARD SAFETY: cap buy orders at 15 contracts max (sells can be any size)
     if action == 'buy':
-        count = min(count, 5)
+        count = min(count, 15)
     price_cents = int(round(price * 100))
     try:
         logger.info(f"ORDER: {action.upper()} {ticker} {side} x{count} @ ${price:.2f} ({price_cents}c)")
@@ -751,6 +751,123 @@ def check_sells():
     logger.info(f"SELL SUMMARY: evaluated={evaluated} sold={sold} settled={settled} skipped_no_market={skipped_no_market} skipped_no_bid={skipped_no_bid} | avg_win={avg_win:.0f}%")
 
 
+# === DOUBLE DOWN ON WINNERS ===
+
+def double_down_on_winners():
+    """Check open positions. If any are up 25%+, buy MORE of the same contract.
+    Momentum is confirmed — pile on. By the time it hits 100%, we have 10-15 contracts."""
+    total_balance, trading_balance, saved_balance = get_trading_balance()
+
+    open_buys = db.table('trades').select('*') \
+        .eq('action', 'buy').is_('pnl', 'null').execute()
+
+    if not open_buys.data:
+        return
+
+    # Build lookup: how many total contracts per ticker (across all buy records)
+    ticker_contracts = {}
+    ticker_doubled = {}
+    for t in open_buys.data:
+        tk = t['ticker']
+        ticker_contracts[tk] = ticker_contracts.get(tk, 0) + (t['count'] or 1)
+        reason = t.get('reason', '') or ''
+        if 'DOUBLE DOWN' in reason:
+            ticker_doubled[tk] = True
+
+    doubled = 0
+    for trade in open_buys.data:
+        ticker = trade['ticker']
+        side = trade['side']
+        entry_price = sf(trade['price'])
+        count = trade['count'] or 1
+
+        if entry_price <= 0:
+            continue
+
+        # Skip if we already doubled down on this ticker
+        if ticker in ticker_doubled:
+            continue
+
+        # Skip if total contracts already at 10+ (cap at 15)
+        total_contracts = ticker_contracts.get(ticker, 0)
+        if total_contracts >= 10:
+            continue
+
+        # Get live bid to check current gain
+        bid = get_live_bid(ticker, side)
+        if bid is None or bid <= 0:
+            continue
+
+        gain_pct = ((bid - entry_price) / entry_price) * 100
+
+        if gain_pct < 25:
+            continue
+
+        # Check expiry — don't double down with < 10 minutes left
+        try:
+            market = get_market(ticker)
+        except:
+            continue
+        if not market:
+            continue
+
+        expiry_seconds = get_time_to_expiry(market)
+        if expiry_seconds is not None and expiry_seconds < 600:
+            continue
+
+        # Scaling ladder: scale add size with confidence
+        if gain_pct >= 50:
+            add_contracts = 5   # Strong winner, go big
+        elif gain_pct >= 35:
+            add_contracts = 3   # Good winner, moderate add
+        else:
+            add_contracts = 2   # Early winner (+25%), small add
+
+        # Cap total at 15
+        add_contracts = min(add_contracts, 15 - total_contracts)
+        if add_contracts <= 0:
+            continue
+
+        # Affordability check: max 10% of trading balance per double down
+        cost = bid * add_contracts
+        if cost > trading_balance * 0.10:
+            add_contracts = max(1, int((trading_balance * 0.10) / bid))
+            cost = bid * add_contracts
+
+        if add_contracts <= 0 or cost > trading_balance:
+            continue
+
+        logger.info(f"DOUBLE DOWN: {ticker} {side} | "
+                    f"entry=${entry_price:.2f} now=${bid:.2f} +{gain_pct:.0f}% | "
+                    f"adding {add_contracts} contracts at ${bid:.2f} | "
+                    f"total will be {total_contracts + add_contracts} contracts")
+
+        order_id = place_order(ticker, side, 'buy', bid, add_contracts)
+        if not order_id:
+            continue
+
+        # Record double-down as a separate buy in DB
+        try:
+            db.table('trades').insert({
+                'ticker': ticker, 'side': side, 'action': 'buy',
+                'price': float(bid), 'count': add_contracts,
+                'strategy': trade.get('strategy', 'crypto'),
+                'reason': f"DOUBLE DOWN +{gain_pct:.0f}%: added {add_contracts} at ${bid:.2f} (original {count} at ${entry_price:.2f})",
+                'last_seen_bid': float(bid),
+                'current_bid': float(bid),
+            }).execute()
+            ticker_doubled[ticker] = True
+            trading_balance -= cost
+            doubled += 1
+        except Exception as e:
+            logger.error(f"Double down DB insert failed: {e}")
+
+    if doubled:
+        logger.info(f"DOUBLE DOWN SUMMARY: added to {doubled} winning positions")
+    else:
+        logger.info("DOUBLE DOWN: no positions qualified (need +25% confirmed winners)")
+
+
 # === MAIN CYCLE ===
 
 def run_cycle():
@@ -763,7 +880,13 @@ def run_cycle():
     except Exception as e:
         logger.error(f"Sell check error: {e}")
 
-    # 2. Fetch ALL live markets and buy the best opportunities
+    # 2. Double down on existing winners (+25%+ confirmed momentum)
+    try:
+        double_down_on_winners()
+    except Exception as e:
+        logger.error(f"Double down error: {e}")
+
+    # 3. Fetch ALL live markets and buy the best opportunities
     try:
         all_markets = fetch_all_live_markets()
         run_buys(all_markets)
