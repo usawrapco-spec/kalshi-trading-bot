@@ -234,8 +234,11 @@ def categorize_market(ticker):
     else: return 'other'
 
 
-def fetch_all_live_markets():
-    """Fetch ALL open markets on Kalshi -- crypto, sports, oil, elections, everything."""
+CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
+
+
+def fetch_crypto_markets():
+    """Fetch crypto markets only — direction + bracket series. Skip 15M."""
     all_markets = []
     cursor = None
 
@@ -251,15 +254,21 @@ def fetch_all_live_markets():
             break
 
         markets = resp.get('markets', [])
-        all_markets.extend(markets)
+        # Filter to crypto only, skip 15M
+        for m in markets:
+            ticker = m.get('ticker', '')
+            if '15M' in ticker:
+                continue
+            if any(ticker.startswith(series) or series in ticker for series in CRYPTO_SERIES):
+                all_markets.append(m)
 
         cursor = resp.get('cursor')
         if not cursor or not markets:
             break
 
-    logger.info(f"TOTAL LIVE MARKETS: {len(all_markets)}")
+    logger.info(f"CRYPTO MARKETS: {len(all_markets)} (filtered from full Kalshi catalog)")
 
-    # Categorize what we found and store for dashboard
+    # Categorize for dashboard
     categories = {}
     for m in all_markets:
         ticker = m.get('ticker', '')
@@ -360,19 +369,19 @@ def select_focused_trades(candidates, max_per_asset=MAX_PER_ASSET, max_total=MAX
 
 
 def run_buys(markets):
-    """Universal buy logic — focused bets: best 2 per asset, max size."""
+    """Crypto-only buy logic — focused bets: best 2 per asset (BTC/ETH/SOL), max size."""
     total_balance, trading_balance, saved_balance = get_trading_balance()
     owned = get_owned()
     num_open = len(owned)
-    logger.info(f"[UNIVERSAL] Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f} (PROTECTED, never traded)")
+    logger.info(f"[CRYPTO] Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f} (PROTECTED, never traded)")
 
     if num_open >= MAX_OPEN_POSITIONS:
         logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
         return
 
-    # Focused parameters: 10-45c price range, real bids, tight spreads, volume
+    # Tight filters for crypto: 10-40c sweet spot, real bids, tight spreads
     min_price = 0.10
-    max_price = 0.45
+    max_price = 0.40
     max_spread = 0.10
     min_volume = 50
     min_bid = 0.05  # Must have a real bid (someone to sell to)
@@ -382,11 +391,6 @@ def run_buys(markets):
         ticker = m.get('ticker', '')
         category = categorize_market(ticker)
 
-        # HARD BLOCK: skip blocked categories
-        if '15M' in ticker:
-            continue
-        if 'KXMVE' in ticker:
-            continue
         if ticker in owned:
             continue
 
@@ -424,9 +428,9 @@ def run_buys(markets):
             'volume': volume, 'strategy': category,
         })
 
-    logger.info(f"[UNIVERSAL] {len(buys)} candidates passed filters")
+    logger.info(f"[CRYPTO] {len(buys)} candidates passed filters")
 
-    # FOCUSED SELECTION: pick best 2 per asset, max 6 total
+    # FOCUSED SELECTION: pick best 2 per asset (BTC/ETH/SOL), max 6 total
     buys = select_focused_trades(buys)
 
     # Limits based on trading_balance (excludes saved/protected money)
@@ -487,7 +491,7 @@ def run_buys(markets):
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
 
-    logger.info(f"[UNIVERSAL] Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
+    logger.info(f"[CRYPTO] Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
 
     # Log category breakdown of buys
     if bought > 0:
@@ -886,12 +890,12 @@ def run_cycle():
     except Exception as e:
         logger.error(f"Double down error: {e}")
 
-    # 3. Fetch ALL live markets and buy the best opportunities
+    # 3. Scan crypto markets for new focused trades (best 2 per asset, 5 contracts each)
     try:
-        all_markets = fetch_all_live_markets()
-        run_buys(all_markets)
+        crypto_markets = fetch_crypto_markets()
+        run_buys(crypto_markets)
     except Exception as e:
-        logger.error(f"Universal buy error: {e}")
+        logger.error(f"Crypto buy error: {e}")
 
     total, trading, saved = get_trading_balance()
     logger.info(f"=== CYCLE END === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
