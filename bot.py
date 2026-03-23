@@ -1,7 +1,7 @@
 """
-19W/0L winning strategy: crypto hourly brackets only.
-3-15c, sell ALL at 50%, expiry save >0%. 10s cycles.
-Paper mode (ENABLE_TRADING=false).
+Buy cheap crypto contracts, sell when they pop.
+$0.03-$0.15, sell at +50%, expiry save >0% @ 1min.
+No caps, no filters — just price and bid.
 """
 
 import os, time, logging, re, requests, traceback
@@ -26,10 +26,6 @@ BUY_MIN = 0.03
 BUY_MAX = 0.15
 CYCLE_SECONDS = 10
 MAX_CONTRACTS_PER_TRADE = 3
-MIN_CONTRACTS_PER_TRADE = 1
-MAX_DEPLOYMENT_PCT = 0.60
-MIN_CASH_RESERVE = 0.30
-MAX_POSITIONS = 10
 PROFIT_BANK_PCT = 0.20
 PAPER_STARTING_BALANCE = 20.00
 PAPER_RESET_TIME = '2026-03-23T21:00:00Z'
@@ -614,27 +610,8 @@ def check_sells():
 
 def run_buys(markets):
     cash = get_balance()
-    logger.info(f"Balance: ${cash:.2f}")
-
     owned = get_owned()
-    num_open = len(owned)
-
-    # Get deployed capital
-    try:
-        open_buys = db.table('trades').select('price,count') \
-            .eq('action', 'buy').is_('pnl', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
-        total_deployed = sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
-    except Exception as e:
-        logger.error(f"Failed to get deployed capital: {e}")
-        total_deployed = 0
-
-    total_balance = cash + total_deployed
-    logger.info(f"Own {num_open} positions | cash=${cash:.2f} | deployed=${total_deployed:.2f} | total=${total_balance:.2f}")
-
-    if num_open >= MAX_POSITIONS:
-        logger.info(f"At max positions ({MAX_POSITIONS}), skipping buys")
-        return
+    logger.info(f"Balance: ${cash:.2f} | {len(owned)} positions open")
 
     candidates = find_buy_candidates(markets)
     candidates = [c for c in candidates if c['ticker'] not in owned]
@@ -642,18 +619,7 @@ def run_buys(markets):
 
     bought = 0
     for c in candidates:
-        if num_open + bought >= MAX_POSITIONS:
-            logger.info(f"MAX POSITIONS: {num_open + bought} open, limit {MAX_POSITIONS}")
-            break
-
         cost = c['price'] * MAX_CONTRACTS_PER_TRADE
-        projected_deployed = total_deployed + cost
-        projected_balance = cash + projected_deployed
-
-        # Deployment limit / cash checks — stop buying, don't spam logs
-        if projected_balance > 0 and projected_deployed / projected_balance >= MAX_DEPLOYMENT_PCT:
-            logger.info(f"DEPLOYMENT LIMIT: {projected_deployed/projected_balance:.0%} >= {MAX_DEPLOYMENT_PCT:.0%}, stopping buys")
-            break
 
         if cost > cash:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${cash:.2f}")
@@ -686,13 +652,12 @@ def run_buys(markets):
                 'current_bid': float(c['bid']),
             }).execute()
             owned.add(c['ticker'])
-            total_deployed += cost
             cash -= cost
             bought += 1
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
 
-    logger.info(f"Bought {bought}, deployed ${total_deployed:.2f}")
+    logger.info(f"Bought {bought}")
 
 
 # === MAIN CYCLE ===
@@ -1112,10 +1077,9 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- golden hour: 50% sell, expiry save, crypto only, 10s cycles")
+    logger.info(f"Bot starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, sell +50%, expiry save, {CYCLE_SECONDS}s cycles")
     logger.info(f"Series: {ALL_SERIES}")
-    logger.info(f"Settings: price=${BUY_MIN}-${BUY_MAX}, filter=price+bid only")
-    logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, {MAX_DEPLOYMENT_PCT:.0%} max deploy, {MIN_CASH_RESERVE:.0%} cash reserve, {MAX_POSITIONS} max positions")
+    logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts per trade, no position cap")
 
     cancel_all_resting()
     sync_with_kalshi()
