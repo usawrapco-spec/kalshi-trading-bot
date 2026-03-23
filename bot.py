@@ -15,7 +15,7 @@ PORT = int(os.environ.get('PORT', 8080))
 
 MIN_PRICE = 0.03
 MAX_PRICE = 0.15
-TAKE_PROFIT_PCT = 35
+TAKE_PROFIT_PCT = 100
 CYCLE_SECONDS = 60
 STARTING_BALANCE = 10.00
 
@@ -70,8 +70,9 @@ def get_balance():
     positive_pnl = sum(p for p in all_pnls if p > 0)
     negative_pnl = sum(p for p in all_pnls if p < 0)
 
+    total_loss = abs(negative_pnl)
     saved = round(0.25 * positive_pnl, 4)
-    trading = round(STARTING_BALANCE - open_cost + 0.75 * positive_pnl + negative_pnl, 2)
+    trading = round(STARTING_BALANCE - open_cost - saved + 0.75 * positive_pnl - total_loss, 2)
 
     return trading, saved
 
@@ -155,7 +156,7 @@ def log_settlement(trade, pnl, label):
 # === POSITION MONITOR ===
 
 def check_positions():
-    """Check all open buys — sell winners at 35%+, hold losers, record settlements."""
+    """Check all open buys — sell winners at 100%+ (doubled), hold losers, record settlements."""
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
