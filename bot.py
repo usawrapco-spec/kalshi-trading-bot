@@ -1,5 +1,5 @@
 """
-Random exit above 30%, instant at 100%, 1 contract, 70% spread.
+Random exit above 30%, instant at 100%, 1 contract, 85% spread.
 Buy cheap crypto contracts. Above 30% gain, dice roll each cycle to take profit.
 """
 
@@ -251,6 +251,7 @@ def clear_non_btcd():
 # 1 contract, instant 100%+, 15s timeout above 30%
 
 entry_times = {}
+dead_tickers = set()
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker='', side=''):
     if current_bid <= 0 or entry_price <= 0:
@@ -267,12 +268,12 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker=
         if key in entry_times: del entry_times[key]
         return True, count, f"BIG WIN +{gain_pct:.0f}%"
 
-    if age >= 15 and gain_pct >= 30:
+    if age >= 15 and gain_pct >= 15:
         if key in entry_times: del entry_times[key]
         return True, count, f"TIMEOUT +{gain_pct:.0f}%"
 
-    if gain_pct >= 30:
-        sell_chance = min(0.80, 0.10 + (gain_pct - 30) * 0.005)
+    if gain_pct >= 15:
+        sell_chance = min(0.80, 0.10 + (gain_pct - 15) * 0.005)
         if random.random() < sell_chance:
             if key in entry_times: del entry_times[key]
             return True, count, f"TAKE PROFIT +{gain_pct:.0f}%"
@@ -288,6 +289,8 @@ def find_buy_candidates(markets):
         ticker = market.get('ticker', '')
         if 'KXMVE' in ticker:
             continue
+        if ticker in dead_tickers:
+            continue
         if any(x in ticker for x in ['MINMON', 'MAXMON', '2026250', '2717', 'MARMAD']):
             continue
 
@@ -296,12 +299,12 @@ def find_buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars', '0') or '0')
         no_bid = float(market.get('no_bid_dollars', '0') or '0')
 
-        if 0.03 <= yes_ask <= 0.20 and yes_bid >= yes_ask * 0.70:
+        if 0.03 <= yes_ask <= 0.20 and yes_bid >= yes_ask * 0.85:
             candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
-        if 0.03 <= no_ask <= 0.20 and no_bid >= no_ask * 0.70:
+        if 0.03 <= no_ask <= 0.20 and no_bid >= no_ask * 0.85:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (block monthly/weekly, 3-20c, 70% spread)")
+    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (block monthly/weekly, 3-20c, 85% spread)")
     return candidates
 
 
@@ -551,7 +554,7 @@ def sync_with_kalshi():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — random exit above 30%, instant 100%")
+    logger.info("check_sells() — random exit above 15%, instant 100%")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -613,6 +616,21 @@ def check_sells():
             settled += 1
             continue
 
+        # Clear expired contracts immediately
+        time_to_expiry = get_time_to_expiry(ticker)
+        if time_to_expiry is not None and time_to_expiry == 0:
+            loss = round(-entry_price * count, 4)
+            try:
+                db.table('trades').update({
+                    'pnl': loss,
+                    'current_bid': 0,
+                }).eq('id', trade['id']).execute()
+            except:
+                pass
+            dead_tickers.add(ticker)
+            logger.info(f"EXPIRED: {ticker} pnl=${loss:.4f}")
+            continue
+
         # Get current bid
         if side == 'yes':
             current_bid = sf(market.get('yes_bid_dollars', '0'))
@@ -635,6 +653,7 @@ def check_sells():
                 }).eq('id', trade['id']).execute()
             except:
                 pass
+            dead_tickers.add(ticker)
             logger.info(f"DEAD: {ticker} bid=${current_bid:.2f} too low (entry=${entry_price:.2f})")
             continue
 
@@ -951,7 +970,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; random exit above 30%, instant 100%, 70% spread</div>
+  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; random exit above 15%, instant 100%, 85% spread</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -982,8 +1001,8 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
-  <div class="status-item">Buy: 3-20c, 70% spread</div>
-  <div class="status-item">Strategy: random exit 30%+, instant 100%</div>
+  <div class="status-item">Buy: 3-20c, 85% spread</div>
+  <div class="status-item">Strategy: random exit 15%+, instant 100%</div>
   <div class="status-item">Max: 1 contract</div>
   <div class="status-item">All crypto series</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
@@ -1155,7 +1174,7 @@ def cash_out_all():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — random exit above 30%, instant 100%, 1 contract, 70% spread")
+    logger.info("Bot starting — random exit above 15%, instant 100%, 1 contract, 85% spread")
     clear_dead()
     sync_with_kalshi()
     cycle_count = 0
