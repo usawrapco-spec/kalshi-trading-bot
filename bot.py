@@ -1,6 +1,6 @@
 """
 19W/0L winning strategy: crypto hourly brackets only.
-3-15c, sell ALL at 100%, expiry save 25%+. 10s cycles.
+3-15c, sell ALL at 50%, expiry save >0%. 10s cycles.
 Paper mode (ENABLE_TRADING=false).
 """
 
@@ -251,8 +251,8 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # +100% → SELL ALL (clears fees easily)
-    if gain_pct >= 100:
+    # +50% → SELL ALL (fast turnover, recycle cash)
+    if gain_pct >= 50:
         return True, count, f"SELL +{gain_pct:.0f}%"
 
     # Expiry save — 1 min left + any profit → SELL ALL
@@ -447,7 +447,7 @@ def sync_with_kalshi():
 
 def check_sells():
     global banked_profit
-    logger.info("check_sells() -- sell at 100%, expiry save >0% @ 1min")
+    logger.info("check_sells() -- sell at 50%, expiry save >0% @ 1min")
     try:
         open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null') \
@@ -693,75 +693,6 @@ def run_buys(markets):
             logger.error(f"Buy DB insert failed: {e}")
 
     logger.info(f"Bought {bought}, deployed ${total_deployed:.2f}")
-
-
-# === DUMP ALL POSITIONS (clean slate on startup) ===
-
-def dump_all_positions():
-    """Sell all open positions at market bid for a clean slate."""
-    try:
-        open_buys = db.table('trades').select('*') \
-            .eq('action', 'buy').is_('pnl', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
-    except Exception as e:
-        logger.error(f"dump_all: DB query failed: {e}")
-        return
-
-    if not open_buys.data:
-        logger.info("DUMP: no open positions to clear")
-        return
-
-    dumped = 0
-    for trade in open_buys.data:
-        ticker = trade['ticker']
-        side = trade['side']
-        entry_price = sf(trade['price'])
-        count = trade.get('count') or 1
-
-        # Get current bid
-        market = get_market(ticker)
-        if market:
-            if side == 'yes':
-                current_bid = sf(market.get('yes_bid_dollars', '0'))
-            else:
-                current_bid = sf(market.get('no_bid_dollars', '0'))
-        else:
-            current_bid = 0
-
-        if current_bid <= 0:
-            current_bid = get_live_bid(ticker, side)
-
-        sell_price = current_bid if current_bid > 0 else 0.0
-        pnl = round((sell_price - entry_price) * count, 4)
-
-        result = place_order(ticker, side, 'sell', sell_price, count) if sell_price > 0 else {'order_id': 'paper', 'status': 'executed'}
-        if not result:
-            continue
-
-        logger.info(f"DUMP: {ticker} {side} x{count} @ ${sell_price:.2f} (entry ${entry_price:.2f}) pnl=${pnl:.4f}")
-
-        try:
-            db.table('trades').insert({
-                'ticker': ticker, 'side': side, 'action': 'sell',
-                'price': float(sell_price), 'count': count,
-                'pnl': float(pnl), 'strategy': 'crypto',
-                'reason': f"CLEAN SLATE DUMP @ ${sell_price:.2f}",
-                'sell_gain_pct': float(round(((sell_price - entry_price) / entry_price) * 100, 1)) if entry_price > 0 else 0,
-            }).execute()
-        except Exception as e:
-            logger.error(f"Dump insert failed: {e}")
-
-        try:
-            db.table('trades').update({
-                'pnl': 0.0,
-                'current_bid': float(sell_price),
-            }).eq('id', trade['id']).execute()
-        except:
-            pass
-
-        dumped += 1
-
-    logger.info(f"DUMP COMPLETE: sold {dumped} positions for clean slate")
 
 
 # === MAIN CYCLE ===
@@ -1188,7 +1119,6 @@ def bot_loop():
 
     cancel_all_resting()
     sync_with_kalshi()
-    dump_all_positions()
 
     while True:
         try:
