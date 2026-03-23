@@ -291,13 +291,7 @@ def find_buy_candidates(markets):
             continue
         if ticker in dead_tickers:
             continue
-        if any(x in ticker for x in ['MINMON', 'MAXMON', '2026250', '2717', 'MARMAD']):
-            continue
-
-        tte = get_time_to_expiry(ticker)
-        if tte is not None and tte > 14400:  # More than 4 hours out
-            continue
-        if tte is not None and tte < 300:  # Less than 5 min, about to expire
+        if any(x in ticker for x in ['MINMON', 'MAXMON', '2026250', 'MARMAD']):
             continue
 
         yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
@@ -310,7 +304,7 @@ def find_buy_candidates(markets):
         if 0.03 <= no_ask <= 0.20 and no_bid >= no_ask * 0.70:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (70% spread, 5min-4hr expiry)")
+    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (block monthly, 3-20c, 70% spread)")
     return candidates
 
 
@@ -1007,7 +1001,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
-  <div class="status-item">Buy: 3-20c, 70% spread, 5min-4hr expiry</div>
+  <div class="status-item">Buy: 3-20c, 70% spread, block monthly</div>
   <div class="status-item">Strategy: random exit 30%+, instant 100%</div>
   <div class="status-item">Max: 1 contract</div>
   <div class="status-item">All crypto series</div>
