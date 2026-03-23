@@ -339,6 +339,61 @@ def startup_purge():
         logger.error(f"Startup purge error: {e}")
 
 
+# === SYNC DB WITH KALSHI ===
+
+def sync_with_kalshi():
+    """Check each DB open position against Kalshi. If we don't own it anymore, mark resolved."""
+    try:
+        open_buys = db.table('trades').select('*') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        if not open_buys.data:
+            logger.info("Sync: no open positions in DB")
+            return
+
+        # Fetch all our positions from Kalshi in one call
+        try:
+            resp = kalshi_get('/portfolio/positions?limit=1000')
+            kalshi_positions = resp.get('market_positions', [])
+        except Exception as e:
+            logger.error(f"Sync: failed to fetch Kalshi positions: {e}")
+            return
+
+        # Build set of tickers we actually own on Kalshi
+        owned_on_kalshi = set()
+        for pos in kalshi_positions:
+            ticker = pos.get('ticker', '')
+            yes_qty = pos.get('position', 0)
+            no_qty = pos.get('total_traded', 0) - abs(yes_qty) if pos.get('total_traded') else 0
+            # If any quantity exists, we own it
+            if yes_qty != 0 or pos.get('total_traded', 0) > 0:
+                owned_on_kalshi.add(ticker)
+
+        cleared = 0
+        for trade in open_buys.data:
+            ticker = trade['ticker']
+            entry_price = sf(trade['price'])
+            count = trade.get('count') or 1
+
+            if ticker in owned_on_kalshi:
+                continue
+
+            # Not on Kalshi anymore — mark as resolved
+            loss = round(-entry_price * count, 4)
+            try:
+                db.table('trades').update({
+                    'pnl': loss,
+                    'current_bid': 0,
+                }).eq('id', trade['id']).execute()
+                cleared += 1
+                logger.info(f"SYNC: {ticker} not on Kalshi, cleared (pnl=${loss:.4f})")
+            except Exception as e:
+                logger.error(f"Sync update failed for {ticker}: {e}")
+
+        logger.info(f"SYNC COMPLETE: cleared {cleared} ghost positions from DB")
+    except Exception as e:
+        logger.error(f"Sync error: {e}")
+
+
 # === CHECK SELLS ===
 
 def check_sells():
@@ -542,13 +597,14 @@ def run_cycle():
     balance = get_trading_balance()
     logger.info(f"=== CYCLE START === Balance: ${balance:.2f}")
 
-    # Force cleanup stale on first cycle in case startup missed it
+    # Force sync + cleanup on first cycle in case startup missed it
     if not _stale_cleaned:
         try:
+            sync_with_kalshi()
             cleanup_stale()
             _stale_cleaned = True
         except Exception as e:
-            logger.error(f"Cleanup stale error: {e}")
+            logger.error(f"First cycle sync/cleanup error: {e}")
 
     try:
         check_sells()
@@ -898,6 +954,7 @@ setInterval(refresh,15000);
 def bot_loop():
     logger.info("Bot starting — Crypto scalper — tiered sell 100/200/300, drop protection 20pts")
     startup_purge()
+    sync_with_kalshi()
     cleanup_stale()
     cycle_count = 0
     while True:
