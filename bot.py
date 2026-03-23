@@ -25,8 +25,7 @@ MAX_CONTRACTS_PER_TRADE = 5     # Max 5 contracts (was 3 — sells work now)
 MIN_CONTRACTS_PER_TRADE = 2     # Minimum 2 contracts per trade
 MAX_SPEND_PER_TRADE_PCT = 0.15  # Max 15% of trading_balance per trade (fewer bigger bets)
 MAX_SPEND_PER_CYCLE = 25
-MAX_TRADES_PER_CYCLE = 6        # Focused: max 6 buys per cycle (was 10)
-MAX_PER_ASSET = 2               # Max 2 contracts per asset group per cycle
+MAX_TRADES_PER_CYCLE = 10       # High volume: buy everything that qualifies
 MAX_OPEN_POSITIONS = 200
 
 # === SELL THRESHOLDS ===
@@ -634,22 +633,21 @@ def select_focused_trades(candidates, max_per_asset=MAX_PER_ASSET, max_total=MAX
 
 
 def run_buys(markets):
-    """Crypto-only buy logic — focused bets: best 2 per asset (BTC/ETH/SOL), max size."""
+    """Crypto buy logic — buy any qualifying contract, no per-asset cap. High volume."""
     total_balance, trading_balance, saved_balance = get_trading_balance()
     owned = get_owned()
     num_open = len(owned)
+    already_owned = 0
     logger.info(f"[CRYPTO] Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f} (PROTECTED, never traded)")
 
     if num_open >= MAX_OPEN_POSITIONS:
         logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
         return
 
-    # Tight filters for crypto: 10-40c sweet spot, real bids, tight spreads
-    min_price = 0.10
-    max_price = 0.40
-    max_spread = 0.10
-    min_volume = 50
-    min_bid = 0.05  # Must have a real bid (someone to sell to)
+    # Loose filters — buy anything cheap with a bid (someone to sell to)
+    min_price = 0.05
+    max_price = 0.45
+    min_bid = 0.01   # Just needs ANY bid
 
     buys = []
     for m in markets:
@@ -657,28 +655,24 @@ def run_buys(markets):
         category = categorize_market(ticker)
 
         if ticker in owned:
+            already_owned += 1
             continue
 
-        # Volume filter — need liquidity to sell later
         volume = sf(m.get('volume', 0)) or sf(m.get('volume_24h', 0))
-        if volume < min_volume:
-            continue
 
-        yes_bid = float(m.get('yes_bid_dollars', '0') or '0')
-        yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
-        no_bid = float(m.get('no_bid_dollars', '0') or '0')
-        no_ask = float(m.get('no_ask_dollars', '0') or '0')
+        yes_bid = sf(m.get('yes_bid_dollars', '0'))
+        yes_ask = sf(m.get('yes_ask_dollars', '0'))
+        no_bid = sf(m.get('no_bid_dollars', '0'))
+        no_ask = sf(m.get('no_ask_dollars', '0'))
 
-        # Collect liquid sides — require real bid (exit liquidity)
+        # Collect qualifying sides
         candidates = []
         if yes_bid >= min_bid and yes_ask > 0 and min_price <= yes_ask <= max_price:
             spread = yes_ask - yes_bid
-            if spread <= max_spread:
-                candidates.append(('yes', yes_ask, yes_bid, spread))
+            candidates.append(('yes', yes_ask, yes_bid, spread))
         if no_bid >= min_bid and no_ask > 0 and min_price <= no_ask <= max_price:
             spread = no_ask - no_bid
-            if spread <= max_spread:
-                candidates.append(('no', no_ask, no_bid, spread))
+            candidates.append(('no', no_ask, no_bid, spread))
 
         if not candidates:
             continue
@@ -693,10 +687,10 @@ def run_buys(markets):
             'volume': volume, 'strategy': category,
         })
 
-    logger.info(f"[CRYPTO] {len(buys)} candidates passed filters")
+    logger.info(f"CRYPTO: found {len(markets)} markets | qualified={len(buys)} | skipped_owned={already_owned}")
 
-    # FOCUSED SELECTION: pick best 2 per asset (BTC/ETH/SOL), max 6 total
-    buys = select_focused_trades(buys)
+    # Sort by tightest spread first (easiest to exit), then by volume
+    buys.sort(key=lambda x: (x['spread'], -x['volume']))
 
     # Limits based on trading_balance (excludes saved/protected money)
     max_exposure = trading_balance * MAX_DEPLOYMENT_PCT
