@@ -346,14 +346,19 @@ def run_cycle():
                              'strategy': strategy, 'volume': vol,
                              'reason': f"{strategy}: {title[:40]} NO@${no:.2f} vol={vol:.0f}"})
 
-        # Sort by volume — most active first
-        buys.sort(key=lambda x: x['volume'], reverse=True)
+        # Split by strategy and sort each by volume
+        trending_buys = sorted([b for b in buys if b['strategy'] == 'trending'], key=lambda x: x['volume'], reverse=True)
+        crypto_buys = sorted([b for b in buys if b['strategy'] == 'crypto'], key=lambda x: x['volume'], reverse=True)
+        weather_buys = sorted([b for b in buys if b['strategy'] == 'weather'], key=lambda x: x['volume'], reverse=True)
 
-        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} series = {len(buys)} opportunities")
+        # Allocate: trending first (20), crypto (20), weather (10)
+        ordered_buys = trending_buys[:20] + crypto_buys[:20] + weather_buys[:10]
 
-        # Buy 1 contract each, up to 50 per cycle
+        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} series | trending={len(trending_buys)} crypto={len(crypto_buys)} weather={len(weather_buys)}")
+
+        # Buy 1 contract each
         bought = 0
-        for signal in buys:
+        for signal in ordered_buys:
             if bought >= MAX_BUYS_PER_CYCLE:
                 break
             if trading_bal < RESERVE_BALANCE:
