@@ -1111,11 +1111,39 @@ setInterval(refresh,15000);
 </html>"""
 
 
+# === CASH OUT — one-time sell everything at startup ===
+
+def cash_out_all():
+    """Sell every position on Kalshi that has a bid."""
+    cancel_all_resting()
+    try:
+        resp = kalshi_get('/portfolio/positions?limit=1000')
+        positions = resp.get('market_positions', [])
+        sold = 0
+        for pos in positions:
+            ticker = pos.get('ticker', '')
+            qty = abs(pos.get('position', 0))
+            if qty <= 0:
+                continue
+            side = 'yes' if pos.get('position', 0) > 0 else 'no'
+            bid = get_live_bid(ticker, side)
+            if bid > 0:
+                result = place_order(ticker, side, 'sell', bid, qty)
+                if result:
+                    logger.info(f"CASH OUT: {ticker} {side} x{qty} @ ${bid:.2f}")
+                    sold += 1
+            else:
+                logger.info(f"CASH OUT NO BID: {ticker} {side} x{qty}")
+        logger.info(f"CASH OUT COMPLETE: sold {sold} positions")
+    except Exception as e:
+        logger.error(f"CASH OUT ERROR: {e}")
+
+
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — random exit above 30%, block monthly, expiry exit all")
-    cancel_all_resting()
+    logger.info("Bot starting — cash out all, then random exit above 30%, block monthly, expiry exit all")
+    cash_out_all()
     clear_dead()
     sync_with_kalshi()
     cycle_count = 0
