@@ -70,8 +70,9 @@ def get_time_to_expiry(ticker, market=None):
     if isinstance(ticker, dict):
         market = ticker
         ticker = ticker.get('ticker', '')
-    # Try parsing from ticker (works for crypto with hour in ticker)
-    match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})(\d{2})-', ticker)
+    # Try parsing from ticker: e.g. KXBTCD-26MAR2318-B62 → 26MAR23 day=26 month=MAR year=23, hour=18
+    # Match with or without trailing dash
+    match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})(\d{2})(?:-|$)', ticker)
     if match:
         g1, mon_str, g3, g4 = match.groups()
         months = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
@@ -87,16 +88,17 @@ def get_time_to_expiry(ticker, market=None):
                 return max(0, (expiry - now).total_seconds())
             except:
                 pass
-    # Fallback: use market close_time/expiration_time from API (sports tickers)
+    # Fallback: use market close_time/expiration_time from API
     if market:
-        close_time = market.get('close_time') or market.get('expiration_time')
-        if close_time:
-            try:
-                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                now = datetime.now(timezone.utc)
-                return max(0, (close_dt - now).total_seconds())
-            except:
-                pass
+        for field in ('close_time', 'expiration_time', 'expected_expiration_time'):
+            close_time = market.get(field)
+            if close_time:
+                try:
+                    close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                    now = datetime.now(timezone.utc)
+                    return max(0, (close_dt - now).total_seconds())
+                except:
+                    pass
     return None
 
 
@@ -287,6 +289,12 @@ def find_buy_candidates(markets):
         sample = markets[0]
         logger.info(f"MARKET FIELDS: {list(sample.keys())}")
         logger.info(f"VOL FIELDS: {[k for k in sample.keys() if 'vol' in k.lower()]} = {[sample.get(k) for k in sample.keys() if 'vol' in k.lower()]}")
+        for m in markets[:3]:
+            ct = m.get('close_time')
+            et = m.get('expiration_time')
+            eet = m.get('expected_expiration_time')
+            parsed = get_time_to_expiry(m.get('ticker', ''), market=m)
+            logger.info(f"EXPIRY DEBUG: {m.get('ticker','')} close_time={ct} expiration_time={et} expected={eet} parsed_secs={parsed}")
 
     candidates = []
     blocked = wrong_price = no_bid = bad_expiry = 0
