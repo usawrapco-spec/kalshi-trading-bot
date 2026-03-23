@@ -262,16 +262,20 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_i
     peak = peak_gains[trade_id]
     drop = peak - gain_pct
 
+    # NEVER sell below 30% — fees eat anything smaller
+    if gain_pct < 30:
+        return False, 0, None
+
     # === PROTECT BIG GAINS ===
     # If we EVER hit 50%+ and it drops 20 points from peak — lock it in
-    if peak >= 50 and drop >= 20 and gain_pct > 0:
+    if peak >= 50 and drop >= 20 and gain_pct >= 30:
         peak_gains.pop(trade_id, None)
         return True, count, f"PROTECT +{gain_pct:.0f}% (peak +{peak:.0f}%)"
 
     # === NEVER LET PROFIT EXPIRE ===
-    # 5 minutes before expiry — sell EVERYTHING green, no exceptions
+    # 2 minutes before expiry — only if above 30%
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 120:
-        if gain_pct > 0:
+        if gain_pct >= 30:
             peak_gains.pop(trade_id, None)
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
