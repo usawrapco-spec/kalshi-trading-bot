@@ -800,9 +800,12 @@ def api_status():
         wins = sum(1 for t in sell_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in sell_data if sf(t['pnl']) < 0)
 
-        open_buys = db.table('trades').select('id') \
+        open_buys = db.table('trades').select('id,price,count') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
-        open_count = len(open_buys.data or [])
+        open_data = open_buys.data or []
+        open_count = len(open_data)
+        positions_value = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_data), 2)
+        cash = round(balance - positions_value, 2)
 
         return jsonify({
             'balance': round(balance, 2),
@@ -812,6 +815,8 @@ def api_status():
             'wins': wins,
             'losses': losses,
             'open_count': open_count,
+            'positions_value': positions_value,
+            'cash': max(0, cash),
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -909,25 +914,46 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
-body{background:#0a0a0a;color:#e0e0e0;font-family:'JetBrains Mono','Fira Code',monospace;padding:16px 20px;font-size:13px}
+body{background:#0a0a0a;color:#e0e0e0;font-family:'JetBrains Mono','SF Mono','Fira Code',monospace;padding:16px 20px;font-size:13px}
 a{color:#4488ff;text-decoration:none}
-.header{text-align:center;margin-bottom:18px;padding:12px 0;border-bottom:1px solid #222}
-.header h1{color:#ffaa00;font-size:22px;letter-spacing:3px;margin-bottom:4px}
-.header .sub{color:#555;font-size:11px}
-.header .live-dot{display:inline-block;width:8px;height:8px;background:#00ff88;border-radius:50%;margin-right:6px;animation:pulse 2s infinite}
+
+/* Portfolio hero */
+.portfolio{text-align:center;margin-bottom:20px;padding:20px 0 16px;border-bottom:1px solid #1a1a1a}
+.portfolio .live-dot{display:inline-block;width:8px;height:8px;background:#00d673;border-radius:50%;margin-right:6px;animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.metrics-row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
-.metric-card{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:14px 10px;text-align:center;transition:border-color .2s}
+.portfolio .sub{color:#555;font-size:11px;margin-bottom:12px}
+.portfolio-value{font-size:48px;font-weight:700;color:#fff;margin-bottom:4px}
+.portfolio-pnl{font-size:18px;font-weight:700;margin-bottom:14px}
+.portfolio-breakdown{display:flex;justify-content:center;gap:32px;flex-wrap:wrap}
+.portfolio-breakdown .item{text-align:center}
+.portfolio-breakdown .item .label{color:#666;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
+.portfolio-breakdown .item .val{font-size:18px;font-weight:700}
+
+/* Metrics row */
+.metrics-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
+.metric-card{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:12px 10px;text-align:center;transition:border-color .2s}
 .metric-card:hover{border-color:#333}
-.metric-card .label{color:#666;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
-.metric-card .value{font-size:22px;font-weight:700}
-.category-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px}
+.metric-card .label{color:#666;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
+.metric-card .value{font-size:20px;font-weight:700}
+
+/* Category cards */
+.category-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px}
 .cat-card{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:12px;transition:border-color .2s}
 .cat-card:hover{border-color:#333}
-.cat-card .cat-name{font-size:11px;font-weight:700;margin-bottom:6px;color:#4488ff}
+.cat-card .cat-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.cat-card .cat-name{font-size:11px;font-weight:700;color:#4488ff}
 .cat-card .cat-record{font-size:10px;color:#888;margin-bottom:4px}
 .cat-card .cat-pnl{font-size:16px;font-weight:700}
 .cat-card .cat-avg{font-size:9px;color:#666;margin-top:2px}
+
+/* Status badges */
+.status-badge{padding:2px 6px;border-radius:3px;font-size:8px;font-weight:700;letter-spacing:.5px}
+.badge-active{background:#002211;color:#00d673}
+.badge-disabled{background:#220000;color:#ff4444}
+.badge-waiting{background:#221800;color:#ffaa00}
+.badge-gray{background:#1a1a1a;color:#555}
+
+/* Panels */
 .panels-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
 .panel{background:#111;border:1px solid #1a1a1a;border-radius:6px;overflow:hidden}
 .panel-header{padding:10px 14px;border-bottom:1px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center}
@@ -937,49 +963,61 @@ a{color:#4488ff;text-decoration:none}
 table{width:100%;border-collapse:collapse;font-size:11px}
 th{color:#555;text-align:left;padding:6px 8px;border-bottom:1px solid #222;text-transform:uppercase;font-size:9px;letter-spacing:.5px;position:sticky;top:0;background:#111}
 td{padding:5px 8px;border-bottom:1px solid #141414}
-tr.row-green{background:rgba(0,255,136,.04)}
+tr.row-green{background:rgba(0,214,115,.04)}
 tr.row-red{background:rgba(255,68,68,.04)}
 tr.row-yellow{background:rgba(255,170,0,.04)}
 tr:hover{background:#1a1a1a !important}
-.green{color:#00ff88}.red{color:#ff4444}.yellow{color:#ffaa00}.blue{color:#4488ff}.gray{color:#555}
+.green{color:#00d673}.red{color:#ff4444}.yellow{color:#ffaa00}.blue{color:#4488ff}.gray{color:#555}
 .badge{padding:2px 6px;border-radius:3px;font-size:9px;font-weight:700}
-.badge-win{background:#002211;color:#00ff88}
+.badge-win{background:#002211;color:#00d673}
 .badge-loss{background:#220000;color:#ff4444}
 .badge-expired{background:#221100;color:#ff4444;font-size:9px}
-.equity-section{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:14px}
+
+/* Equity */
+.equity-section{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:14px;margin-bottom:14px}
 .equity-section h2{color:#ffaa00;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
 #equity-chart{width:100%;height:120px}
-.footer{text-align:center;color:#333;font-size:9px;margin-top:12px}
+
+/* Status bar */
+.status-bar{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:10px 16px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:10px;color:#555}
+.status-bar .status-item{display:flex;align-items:center;gap:4px}
+.status-bar .dot-live{width:6px;height:6px;background:#00d673;border-radius:50%;animation:pulse 2s infinite}
+.status-bar .dot-blocked{width:6px;height:6px;background:#ff4444;border-radius:50%}
+.footer{text-align:center;color:#333;font-size:9px;margin-top:8px}
 .loading{color:#555;text-align:center;padding:20px}
 .panel-body::-webkit-scrollbar{width:4px}
 .panel-body::-webkit-scrollbar-track{background:#111}
 .panel-body::-webkit-scrollbar-thumb{background:#333;border-radius:2px}
 
 @media(max-width:900px){
-.metrics-row{grid-template-columns:repeat(3,1fr)}
+.portfolio-value{font-size:36px}
+.portfolio-breakdown{gap:16px}
+.metrics-row{grid-template-columns:repeat(2,1fr)}
 .panels-row{grid-template-columns:1fr}
 }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <h1>KALSHI SCALP BOT</h1>
-  <div class="sub"><span class="live-dot"></span>LIVE Trading &mdash; 30s cycles &mdash; BTC/ETH/SOL + March Madness &mdash; v4</div>
+<!-- Portfolio Hero -->
+<div class="portfolio">
+  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; crypto + March Madness</div>
+  <div class="portfolio-value" id="p-total">...</div>
+  <div class="portfolio-pnl" id="p-pnl">...</div>
+  <div class="portfolio-breakdown">
+    <div class="item"><div class="label">Positions</div><div class="val" id="p-positions">...</div></div>
+    <div class="item"><div class="label">Cash</div><div class="val" id="p-cash">...</div></div>
+    <div class="item"><div class="label">Banked</div><div class="val green" id="p-saved">...</div></div>
+    <div class="item"><div class="label">Record</div><div class="val" id="p-record">...</div></div>
+  </div>
 </div>
 
-<div class="metrics-row" id="metrics">
-  <div class="metric-card"><div class="label">Balance</div><div class="value" id="m-balance">...</div></div>
-  <div class="metric-card"><div class="label">Net P&amp;L</div><div class="value" id="m-pnl">...</div></div>
-  <div class="metric-card"><div class="label">Saved (Banked)</div><div class="value" id="m-saved">...</div></div>
-  <div class="metric-card"><div class="label">Open Positions</div><div class="value" id="m-open">...</div></div>
-  <div class="metric-card"><div class="label">Record</div><div class="value" id="m-record">...</div></div>
-</div>
-
+<!-- Category Cards -->
 <div class="category-row" id="categories">
   <div class="cat-card"><div class="loading">Loading categories...</div></div>
 </div>
 
+<!-- Panels -->
 <div class="panels-row">
   <div class="panel">
     <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
@@ -995,18 +1033,35 @@ tr:hover{background:#1a1a1a !important}
   </div>
 </div>
 
+<!-- Equity Curve -->
 <div class="equity-section">
   <h2>Equity Curve</h2>
   <canvas id="equity-chart"></canvas>
 </div>
 
-<div class="footer">Auto-refresh every 15s &mdash; Last update: <span id="last-update">—</span></div>
+<!-- Status Bar -->
+<div class="status-bar" id="status-bar">
+  <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
+  <div class="status-item">15M: <span class="dot-blocked"></span> BLOCKED</div>
+  <div class="status-item">Max contracts: 5</div>
+  <div class="status-item">Sell: 25%+</div>
+  <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
+</div>
+<div class="footer">Kalshi Scalp Bot v5 &mdash; auto-refresh 15s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
-function fmt(v,d){return (v>=0?'':'')+'$'+Math.abs(v).toFixed(d||2)}
 function cls(v){return v>0?'green':v<0?'red':'gray'}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
+
+var CAT_STATUS={
+  '15-min Crypto':['DISABLED','badge-disabled'],
+  'Hourly Direction':['ACTIVE','badge-active'],
+  'Hourly Bracket':['ACTIVE','badge-active'],
+  'March Madness':['ACTIVE','badge-active'],
+  'Weather':['DISABLED','badge-gray'],
+  'Other':['MIXED','badge-gray']
+};
 
 async function fetchJSON(url){
   try{var r=await fetch(url);return await r.json()}
@@ -1021,34 +1076,46 @@ async function refresh(){
     fetchJSON('/api/trades')
   ]);
 
-  // Metrics
+  // Portfolio hero
   if(status&&!status.error){
-    $('m-balance').textContent='$'+status.balance.toFixed(2);
-    $('m-balance').className='value green';
+    $('p-total').textContent='$'+status.balance.toFixed(2);
 
     var pnl=status.net_pnl;
-    $('m-pnl').textContent=(pnl>=0?'+':'')+pnl.toFixed(2);
-    $('m-pnl').className='value '+cls(pnl);
+    var arrow=pnl>=0?'\\u25B2':'\\u25BC';
+    $('p-pnl').innerHTML='<span class="'+cls(pnl)+'">'+arrow+' '+(pnl>=0?'+':'')+pnl.toFixed(4)+'</span>';
 
-    $('m-saved').textContent='$'+status.saved.toFixed(2);
-    $('m-saved').className='value green';
-
-    $('m-open').textContent=status.open_count;
-    $('m-open').className='value yellow';
-
-    $('m-record').innerHTML='<span class="green">'+status.wins+'W</span> / <span class="red">'+status.losses+'L</span>';
+    $('p-positions').textContent='$'+(status.positions_value||0).toFixed(2);
+    $('p-cash').textContent='$'+(status.cash||0).toFixed(2);
+    $('p-saved').textContent='$'+(status.saved||0).toFixed(2);
+    $('p-record').innerHTML='<span class="green">'+status.wins+'W</span> <span class="gray">/</span> <span class="red">'+status.losses+'L</span>';
   }
 
-  // Categories
+  // Category cards with status badges
   if(cats&&!cats.error){
+    // Ensure all active categories show even if no trades yet
+    var allCats=['Hourly Direction','Hourly Bracket','March Madness'];
+    var catMap={};
+    cats.forEach(function(c){catMap[c.name]=c});
+    allCats.forEach(function(name){
+      if(!catMap[name])catMap[name]={name:name,wins:0,losses:0,pnl:0,avg_win_pct:0};
+    });
+    // Add any extra categories from data
+    cats.forEach(function(c){if(!catMap[c.name])catMap[c.name]=c});
+
     var h='';
-    cats.forEach(function(c){
+    Object.keys(catMap).forEach(function(name){
+      var c=catMap[name];
       var pc=cls(c.pnl);
+      var st=CAT_STATUS[name]||['ACTIVE','badge-active'];
+      // March Madness: show WAITING if 0 trades
+      if(name==='March Madness'&&c.wins===0&&c.losses===0){
+        st=['SCANNING','badge-waiting'];
+      }
       h+='<div class="cat-card">';
-      h+='<div class="cat-name">'+esc(c.name)+'</div>';
+      h+='<div class="cat-header"><span class="cat-name">'+esc(name)+'</span><span class="status-badge '+st[1]+'">'+st[0]+'</span></div>';
       h+='<div class="cat-record"><span class="green">'+c.wins+'W</span> / <span class="red">'+c.losses+'L</span></div>';
       h+='<div class="cat-pnl '+pc+'">'+(c.pnl>=0?'+':'')+c.pnl.toFixed(2)+'</div>';
-      h+='<div class="cat-avg">Avg win: '+c.avg_win_pct.toFixed(0)+'%</div>';
+      if(c.avg_win_pct>0)h+='<div class="cat-avg">Avg win: '+c.avg_win_pct.toFixed(0)+'%</div>';
       h+='</div>';
     });
     $('categories').innerHTML=h||'<div class="cat-card"><div class="loading">No data</div></div>';
@@ -1104,7 +1171,6 @@ async function refresh(){
     });
     $('trades-body').innerHTML=h||'<tr><td colspan="7" class="gray" style="text-align:center">No completed trades</td></tr>';
 
-    // Equity curve
     drawEquity(completed);
   }
 
@@ -1120,7 +1186,6 @@ function drawEquity(trades){
   canvas.width=W;canvas.height=H;
   ctx.clearRect(0,0,W,H);
 
-  // Build cumulative P&L (trades are newest-first, reverse)
   var sorted=trades.slice().reverse();
   var cumulative=[0];
   var running=0;
@@ -1133,13 +1198,11 @@ function drawEquity(trades){
   var range=max-min||1;
   var pad=10;
 
-  // Zero line
   var zeroY=H-pad-((0-min)/range)*(H-2*pad);
   ctx.strokeStyle='#222';ctx.lineWidth=1;
   ctx.beginPath();ctx.moveTo(0,zeroY);ctx.lineTo(W,zeroY);ctx.stroke();
 
-  // Equity line
-  ctx.strokeStyle=running>=0?'#00ff88':'#ff4444';
+  ctx.strokeStyle=running>=0?'#00d673':'#ff4444';
   ctx.lineWidth=1.5;
   ctx.beginPath();
   for(var i=0;i<cumulative.length;i++){
@@ -1149,12 +1212,10 @@ function drawEquity(trades){
   }
   ctx.stroke();
 
-  // Fill under curve
   ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.closePath();
-  ctx.fillStyle=running>=0?'rgba(0,255,136,.06)':'rgba(255,68,68,.06)';
+  ctx.fillStyle=running>=0?'rgba(0,214,115,.06)':'rgba(255,68,68,.06)';
   ctx.fill();
 
-  // Labels
   ctx.fillStyle='#555';ctx.font='9px JetBrains Mono,monospace';
   ctx.fillText('$'+max.toFixed(2),4,pad+6);
   ctx.fillText('$'+min.toFixed(2),4,H-4);
