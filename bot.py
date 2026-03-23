@@ -192,10 +192,7 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
         if gain_pct > 0:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
-    # Down 50%+ — cut the loss, free up capital
-    if gain_pct <= -50 and current_bid > 0.005:
-        return True, count, f"CUT LOSS {gain_pct:.0f}%"
-
+    # NEVER sell at a loss. Hold it or let it expire.
     return False, 0, None
 
 
@@ -239,7 +236,7 @@ def fetch_crypto_markets():
 # === STARTUP PURGE ===
 
 def startup_purge():
-    """Mark bid=0 positions as losses. Sell anything down 50%+."""
+    """Mark bid=0 positions as losses."""
     try:
         open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -248,10 +245,7 @@ def startup_purge():
             return
 
         purged = 0
-        cut = 0
         for trade in open_buys.data:
-            ticker = trade['ticker']
-            side = trade['side']
             entry_price = sf(trade['price'])
             count = trade.get('count') or 1
             current_bid = sf(trade.get('current_bid'))
@@ -266,26 +260,7 @@ def startup_purge():
                 purged += 1
                 continue
 
-            # Down 50%+ — sell immediately to free capital
-            if entry_price > 0:
-                gain_pct = ((current_bid - entry_price) / entry_price) * 100
-                if gain_pct <= -50 and current_bid > 0.005:
-                    pnl = round((current_bid - entry_price) * count, 4)
-                    sell_order_id = place_order(ticker, side, 'sell', current_bid, count)
-                    if sell_order_id:
-                        db.table('trades').insert({
-                            'ticker': ticker, 'side': side, 'action': 'sell',
-                            'price': float(current_bid), 'count': count,
-                            'pnl': float(pnl), 'strategy': 'crypto',
-                            'reason': f"STARTUP CUT {gain_pct:.0f}%",
-                        }).execute()
-                        db.table('trades').update({
-                            'pnl': 0.0,
-                            'current_bid': float(current_bid),
-                        }).eq('id', trade['id']).execute()
-                        cut += 1
-
-        logger.info(f"Startup purge: {purged} ghosts marked as loss, {cut} underwater positions cut")
+        logger.info(f"Startup purge: {purged} ghosts marked as loss")
     except Exception as e:
         logger.error(f"Startup purge error: {e}")
 
@@ -293,7 +268,7 @@ def startup_purge():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — 15% scalp, expiry save, -50% cut")
+    logger.info("check_sells() — 15% scalp, expiry save, never sell at loss")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -701,7 +676,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c with bid</div>
   <div class="status-item">Sell: +15% scalp</div>
-  <div class="status-item">Cut: -50% loss</div>
+  <div class="status-item">Never sell red</div>
   <div class="status-item">Max: 5 contracts</div>
   <div class="status-item">Bank: 20% of wins</div>
   <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span></div>
@@ -852,7 +827,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — Simple crypto scalper — buy 3-20c, sell +15%, cut -50%")
+    logger.info("Bot starting — Simple crypto scalper — buy 3-20c, sell +15%, never sell at loss")
     startup_purge()
     cycle_count = 0
     while True:
