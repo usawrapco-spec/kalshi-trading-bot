@@ -335,6 +335,54 @@ def fetch_crypto_markets():
     return all_markets
 
 
+# === SELL EVERYTHING — dump all Kalshi positions on startup ===
+
+def sell_everything():
+    """Cancel all pending orders, then sell every position on Kalshi."""
+    # Cancel pending orders first
+    cancel_all_resting()
+
+    # Get all positions from Kalshi and sell
+    try:
+        resp = kalshi_get('/portfolio/positions?limit=1000')
+        positions = resp.get('market_positions', [])
+        sold = 0
+        no_bid = 0
+        for pos in positions:
+            ticker = pos.get('ticker', '')
+            qty = abs(pos.get('total_traded', 0))
+            if qty <= 0:
+                continue
+            side = 'yes' if pos.get('market_exposure', 0) > 0 else 'no'
+            bid = get_live_bid(ticker, side)
+            if bid and bid > 0:
+                place_order(ticker, side, 'sell', bid, qty)
+                logger.info(f"SOLD: {ticker} {side} x{qty} @ ${bid:.2f}")
+                sold += 1
+            else:
+                logger.info(f"NO BID: {ticker} {side} x{qty}")
+                no_bid += 1
+        logger.info(f"SELL EVERYTHING DONE: sold {sold}, no bid {no_bid}")
+    except Exception as e:
+        logger.error(f"SELL EVERYTHING ERROR: {e}")
+
+    # Mark all DB positions as closed
+    try:
+        open_buys = db.table('trades').select('*') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        for trade in (open_buys.data or []):
+            entry_price = sf(trade['price'])
+            count = trade.get('count') or 1
+            loss = round(-entry_price * count, 4)
+            db.table('trades').update({
+                'pnl': loss,
+                'current_bid': 0,
+            }).eq('id', trade['id']).execute()
+        logger.info(f"Cleared {len(open_buys.data or [])} DB positions")
+    except Exception as e:
+        logger.error(f"DB clear error: {e}")
+
+
 # === CANCEL ALL RESTING ORDERS — free locked cash ===
 
 def cancel_all_resting():
@@ -1099,12 +1147,8 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — KXBTCD ONLY, 5s cycles, 5 contracts, executed orders only")
-    cancel_all_resting()
-    clear_dead()
-    startup_purge()
-    resync_positions()
-    clear_non_btcd()
+    logger.info("Bot starting — SELL EVERYTHING, then KXBTCD ONLY, 5s cycles, 5 contracts")
+    sell_everything()
     sync_with_kalshi()
     cycle_count = 0
     while True:
