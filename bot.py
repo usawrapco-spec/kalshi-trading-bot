@@ -166,18 +166,51 @@ def get_owned():
 
 
 # === SELL LOGIC ===
-# Active trader: sell when profitable, free capital, buy something new.
+# Smart sell: tracks momentum, sells on reversal not fixed threshold.
 
-def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
+# Track price history per position
+price_history = {}  # trade_id -> list of recent bids
+
+def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # Profitable — sell it, free capital, buy something new
-    if gain_pct >= 20:
-        return True, count, f"PROFIT +{gain_pct:.0f}%"
+    # Track last 6 bids (about 60 seconds at 10s cycles)
+    if trade_id not in price_history:
+        price_history[trade_id] = []
+    price_history[trade_id].append(current_bid)
+    # Keep last 6 readings
+    if len(price_history[trade_id]) > 6:
+        price_history[trade_id] = price_history[trade_id][-6:]
 
-    # Expiry save
+    history = price_history[trade_id]
+
+    # Need at least 3 readings to judge momentum
+    if len(history) >= 3:
+        recent = history[-3:]
+        going_up = recent[-1] > recent[-2] >= recent[-3]
+        going_down = recent[-1] < recent[-2] <= recent[-3]
+        peaked = recent[-1] < recent[-2] and recent[-2] >= recent[-3]
+
+        # PROFITABLE + PRICE IS DROPPING = sell now, it's reversing
+        if gain_pct >= 20 and going_down:
+            return True, count, f"REVERSING +{gain_pct:.0f}% (3 drops)"
+
+        # PROFITABLE + PEAKED (went up then started down) = sell now
+        if gain_pct >= 20 and peaked:
+            return True, count, f"PEAKED +{gain_pct:.0f}%"
+
+        # PROFITABLE + STILL GOING UP = hold, let it run
+        if gain_pct >= 20 and going_up:
+            pass  # hold — momentum is with us
+
+    # VERY profitable with no clear momentum = take some off the table
+    if gain_pct >= 100 and count > 1:
+        sell_qty = count // 2
+        return True, sell_qty, f"SECURE HALF +{gain_pct:.0f}%"
+
+    # Near expiry — save anything green
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 120:
         if gain_pct > 0:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
@@ -257,7 +290,7 @@ def startup_purge():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — active trader: sell at +20%, expiry save <2min")
+    logger.info("check_sells() — smart sell: momentum tracking, sell on reversal")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -343,7 +376,7 @@ def check_sells():
             pass
 
         # Decide sell
-        do_sell, sell_qty, reason = should_sell(entry_price, current_bid, count, time_to_expiry)
+        do_sell, sell_qty, reason = should_sell(entry_price, current_bid, count, time_to_expiry, trade['id'])
 
         if do_sell and sell_qty > 0:
             pnl = round((current_bid - entry_price) * sell_qty, 4)
