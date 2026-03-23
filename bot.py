@@ -41,6 +41,9 @@ db = create_client(SUPABASE_URL, SUPABASE_KEY)
 auth = KalshiAuth()
 app = Flask(__name__)
 
+# Scanner stats — updated each cycle for dashboard
+last_scan = {'total': 0, 'categories': {}, 'timestamp': None}
+
 
 def sf(val):
     try:
@@ -255,7 +258,7 @@ def fetch_all_live_markets():
 
     logger.info(f"TOTAL LIVE MARKETS: {len(all_markets)}")
 
-    # Categorize what we found
+    # Categorize what we found and store for dashboard
     categories = {}
     for m in all_markets:
         ticker = m.get('ticker', '')
@@ -264,6 +267,10 @@ def fetch_all_live_markets():
 
     for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
         logger.info(f"  {cat}: {count} markets")
+
+    last_scan['total'] = len(all_markets)
+    last_scan['categories'] = categories
+    last_scan['timestamp'] = datetime.now(timezone.utc).isoformat()
 
     return all_markets
 
@@ -710,13 +717,22 @@ def run_cycle():
 
 # === DASHBOARD ===
 
-def categorize_ticker(ticker):
+def categorize_for_dashboard(ticker, strategy=None):
+    """Categorize for dashboard display. Uses strategy tag if available, else ticker pattern."""
+    # Use strategy tag directly if it's from the universal scanner
+    if strategy and strategy not in ('crypto', 'mm_scalp', None, ''):
+        # Title-case the strategy for display
+        return strategy.replace('_', ' ').title()
+    # Legacy strategies
+    if strategy == 'mm_scalp':
+        return 'NCAA Basketball'
+    # Fallback to ticker pattern
     if '15M' in ticker:
         return '15-min Crypto'
     elif 'KXBTCD' in ticker or 'KXETHD' in ticker or 'KXSOLD' in ticker:
-        return 'Hourly Direction'
+        return 'Crypto Direction'
     elif any(x in ticker for x in ['KXBTC-', 'KXETH-', 'KXSOL-']):
-        return 'Hourly Bracket'
+        return 'Crypto Bracket'
     elif any(x in ticker for x in ['KXNCAAMBGAME', 'KXNCAAMB', 'KXCBB']):
         return 'NCAA Basketball'
     elif any(x in ticker for x in ['KXMARMAD', 'KXMM']):
@@ -806,24 +822,37 @@ def api_trades():
 @app.route('/api/categories')
 def api_categories():
     try:
-        sells = db.table('trades').select('ticker,pnl,sell_gain_pct') \
+        sells = db.table('trades').select('ticker,pnl,sell_gain_pct,strategy,created_at') \
             .eq('action', 'sell').not_.is_('pnl', 'null').execute()
 
         cats = {}
         for t in (sells.data or []):
-            cat = categorize_ticker(t.get('ticker', ''))
+            cat = categorize_for_dashboard(t.get('ticker', ''), t.get('strategy'))
             if cat not in cats:
-                cats[cat] = {'wins': 0, 'losses': 0, 'pnl': 0.0, 'win_pcts': []}
+                cats[cat] = {'wins': 0, 'losses': 0, 'pnl': 0.0, 'win_pcts': [], 'last_trade': ''}
             p = sf(t['pnl'])
             cats[cat]['pnl'] += p
+            ts = t.get('created_at', '')
+            if ts > cats[cat]['last_trade']:
+                cats[cat]['last_trade'] = ts
             if p > 0:
                 cats[cat]['wins'] += 1
                 cats[cat]['win_pcts'].append(sf(t.get('sell_gain_pct')))
             elif p < 0:
                 cats[cat]['losses'] += 1
 
+        # Also count open positions per category
+        open_buys = db.table('trades').select('ticker,strategy') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        open_cats = {}
+        for t in (open_buys.data or []):
+            cat = categorize_for_dashboard(t.get('ticker', ''), t.get('strategy'))
+            open_cats[cat] = open_cats.get(cat, 0) + 1
+
         result = []
-        for name, data in cats.items():
+        all_cat_names = set(cats.keys()) | set(open_cats.keys())
+        for name in all_cat_names:
+            data = cats.get(name, {'wins': 0, 'losses': 0, 'pnl': 0.0, 'win_pcts': [], 'last_trade': ''})
             avg_win = (sum(data['win_pcts']) / len(data['win_pcts'])) if data['win_pcts'] else 0
             result.append({
                 'name': name,
@@ -831,6 +860,8 @@ def api_categories():
                 'losses': data['losses'],
                 'pnl': round(data['pnl'], 4),
                 'avg_win_pct': round(avg_win, 1),
+                'open': open_cats.get(name, 0),
+                'last_trade': data['last_trade'],
             })
         result.sort(key=lambda x: x['pnl'], reverse=True)
         return jsonify(result)
@@ -863,12 +894,18 @@ def api_open():
                 'unrealized': unrealized,
                 'gain_pct': gain_pct,
                 'strategy': t.get('strategy', 'crypto'),
+                'category': categorize_for_dashboard(t.get('ticker', ''), t.get('strategy')),
                 'expired': current is None or current <= 0,
             })
         positions.sort(key=lambda x: x['gain_pct'], reverse=True)
         return jsonify(positions)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/scanner')
+def api_scanner():
+    return jsonify(last_scan)
 
 
 @app.route('/dashboard')
@@ -881,17 +918,18 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kalshi Scalp Bot — Command Center</title>
+<title>Kalshi Scalp Bot &mdash; Universal Scanner</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0a0a0a;color:#e0e0e0;font-family:'JetBrains Mono','SF Mono','Fira Code',monospace;padding:16px 20px;font-size:13px}
 a{color:#4488ff;text-decoration:none}
 
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.live-dot{display:inline-block;width:8px;height:8px;background:#00d673;border-radius:50%;margin-right:6px;animation:pulse 2s infinite}
+
 /* Portfolio hero */
 .portfolio{text-align:center;margin-bottom:20px;padding:20px 0 16px;border-bottom:1px solid #1a1a1a}
-.portfolio .live-dot{display:inline-block;width:8px;height:8px;background:#00d673;border-radius:50%;margin-right:6px;animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .portfolio .sub{color:#555;font-size:11px;margin-bottom:12px}
 .portfolio-value{font-size:48px;font-weight:700;color:#fff;margin-bottom:4px}
 .portfolio-pnl{font-size:18px;font-weight:700;margin-bottom:14px}
@@ -900,29 +938,22 @@ a{color:#4488ff;text-decoration:none}
 .portfolio-breakdown .item .label{color:#666;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
 .portfolio-breakdown .item .val{font-size:18px;font-weight:700}
 
-/* Metrics row */
-.metrics-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:14px}
-.metric-card{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:12px 10px;text-align:center;transition:border-color .2s}
-.metric-card:hover{border-color:#333}
-.metric-card .label{color:#666;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
-.metric-card .value{font-size:20px;font-weight:700}
-
 /* Category cards */
-.category-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin-bottom:14px}
-.cat-card{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:12px;transition:border-color .2s}
+.category-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px}
+.cat-card{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:10px 12px;transition:border-color .2s}
 .cat-card:hover{border-color:#333}
-.cat-card .cat-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.cat-card .cat-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
 .cat-card .cat-name{font-size:11px;font-weight:700;color:#4488ff}
-.cat-card .cat-record{font-size:10px;color:#888;margin-bottom:4px}
+.cat-card .cat-record{font-size:10px;color:#888;margin-bottom:3px}
 .cat-card .cat-pnl{font-size:16px;font-weight:700}
-.cat-card .cat-avg{font-size:9px;color:#666;margin-top:2px}
+.cat-card .cat-detail{font-size:9px;color:#666;margin-top:2px}
 
 /* Status badges */
 .status-badge{padding:2px 6px;border-radius:3px;font-size:8px;font-weight:700;letter-spacing:.5px}
 .badge-active{background:#002211;color:#00d673}
 .badge-disabled{background:#220000;color:#ff4444}
 .badge-waiting{background:#221800;color:#ffaa00}
-.badge-gray{background:#1a1a1a;color:#555}
+.badge-idle{background:#1a1a1a;color:#555}
 
 /* Panels */
 .panels-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
@@ -943,11 +974,19 @@ tr:hover{background:#1a1a1a !important}
 .badge-win{background:#002211;color:#00d673}
 .badge-loss{background:#220000;color:#ff4444}
 .badge-expired{background:#221100;color:#ff4444;font-size:9px}
+.type-badge{padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:#1a1a2a;color:#7799cc;white-space:nowrap}
 
 /* Equity */
 .equity-section{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:14px;margin-bottom:14px}
 .equity-section h2{color:#ffaa00;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
 #equity-chart{width:100%;height:120px}
+
+/* Scanner status bar */
+.scanner-bar{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:10px 16px;margin-bottom:14px;font-size:10px;color:#666}
+.scanner-bar .scanner-title{color:#ffaa00;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.scanner-cats{display:flex;flex-wrap:wrap;gap:6px 14px}
+.scanner-cats .sc-item{display:flex;align-items:center;gap:3px}
+.scanner-cats .sc-dot{width:5px;height:5px;border-radius:50%;background:#00d673}
 
 /* Status bar */
 .status-bar{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:10px 16px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:10px;color:#555}
@@ -963,7 +1002,6 @@ tr:hover{background:#1a1a1a !important}
 @media(max-width:900px){
 .portfolio-value{font-size:36px}
 .portfolio-breakdown{gap:16px}
-.metrics-row{grid-template-columns:repeat(2,1fr)}
 .panels-row{grid-template-columns:1fr}
 }
 </style>
@@ -972,7 +1010,7 @@ tr:hover{background:#1a1a1a !important}
 
 <!-- Portfolio Hero -->
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; ALL markets</div>
+  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; Universal Scanner &mdash; ALL markets</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -983,9 +1021,15 @@ tr:hover{background:#1a1a1a !important}
   </div>
 </div>
 
-<!-- Category Cards -->
+<!-- Category Cards (dynamic) -->
 <div class="category-row" id="categories">
   <div class="cat-card"><div class="loading">Loading categories...</div></div>
+</div>
+
+<!-- Scanner Status -->
+<div class="scanner-bar" id="scanner-bar">
+  <div class="scanner-title">Universal Scanner</div>
+  <div class="scanner-cats" id="scanner-cats">Waiting for first scan...</div>
 </div>
 
 <!-- Panels -->
@@ -993,13 +1037,13 @@ tr:hover{background:#1a1a1a !important}
   <div class="panel">
     <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
     <div class="panel-body"><table><thead><tr>
-      <th>Ticker</th><th>Side</th><th>Cnt</th><th>Entry</th><th>Bid</th><th>Unreal P&amp;L</th><th>Gain%</th>
-    </tr></thead><tbody id="open-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
+      <th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Bid</th><th>P&amp;L</th><th>Gain</th>
+    </tr></thead><tbody id="open-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
   </div>
   <div class="panel">
     <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
     <div class="panel-body"><table><thead><tr>
-      <th>Time</th><th>Ticker</th><th>Side</th><th>Cnt</th><th>Entry</th><th>P&amp;L</th><th>Gain%</th>
+      <th>Time</th><th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>P&amp;L</th><th>Gain</th>
     </tr></thead><tbody id="trades-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
   </div>
 </div>
@@ -1011,34 +1055,37 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <!-- Status Bar -->
-<div class="status-bar" id="status-bar">
+<div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
   <div class="status-item">15M: <span class="dot-blocked"></span> BLOCKED</div>
   <div class="status-item">Max contracts: 5</div>
-  <div class="status-item">Sell: 100%+ or expiry</div>
+  <div class="status-item">Sell: 100%+ or expiry save</div>
+  <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span> protected</div>
   <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
 </div>
-<div class="footer">Kalshi Scalp Bot v6 &mdash; Universal Scanner &mdash; auto-refresh 15s</div>
+<div class="footer">Kalshi Scalp Bot v7 &mdash; Universal Scanner &mdash; auto-refresh 15s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
 function cls(v){return v>0?'green':v<0?'red':'gray'}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
 
-var CAT_STATUS={
-  '15-min Crypto':['DISABLED','badge-disabled'],
-  'Hourly Direction':['ACTIVE','badge-active'],
-  'Hourly Bracket':['ACTIVE','badge-active'],
-  'NCAA Basketball':['ACTIVE','badge-active'],
-  'March Madness':['ACTIVE','badge-active'],
-  'Oil':['ACTIVE','badge-active'],
-  'Sports':['ACTIVE','badge-active'],
-  'Elections':['ACTIVE','badge-active'],
-  'Tennis':['ACTIVE','badge-active'],
-  'Economics':['ACTIVE','badge-active'],
-  'Weather':['ACTIVE','badge-active'],
-  'Other':['ACTIVE','badge-active']
-};
+function catType(ticker,strategy){
+  if(strategy&&strategy!=='crypto'&&strategy!=='mm_scalp'&&strategy!=='')return strategy.replace(/_/g,' ');
+  if(strategy==='mm_scalp')return 'NCAA Basketball';
+  if(!ticker)return 'Other';
+  if(ticker.indexOf('KXBTC')>=0||ticker.indexOf('KXETH')>=0||ticker.indexOf('KXSOL')>=0)return ticker.indexOf('-')>=0?'Crypto Bracket':'Crypto Direction';
+  if(ticker.indexOf('KXNCAA')>=0)return 'NCAA Basketball';
+  return 'Other';
+}
+
+function shortType(name){
+  var m={'Crypto Direction':'CRYPTO','Crypto Bracket':'CRYPTO','crypto direction':'CRYPTO','crypto bracket':'CRYPTO',
+    'NCAA Basketball':'NCAA','NCAA basketball':'NCAA','march madness futures':'MM','March Madness Futures':'MM',
+    'oil':'OIL','Oil':'OIL','sports':'SPORT','Sports':'SPORT','elections':'ELECT','Elections':'ELECT',
+    'tennis':'TENNIS','Tennis':'TENNIS','economics':'ECON','Economics':'ECON','weather':'WX','Weather':'WX','other':'OTHER','Other':'OTHER'};
+  return m[name]||name.substring(0,6).toUpperCase();
+}
 
 async function fetchJSON(url){
   try{var r=await fetch(url);return await r.json()}
@@ -1046,16 +1093,17 @@ async function fetchJSON(url){
 }
 
 async function refresh(){
-  var [status,cats,open,trades]=await Promise.all([
+  var [status,cats,open,trades,scanner]=await Promise.all([
     fetchJSON('/api/status'),
     fetchJSON('/api/categories'),
     fetchJSON('/api/open'),
-    fetchJSON('/api/trades')
+    fetchJSON('/api/trades'),
+    fetchJSON('/api/scanner')
   ]);
 
   // Portfolio hero
   if(status&&!status.error){
-    // Portfolio = cash + positions at market value
+    var bal=status.balance||0;
     var posVal=status.positions_value||0;
     var posCost=status.positions_cost||0;
     var cash=status.cash||0;
@@ -1063,7 +1111,7 @@ async function refresh(){
     var unrealized=posVal-posCost;
     $('p-total').textContent='$'+portfolio.toFixed(2);
 
-    var pnl=status.net_pnl+unrealized;
+    var pnl=status.net_pnl||0;
     var arrow=pnl>=0?'\\u25B2':'\\u25BC';
     $('p-pnl').innerHTML='<span class="'+cls(pnl)+'">'+arrow+' '+(pnl>=0?'+':'')+pnl.toFixed(2)+' realized</span>'
       +(unrealized!==0?' <span class="'+cls(unrealized)+'" style="font-size:14px">'+(unrealized>=0?'+':'')+unrealized.toFixed(2)+' open</span>':'');
@@ -1075,47 +1123,59 @@ async function refresh(){
       +(savedToday>0?'<div style="font-size:10px;color:#00d673;margin-top:2px">+$'+savedToday.toFixed(2)+' today</div>':'')
       +'<div style="font-size:9px;color:#555;margin-top:2px">Protected forever</div>';
     $('p-record').innerHTML='<span class="green">'+status.wins+'W</span> <span class="gray">/</span> <span class="red">'+status.losses+'L</span>';
+    $('sb-saved').textContent='$'+(status.saved||0).toFixed(2);
   }
 
-  // Category cards with status badges
+  // Dynamic category cards — only show categories that have trades or open positions
   if(cats&&!cats.error){
-    // Ensure all active categories show even if no trades yet
-    var allCats=['Hourly Direction','Hourly Bracket','NCAA Basketball','March Madness','Oil','Sports','Elections','Tennis','Economics','Other'];
-    var catMap={};
-    cats.forEach(function(c){catMap[c.name]=c});
-    allCats.forEach(function(name){
-      if(!catMap[name])catMap[name]={name:name,wins:0,losses:0,pnl:0,avg_win_pct:0};
-    });
-    // Add any extra categories from data
-    cats.forEach(function(c){if(!catMap[c.name])catMap[c.name]=c});
-
     var h='';
-    Object.keys(catMap).forEach(function(name){
-      var c=catMap[name];
+    cats.forEach(function(c){
       var pc=cls(c.pnl);
-      var st=CAT_STATUS[name]||['ACTIVE','badge-active'];
-      // Show SCANNING if 0 trades in any active category
-      if(c.wins===0&&c.losses===0&&st[0]==='ACTIVE'){
-        st=['SCANNING','badge-waiting'];
-      }
+      var hasActivity=(c.wins+c.losses)>0;
+      var hasOpen=(c.open||0)>0;
+      var stLabel,stClass;
+      if(c.name==='15-min Crypto'){stLabel='DISABLED';stClass='badge-disabled';}
+      else if(hasOpen){stLabel='ACTIVE';stClass='badge-active';}
+      else if(hasActivity){stLabel='IDLE';stClass='badge-idle';}
+      else{stLabel='SCANNING';stClass='badge-waiting';}
       h+='<div class="cat-card">';
-      h+='<div class="cat-header"><span class="cat-name">'+esc(name)+'</span><span class="status-badge '+st[1]+'">'+st[0]+'</span></div>';
-      h+='<div class="cat-record"><span class="green">'+c.wins+'W</span> / <span class="red">'+c.losses+'L</span></div>';
+      h+='<div class="cat-header"><span class="cat-name">'+esc(c.name)+'</span><span class="status-badge '+stClass+'">'+stLabel+'</span></div>';
+      h+='<div class="cat-record"><span class="green">'+c.wins+'W</span> / <span class="red">'+c.losses+'L</span>';
+      if(c.open)h+=' <span class="blue">'+c.open+' open</span>';
+      h+='</div>';
       h+='<div class="cat-pnl '+pc+'">'+(c.pnl>=0?'+':'')+c.pnl.toFixed(2)+'</div>';
-      if(c.avg_win_pct>0)h+='<div class="cat-avg">Avg win: '+c.avg_win_pct.toFixed(0)+'%</div>';
+      if(c.avg_win_pct>0)h+='<div class="cat-detail">Avg win: '+c.avg_win_pct.toFixed(0)+'%</div>';
       h+='</div>';
     });
-    $('categories').innerHTML=h||'<div class="cat-card"><div class="loading">No data</div></div>';
+    $('categories').innerHTML=h||'<div class="cat-card"><div class="loading">No categories yet</div></div>';
   }
 
-  // Open positions
+  // Scanner status bar
+  if(scanner&&scanner.total){
+    var scanCats=scanner.categories||{};
+    var pairs=Object.keys(scanCats).map(function(k){return{name:k,count:scanCats[k]}}).sort(function(a,b){return b.count-a.count});
+    var sh='<span style="color:#e0e0e0;margin-right:8px">Scanning '+scanner.total+' markets:</span>';
+    pairs.forEach(function(p){
+      if(p.name.indexOf('BLOCKED')>=0||p.name.indexOf('SKIP')>=0)return;
+      sh+='<span class="sc-item"><span class="sc-dot"></span>'+esc(p.name)+': '+p.count+'</span>';
+    });
+    if(scanner.timestamp){
+      var ago=Math.round((Date.now()-new Date(scanner.timestamp).getTime())/1000);
+      sh+='<span style="margin-left:auto;color:#555">'+ago+'s ago</span>';
+    }
+    $('scanner-cats').innerHTML=sh;
+  }
+
+  // Open positions with TYPE column
   if(open&&!open.error){
     $('open-count').textContent=open.length+' positions';
     var h='';
     open.forEach(function(p){
       var rc=p.gain_pct>2?'row-green':p.gain_pct<-2?'row-red':'row-yellow';
       var gc=cls(p.gain_pct);
+      var typ=p.category||catType(p.ticker,p.strategy);
       h+='<tr class="'+rc+'">';
+      h+='<td><span class="type-badge">'+esc(shortType(typ))+'</span></td>';
       h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
       h+='<td>'+esc(p.side)+'</td>';
       h+='<td>'+p.count+'</td>';
@@ -1129,10 +1189,10 @@ async function refresh(){
       h+='<td class="'+gc+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
       h+='</tr>';
     });
-    $('open-body').innerHTML=h||'<tr><td colspan="7" class="gray" style="text-align:center">No open positions</td></tr>';
+    $('open-body').innerHTML=h||'<tr><td colspan="8" class="gray" style="text-align:center">No open positions</td></tr>';
   }
 
-  // Recent completed trades
+  // Recent completed trades with TYPE column
   if(trades&&!trades.error){
     var completed=trades.filter(function(t){return t.action==='sell'&&t.pnl!==null&&t.pnl!==0});
     $('trades-count').textContent=completed.length+' trades';
@@ -1142,16 +1202,15 @@ async function refresh(){
       var pc=cls(p);
       var rc=p>0?'row-green':'row-red';
       var time=(t.created_at||'').replace('T',' ').substring(5,19);
-      var price=t.price||0;
       var count=t.count||1;
-      var entry=price-(p/count);
       var gainPct=t.sell_gain_pct||0;
+      var typ=catType(t.ticker,t.strategy);
       h+='<tr class="'+rc+'">';
       h+='<td>'+esc(time)+'</td>';
+      h+='<td><span class="type-badge">'+esc(shortType(typ))+'</span></td>';
       h+='<td style="font-size:10px">'+esc(t.ticker||'')+'</td>';
       h+='<td>'+esc(t.side||'')+'</td>';
       h+='<td>'+count+'</td>';
-      h+='<td>$'+entry.toFixed(2)+'</td>';
       h+='<td class="'+pc+'">'+(p>=0?'+':'')+p.toFixed(4)+'</td>';
       h+='<td class="'+pc+'">'+(gainPct>=0?'+':'')+gainPct.toFixed(0)+'%</td>';
       h+='</tr>';
