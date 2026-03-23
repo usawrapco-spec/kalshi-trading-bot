@@ -1,15 +1,15 @@
 """
-Golden hour sell + price cap.
-$0.03-$0.15, adaptive sell (30% baseline, 50% of avg win), expiry save.
-Max 10 positions, 10s cycles, paper mode.
+Clean slate scalper. Buy cheap crypto, sell at 30%, take the loss on expiry.
+$0.03-$0.20, 5 contracts, 30s cycles, paper mode.
 """
 
-import os, time, logging, re, requests, traceback
+import os, time, logging, traceback
 from datetime import datetime, timezone
 from flask import Flask, render_template_string, jsonify
 from threading import Thread
 from supabase import create_client
 from kalshi_auth import KalshiAuth
+import requests
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -23,20 +23,14 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === SETTINGS ===
 BUY_MIN = 0.03
-BUY_MAX = 0.15
-CYCLE_SECONDS = 10
-MAX_CONTRACTS_PER_TRADE = 3
-MAX_POSITIONS = 10
-SELL_BASELINE_PCT = 30
-PROFIT_BANK_PCT = 0.20
-PAPER_STARTING_BALANCE = 20.00
-PAPER_RESET_TIME = '2026-03-23T21:00:00Z'
+BUY_MAX = 0.20
+CYCLE_SECONDS = 30
+CONTRACTS_PER_TRADE = 5
+SELL_THRESHOLD = 0.30  # 30% gain = sell
+PAPER_STARTING_BALANCE = 50.00
+MAX_BUYS_PER_CYCLE = 10
 
-# === SERIES TO SCAN (crypto hourly brackets only — 19W/0L) ===
-ALL_SERIES = ['KXBTCD', 'KXETHD', 'KXBTC', 'KXETH', 'KXSOLD']
-
-# === HARD BLOCKS ===
-BLOCKED_PATTERNS = ['KXMVE', '-15M']
+CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -44,7 +38,6 @@ auth = KalshiAuth()
 app = Flask(__name__)
 
 # === STATE ===
-banked_profit = 0.0
 current_hot_markets = []
 
 
@@ -53,44 +46,6 @@ def sf(val):
         return float(val) if val is not None else 0.0
     except:
         return 0.0
-
-
-# === EXPIRY PARSING ===
-
-def get_time_to_expiry(ticker, market=None):
-    if isinstance(ticker, dict):
-        market = ticker
-        ticker = ticker.get('ticker', '')
-    # Try parsing from ticker: e.g. KXBTCD-26MAR2318-B62 → 26MAR23 day=26 month=MAR year=23, hour=18
-    # Match with or without trailing dash
-    match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})(\d{2})(?:-|$)', ticker)
-    if match:
-        g1, mon_str, g3, g4 = match.groups()
-        months = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
-                  'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
-        month = months.get(mon_str)
-        if month:
-            year = 2000 + int(g1)
-            day = int(g3)
-            hour = int(g4)
-            try:
-                expiry = datetime(year, month, day, hour, 59, 59, tzinfo=timezone.utc)
-                now = datetime.now(timezone.utc)
-                return max(0, (expiry - now).total_seconds())
-            except:
-                pass
-    # Fallback: use market close_time/expiration_time from API
-    if market:
-        for field in ('close_time', 'expiration_time', 'expected_expiration_time'):
-            close_time = market.get(field)
-            if close_time:
-                try:
-                    close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                    now = datetime.now(timezone.utc)
-                    return max(0, (close_dt - now).total_seconds())
-                except:
-                    pass
-    return None
 
 
 # === KALSHI API ===
@@ -120,18 +75,6 @@ def kalshi_post(path, data):
         raise
 
 
-def kalshi_delete(path):
-    try:
-        url = f"{KALSHI_HOST}/trade-api/v2{path}"
-        headers = auth.get_headers("DELETE", f"/trade-api/v2{path}")
-        resp = requests.delete(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        return resp.json() if resp.text else {}
-    except Exception as e:
-        logger.error(f"DELETE {path} failed: {e}")
-        raise
-
-
 def get_market(ticker):
     try:
         resp = kalshi_get(f"/markets/{ticker}")
@@ -147,7 +90,6 @@ def place_order(ticker, side, action, price, count):
 
     price_cents = int(round(price * 100))
     try:
-        logger.info(f"ORDER: {action.upper()} {ticker} {side} x{count} @ ${price:.2f} ({price_cents}c)")
         resp = kalshi_post('/portfolio/orders', {
             'ticker': ticker,
             'action': action,
@@ -157,131 +99,254 @@ def place_order(ticker, side, action, price, count):
             'yes_price' if side == 'yes' else 'no_price': price_cents,
         })
         order = resp.get('order', {})
-        order_id = order.get('order_id', '')
-        status = order.get('status', '')
-        logger.info(f"ORDER PLACED: {order_id} status={status}")
-        time.sleep(0.5)
-        return {'order_id': order_id, 'status': status}
+        return {'order_id': order.get('order_id', ''), 'status': order.get('status', '')}
     except Exception as e:
         logger.error(f"ORDER FAILED: {action.upper()} {ticker} -- {e}")
-        time.sleep(0.5)
         return None
-
-
-def get_live_bid(ticker, side):
-    try:
-        resp = kalshi_get(f"/markets/{ticker}/orderbook?depth=3")
-        if side == 'yes':
-            bids = resp.get('yes', resp.get('orderbook', {}).get('yes', []))
-        else:
-            bids = resp.get('no', resp.get('orderbook', {}).get('no', []))
-        if isinstance(bids, list) and bids:
-            if isinstance(bids[0], list):
-                return float(bids[0][0]) / 100.0
-            elif isinstance(bids[0], dict):
-                prices = [float(k) for k in bids[0].keys()]
-                return max(prices) / 100.0 if prices else 0.0
-        return 0.0
-    except Exception as e:
-        logger.warning(f"Orderbook fetch failed for {ticker}: {e}")
-        return 0.0
 
 
 # === BALANCE ===
 
-def get_kalshi_balance():
+def get_paper_balance():
     try:
-        resp = kalshi_get('/portfolio/balance')
-        balance_cents = resp.get('balance', 0)
-        return float(balance_cents) / 100.0
+        # Sum all buy costs
+        buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
+        buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
+
+        # Sum all sell revenue
+        sells = db.table('trades').select('price,count').eq('action', 'sell').execute()
+        sell_revenue = sum(sf(t['price']) * (t.get('count') or 1) for t in (sells.data or []))
+
+        return max(0, PAPER_STARTING_BALANCE - buy_cost + sell_revenue)
     except Exception as e:
-        logger.error(f"Balance fetch failed: {e}")
+        logger.error(f"Balance calc failed: {e}")
         return 0.0
 
 
-def get_realized_pnl():
+def get_open_positions():
     try:
-        sells = db.table('trades').select('pnl') \
-            .eq('action', 'sell').not_.is_('pnl', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
-        return sum(sf(t['pnl']) for t in (sells.data or []))
+        result = db.table('trades').select('*').eq('action', 'buy').is_('pnl', 'null').execute()
+        return result.data or []
     except Exception as e:
-        logger.error(f"get_realized_pnl failed: {e}")
-        return 0.0
+        logger.error(f"get_open_positions failed: {e}")
+        return []
 
 
-def get_open_position_cost():
-    try:
-        open_buys = db.table('trades').select('price,count') \
-            .eq('action', 'buy').is_('pnl', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
-        return sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
-    except Exception as e:
-        logger.error(f"get_open_position_cost failed: {e}")
-        return 0.0
+def get_owned_tickers():
+    return {t['ticker'] for t in get_open_positions()}
 
 
-def get_balance():
-    if ENABLE_TRADING:
-        return get_kalshi_balance()
-    else:
-        realized = get_realized_pnl()
-        open_cost = get_open_position_cost()
-        paper = PAPER_STARTING_BALANCE + realized - open_cost
-        return max(0, paper)
+# === SELL LOGIC ===
 
+def check_sells():
+    logger.info("--- SELL CHECK ---")
+    open_positions = get_open_positions()
 
-def get_owned():
-    try:
-        result = db.table('trades').select('ticker') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
-        return {t['ticker'] for t in (result.data or [])}
-    except Exception as e:
-        logger.error(f"get_owned failed: {e}")
-        return set()
+    if not open_positions:
+        logger.info("No open positions")
+        return
 
+    logger.info(f"Checking {len(open_positions)} open positions")
+    sold = 0
+    expired = 0
 
-# === SELL LOGIC (golden hour adaptive) ===
+    for trade in open_positions:
+        ticker = trade['ticker']
+        side = trade['side']
+        entry_price = sf(trade['price'])
+        count = trade.get('count') or 1
 
-def _get_adaptive_threshold():
-    """Start at 30%, adjust to 50% of average win gain."""
-    try:
-        wins = db.table('trades').select('sell_gain_pct') \
-            .eq('action', 'sell').gt('pnl', 0) \
-            .not_.is_('sell_gain_pct', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
-        if wins.data and len(wins.data) >= 3:
-            avg_win = sum(sf(w['sell_gain_pct']) for w in wins.data) / len(wins.data)
-            adaptive = max(SELL_BASELINE_PCT, avg_win * 0.5)
-            return adaptive
-    except Exception as e:
-        logger.error(f"Adaptive threshold error: {e}")
-    return SELL_BASELINE_PCT
+        if entry_price <= 0:
+            continue
 
+        market = get_market(ticker)
+        if not market:
+            continue
 
-def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
-    if current_bid <= 0 or entry_price <= 0:
-        return False, 0, None
+        status = market.get('status', '')
+        result_val = market.get('result', '')
 
-    gain_pct = ((current_bid - entry_price) / entry_price) * 100
-    threshold = _get_adaptive_threshold()
+        # Check if expired/settled
+        if status in ('closed', 'settled', 'finalized') or result_val:
+            if result_val == side:
+                pnl = round((1.0 - entry_price) * count, 4)
+                sell_price = 1.0
+                reason = f"WIN settled @$1.00"
+            elif result_val:
+                pnl = round(-entry_price * count, 4)
+                sell_price = 0.0
+                reason = f"LOSS expired"
+            else:
+                continue
 
-    # Adaptive threshold → SELL ALL
-    if gain_pct >= threshold:
-        return True, count, f"SELL +{gain_pct:.0f}% (threshold {threshold:.0f}%)"
+            logger.info(f"EXPIRED/SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
+            try:
+                db.table('trades').insert({
+                    'ticker': ticker, 'side': side, 'action': 'sell',
+                    'price': float(sell_price), 'count': count,
+                    'pnl': float(pnl),
+                }).execute()
+                db.table('trades').update({'pnl': 0.0}).eq('id', trade['id']).execute()
+            except Exception as e:
+                logger.error(f"Settle DB error: {e}")
+            expired += 1
+            continue
 
-    # Expiry save — 1 min left + any profit → SELL ALL
-    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 60:
-        if gain_pct > 0:
-            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
+        # Check if contract close_time is past
+        close_time = market.get('close_time') or market.get('expected_expiration_time')
+        if close_time:
+            try:
+                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                if close_dt < datetime.now(timezone.utc):
+                    pnl = round(-entry_price * count, 4)
+                    logger.info(f"EXPIRED (time): {ticker} pnl=${pnl:.4f}")
+                    try:
+                        db.table('trades').update({'pnl': pnl}).eq('id', trade['id']).execute()
+                    except:
+                        pass
+                    expired += 1
+                    continue
+            except:
+                pass
 
-    return False, 0, None
+        # Get current bid
+        if side == 'yes':
+            current_bid = sf(market.get('yes_bid_dollars', '0'))
+        else:
+            current_bid = sf(market.get('no_bid_dollars', '0'))
+
+        if current_bid <= 0:
+            continue
+
+        gain = (current_bid - entry_price) / entry_price
+        gain_pct = gain * 100
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
+
+        # Update current_bid in DB for dashboard
+        try:
+            db.table('trades').update({'current_bid': float(current_bid)}).eq('id', trade['id']).execute()
+        except:
+            pass
+
+        # 30% gain = SELL
+        if gain >= SELL_THRESHOLD:
+            pnl = round((current_bid - entry_price) * count, 4)
+            result = place_order(ticker, side, 'sell', current_bid, count)
+            if not result:
+                continue
+
+            logger.info(f"SELL: {ticker} {side} x{count} @ ${current_bid:.2f} | +{gain_pct:.0f}% | pnl=${pnl:.4f}")
+            try:
+                db.table('trades').insert({
+                    'ticker': ticker, 'side': side, 'action': 'sell',
+                    'price': float(current_bid), 'count': count,
+                    'pnl': float(pnl),
+                    'sell_gain_pct': float(round(gain_pct, 1)),
+                }).execute()
+                db.table('trades').update({'pnl': 0.0, 'current_bid': float(current_bid)}).eq('id', trade['id']).execute()
+            except Exception as e:
+                logger.error(f"Sell DB error: {e}")
+            sold += 1
+
+    logger.info(f"SELL SUMMARY: sold={sold} expired={expired}")
 
 
 # === BUY LOGIC ===
 
+def fetch_all_markets():
+    all_markets = []
+    for series in CRYPTO_SERIES:
+        try:
+            resp = kalshi_get(f'/markets?series_ticker={series}&status=open&limit=200')
+            batch = resp.get('markets', [])
+            all_markets.extend(batch)
+        except Exception as e:
+            logger.error(f"Fetch {series} failed: {e}")
+    logger.info(f"Fetched {len(all_markets)} markets from {len(CRYPTO_SERIES)} series")
+    return all_markets
+
+
+def buy_candidates(markets):
+    balance = get_paper_balance()
+    owned = get_owned_tickers()
+    logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
+
+    if balance <= 5.0:
+        logger.info("Balance too low, skipping buys")
+        return
+
+    candidates = []
+    now = datetime.now(timezone.utc)
+
+    for market in markets:
+        ticker = market.get('ticker', '')
+
+        # Skip if already owned
+        if ticker in owned:
+            continue
+
+        # Must expire in more than 30 minutes
+        close_time = market.get('close_time') or market.get('expected_expiration_time')
+        if close_time:
+            try:
+                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                if (close_dt - now).total_seconds() < 1800:
+                    continue
+            except:
+                pass
+
+        yes_ask = sf(market.get('yes_ask_dollars', '0'))
+        yes_bid = sf(market.get('yes_bid_dollars', '0'))
+        no_ask = sf(market.get('no_ask_dollars', '0'))
+        no_bid = sf(market.get('no_bid_dollars', '0'))
+
+        # YES side: price in range + bid exists
+        if BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
+
+        # NO side: price in range + bid exists
+        if BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
+
+    # Sort by price ascending (cheapest first)
+    candidates.sort(key=lambda x: x['price'])
+    logger.info(f"Found {len(candidates)} buy candidates")
+
+    for c in candidates[:10]:
+        logger.info(f"  CANDIDATE: {c['ticker']} {c['side']} ask=${c['price']:.2f} bid=${c['bid']:.2f}")
+
+    bought = 0
+    for c in candidates:
+        if bought >= MAX_BUYS_PER_CYCLE:
+            break
+
+        cost = c['price'] * CONTRACTS_PER_TRADE
+        if cost > balance:
+            logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${balance:.2f}")
+            break
+
+        result = place_order(c['ticker'], c['side'], 'buy', c['price'], CONTRACTS_PER_TRADE)
+        if not result:
+            continue
+
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{CONTRACTS_PER_TRADE} @ ${c['price']:.2f}")
+        try:
+            db.table('trades').insert({
+                'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
+                'price': float(c['price']), 'count': CONTRACTS_PER_TRADE,
+                'current_bid': float(c['bid']),
+            }).execute()
+            owned.add(c['ticker'])
+            balance -= cost
+            bought += 1
+        except Exception as e:
+            logger.error(f"Buy DB insert failed: {e}")
+
+    logger.info(f"Bought {bought} positions")
+
+
 def _get_volume(market):
-    for key in ('volume', 'volume_24h', 'volume_24h_fp', 'volume_fp'):
+    for key in ('volume', 'volume_24h'):
         val = market.get(key)
         if val is not None and val != '' and val != 0:
             try:
@@ -291,93 +356,9 @@ def _get_volume(market):
     return 0
 
 
-def find_buy_candidates(markets):
-    if markets:
-        sample = markets[0]
-        logger.info(f"MARKET FIELDS: {list(sample.keys())}")
-        logger.info(f"VOL FIELDS: {[k for k in sample.keys() if 'vol' in k.lower()]} = {[sample.get(k) for k in sample.keys() if 'vol' in k.lower()]}")
-
-    candidates = []
-    blocked = wrong_price = no_bid = 0
-
-    for market in markets:
-        ticker = market.get('ticker', '')
-
-        if any(pat in ticker for pat in BLOCKED_PATTERNS):
-            blocked += 1
-            continue
-
-        # Skip contracts expiring in < 30 min
-        close_time = market.get('close_time') or market.get('expected_expiration_time')
-        if close_time:
-            try:
-                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                mins_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 60
-                if mins_left < 30:
-                    continue
-            except:
-                pass
-
-        yes_ask = sf(market.get('yes_ask_dollars', '0'))
-        yes_bid = sf(market.get('yes_bid_dollars', '0'))
-        no_ask = sf(market.get('no_ask_dollars', '0'))
-        no_bid = sf(market.get('no_bid_dollars', '0'))
-        volume = _get_volume(market)
-        added = False
-
-        # YES side: price in range + bid exists
-        if BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            candidates.append({
-                'ticker': ticker, 'side': 'yes',
-                'price': yes_ask, 'bid': yes_bid,
-                'volume': volume
-            })
-            added = True
-
-        # NO side: price in range + bid exists
-        if BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
-            candidates.append({
-                'ticker': ticker, 'side': 'no',
-                'price': no_ask, 'bid': no_bid,
-                'volume': volume
-            })
-            added = True
-
-        if not added:
-            if not ((BUY_MIN <= yes_ask <= BUY_MAX) or (BUY_MIN <= no_ask <= BUY_MAX)):
-                wrong_price += 1
-            elif yes_bid <= 0 and no_bid <= 0:
-                no_bid += 1
-
-    candidates.sort(key=lambda x: x['volume'], reverse=True)
-    total = len(markets)
-    logger.info(f"FILTER: {total} total | {blocked} blocked | {wrong_price} price out | {no_bid} no bid | {len(candidates)} candidates")
-
-    # Log first 10 candidates
-    for c in candidates[:10]:
-        logger.info(f"  CANDIDATE: {c['ticker']} {c['side']} ask=${c['price']:.2f} bid=${c['bid']:.2f} vol={c['volume']}")
-
-    return candidates
-
-
-# === FETCH ALL MARKETS ===
-
-def fetch_all_markets():
-    all_markets = []
-    for series in ALL_SERIES:
-        try:
-            resp = kalshi_get(f'/markets?series_ticker={series}&status=open&limit=200')
-            batch = resp.get('markets', [])
-            all_markets.extend(batch)
-        except Exception as e:
-            logger.error(f"Fetch {series} failed: {e}")
-    logger.info(f"Fetched {len(all_markets)} markets from {len(ALL_SERIES)} series")
-    return all_markets
-
-
-def _update_hot_markets(markets):
+def update_hot_markets(markets):
     global current_hot_markets
-    owned = get_owned()
+    owned = get_owned_tickers()
     by_vol = sorted(markets, key=lambda m: _get_volume(m), reverse=True)[:20]
     current_hot_markets = [
         {
@@ -392,346 +373,28 @@ def _update_hot_markets(markets):
         }
         for m in by_vol
     ]
-    for h in by_vol[:10]:
-        vol = _get_volume(h)
-        ticker = h.get('ticker', '')
-        yes = h.get('yes_ask_dollars', '?')
-        no = h.get('no_ask_dollars', '?')
-        logger.info(f"HOT: {ticker} vol={vol} yes=${yes} no=${no}")
-
-
-# === CANCEL ALL RESTING ORDERS ===
-
-def cancel_all_resting():
-    if not ENABLE_TRADING:
-        return
-    try:
-        resp = kalshi_get('/portfolio/orders?status=resting')
-        orders = resp.get('orders', [])
-        cancelled = 0
-        for order in orders:
-            try:
-                kalshi_delete(f"/portfolio/orders/{order['order_id']}")
-                logger.info(f"CANCELLED: {order.get('ticker', 'unknown')} {order.get('side', '')} {order.get('action', '')}")
-                cancelled += 1
-            except Exception as e:
-                logger.error(f"Cancel order failed: {e}")
-        logger.info(f"Cancelled {cancelled} resting orders")
-    except Exception as e:
-        logger.error(f"Cancel all resting error: {e}")
-
-
-# === SYNC DB WITH KALSHI ===
-
-def sync_with_kalshi():
-    try:
-        open_buys = db.table('trades').select('*') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
-        if not open_buys.data:
-            logger.info("Sync: no open positions in DB")
-            return
-
-        try:
-            resp = kalshi_get('/portfolio/positions?limit=1000')
-            kalshi_positions = resp.get('market_positions', [])
-        except Exception as e:
-            logger.error(f"Sync: failed to fetch Kalshi positions: {e}")
-            return
-
-        owned_on_kalshi = set()
-        for pos in kalshi_positions:
-            ticker = pos.get('ticker', '')
-            if pos.get('total_traded', 0) > 0:
-                owned_on_kalshi.add(ticker)
-
-        cleared = 0
-        for trade in open_buys.data:
-            ticker = trade['ticker']
-            entry_price = sf(trade['price'])
-            count = trade.get('count') or 1
-
-            if ticker in owned_on_kalshi:
-                continue
-
-            loss = round(-entry_price * count, 4)
-            try:
-                db.table('trades').update({
-                    'pnl': loss,
-                    'current_bid': 0,
-                }).eq('id', trade['id']).execute()
-                cleared += 1
-                logger.info(f"SYNC: {ticker} not on Kalshi, cleared (pnl=${loss:.4f})")
-            except Exception as e:
-                logger.error(f"Sync update failed for {ticker}: {e}")
-
-        logger.info(f"SYNC COMPLETE: cleared {cleared} ghost positions from DB")
-    except Exception as e:
-        logger.error(f"Sync error: {e}")
-
-
-# === CHECK SELLS ===
-
-def check_sells():
-    global banked_profit
-    logger.info("check_sells() -- adaptive sell (30%+), expiry save >0% @ 1min")
-    try:
-        open_buys = db.table('trades').select('*') \
-            .eq('action', 'buy').is_('pnl', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
-    except Exception as e:
-        logger.error(f"check_sells DB query failed: {e}")
-        return
-
-    if not open_buys.data:
-        logger.info("No open positions")
-        return
-
-    logger.info(f"Checking {len(open_buys.data)} open positions:")
-    sold = 0
-    settled = 0
-
-    for trade in open_buys.data:
-        ticker = trade['ticker']
-        side = trade['side']
-        entry_price = sf(trade['price'])
-        count = trade.get('count') or 1
-        if entry_price <= 0:
-            continue
-
-        # Fetch market
-        market = get_market(ticker)
-        if not market:
-            continue
-
-        status = market.get('status', '')
-        result_val = market.get('result', '')
-
-        # Settlement check
-        if status in ('closed', 'settled', 'finalized') or result_val:
-            if result_val == side:
-                pnl = round((1.0 - entry_price) * count, 4)
-                reason = f"WIN -- settled $1.00 (entry ${entry_price:.2f})"
-                settle_price = 1.0
-            elif result_val:
-                pnl = round(-entry_price * count, 4)
-                reason = f"LOSS -- expired (entry ${entry_price:.2f})"
-                settle_price = 0.0
-            else:
-                continue
-
-            logger.info(f"SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
-
-            # Bank profit on wins
-            if pnl > 0:
-                banked = pnl * PROFIT_BANK_PCT
-                banked_profit += banked
-                logger.info(f"BANKED ${banked:.4f} (20% of ${pnl:.4f} profit) | Total banked: ${banked_profit:.4f}")
-
-            try:
-                db.table('trades').insert({
-                    'ticker': ticker, 'side': side, 'action': 'sell',
-                    'price': float(settle_price), 'count': count,
-                    'pnl': float(pnl), 'strategy': 'crypto',
-                    'reason': reason,
-                    'sell_gain_pct': float(round(((settle_price - entry_price) / entry_price) * 100, 1)),
-                }).execute()
-            except Exception as e:
-                logger.error(f"Settle insert failed: {e}")
-
-            try:
-                db.table('trades').update({
-                    'pnl': 0.0,
-                    'current_bid': float(settle_price),
-                }).eq('id', trade['id']).execute()
-            except:
-                pass
-            settled += 1
-            continue
-
-        # Clear expired contracts
-        time_to_expiry = get_time_to_expiry(ticker, market=market)
-        if time_to_expiry is not None and time_to_expiry == 0:
-            loss = round(-entry_price * count, 4)
-            try:
-                db.table('trades').update({
-                    'pnl': loss,
-                    'current_bid': 0,
-                }).eq('id', trade['id']).execute()
-            except:
-                pass
-            logger.info(f"EXPIRED: {ticker} pnl=${loss:.4f}")
-            continue
-
-        # Get current bid
-        if side == 'yes':
-            current_bid = sf(market.get('yes_bid_dollars', '0'))
-        else:
-            current_bid = sf(market.get('no_bid_dollars', '0'))
-
-        if current_bid <= 0:
-            current_bid = get_live_bid(ticker, side)
-
-        if current_bid <= 0:
-            continue
-
-        gain_pct = ((current_bid - entry_price) / entry_price) * 100
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
-
-        # Update current price in DB
-        try:
-            db.table('trades').update({
-                'current_bid': float(current_bid),
-            }).eq('id', trade['id']).execute()
-        except:
-            pass
-
-        # Decide sell
-        do_sell, sell_qty, reason = should_sell(entry_price, current_bid, count, time_to_expiry)
-
-        if do_sell and sell_qty > 0:
-            pnl = round((current_bid - entry_price) * sell_qty, 4)
-            sell_order = place_order(ticker, side, 'sell', current_bid, sell_qty)
-            if not sell_order:
-                continue
-
-            logger.info(f"SELL: {ticker} {side} x{sell_qty} @ ${current_bid:.2f} | {reason} | pnl=${pnl:.4f}")
-
-            # Bank profit
-            if pnl > 0:
-                banked = pnl * PROFIT_BANK_PCT
-                banked_profit += banked
-                logger.info(f"BANKED ${banked:.4f} (20% of ${pnl:.4f} profit) | Total banked: ${banked_profit:.4f}")
-
-            try:
-                db.table('trades').insert({
-                    'ticker': ticker, 'side': side, 'action': 'sell',
-                    'price': float(current_bid), 'count': sell_qty,
-                    'pnl': float(pnl), 'strategy': 'crypto',
-                    'reason': reason,
-                    'sell_gain_pct': float(round(gain_pct, 1)),
-                }).execute()
-            except Exception as e:
-                logger.error(f"Sell insert failed: {e}")
-
-            # If partial sell (half), update remaining count on buy record
-            remaining = count - sell_qty
-            if remaining > 0:
-                try:
-                    db.table('trades').update({
-                        'count': remaining,
-                        'current_bid': float(current_bid),
-                    }).eq('id', trade['id']).execute()
-                except:
-                    pass
-            else:
-                try:
-                    db.table('trades').update({
-                        'pnl': 0.0,
-                        'current_bid': float(current_bid),
-                    }).eq('id', trade['id']).execute()
-                except:
-                    pass
-            sold += 1
-
-    logger.info(f"SELL SUMMARY: sold={sold} settled={settled}")
-
-
-# === RUN BUYS ===
-
-def run_buys(markets):
-    cash = get_balance()
-    owned = get_owned()
-    num_open = len(owned)
-    logger.info(f"Balance: ${cash:.2f} | {num_open} positions open")
-
-    if num_open >= MAX_POSITIONS:
-        logger.info(f"At max positions ({MAX_POSITIONS}), skipping buys")
-        return
-
-    candidates = find_buy_candidates(markets)
-    candidates = [c for c in candidates if c['ticker'] not in owned]
-    logger.info(f"Found {len(candidates)} buy candidates after dedup")
-
-    bought = 0
-    for c in candidates:
-        if num_open + bought >= MAX_POSITIONS:
-            break
-
-        cost = c['price'] * MAX_CONTRACTS_PER_TRADE
-
-        if cost > cash:
-            logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${cash:.2f}")
-            break
-
-        count = MAX_CONTRACTS_PER_TRADE
-        result = place_order(c['ticker'], c['side'], 'buy', c['price'], count)
-        if not result:
-            continue
-
-        if ENABLE_TRADING and result.get('status') == 'resting':
-            try:
-                kalshi_delete(f"/portfolio/orders/{result['order_id']}")
-                logger.info(f"CANCELLED RESTING: {c['ticker']} -- no instant fill")
-            except Exception as e:
-                logger.error(f"Cancel resting failed: {e}")
-            continue
-
-        if ENABLE_TRADING and result.get('status') != 'executed':
-            logger.info(f"SKIP: {c['ticker']} status={result.get('status')}, not logging")
-            continue
-
-        logger.info(f"BUY: {c['ticker']} {c['side']} x{count} @ ${c['price']:.2f} (bid=${c['bid']:.2f}, vol={c['volume']})")
-        try:
-            db.table('trades').insert({
-                'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
-                'price': float(c['price']), 'count': count,
-                'strategy': 'crypto',
-                'reason': f"BUY {c['side'].upper()} @ ${c['price']:.2f} bid=${c['bid']:.2f} vol={c['volume']}",
-                'current_bid': float(c['bid']),
-            }).execute()
-            owned.add(c['ticker'])
-            cash -= cost
-            bought += 1
-        except Exception as e:
-            logger.error(f"Buy DB insert failed: {e}")
-
-    logger.info(f"Bought {bought}")
 
 
 # === MAIN CYCLE ===
 
-_synced = False
-
 def run_cycle():
-    global _synced
-    balance = get_balance()
+    balance = get_paper_balance()
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
     logger.info(f"=== CYCLE START [{mode}] === Balance: ${balance:.2f}")
 
-    if not _synced:
-        try:
-            sync_with_kalshi()
-            _synced = True
-        except Exception as e:
-            logger.error(f"First cycle sync error: {e}")
+    check_sells()
 
-    try:
-        check_sells()
-    except Exception as e:
-        logger.error(f"Sell check error: {e}")
+    markets = fetch_all_markets()
+    update_hot_markets(markets)
 
-    try:
-        markets = fetch_all_markets()
-        _update_hot_markets(markets)
-        run_buys(markets)
-    except Exception as e:
-        logger.error(f"Buy error: {e}")
+    if balance > 5.0:
+        buy_candidates(markets)
 
-    balance = get_balance()
+    balance = get_paper_balance()
     logger.info(f"=== CYCLE END [{mode}] === Balance: ${balance:.2f}")
 
 
-# === DASHBOARD ===
+# === DASHBOARD API ===
 
 @app.route('/')
 def health():
@@ -741,56 +404,36 @@ def health():
 @app.route('/api/status')
 def api_status():
     try:
-        balance = get_balance()
+        balance = get_paper_balance()
 
-        sells = db.table('trades').select('pnl') \
-            .eq('action', 'sell').not_.is_('pnl', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
+        sells = db.table('trades').select('pnl').eq('action', 'sell').not_.is_('pnl', 'null').execute()
         sell_data = sells.data or []
         net_pnl = sum(sf(t['pnl']) for t in sell_data)
         wins = sum(1 for t in sell_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in sell_data if sf(t['pnl']) < 0)
 
-        open_buys = db.table('trades').select('id,price,count,current_bid') \
-            .eq('action', 'buy').is_('pnl', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
-        open_data = open_buys.data or []
-        live_positions = [t for t in open_data if sf(t.get('current_bid')) > 0]
-        open_count = len(live_positions)
-        positions_value = round(sum(sf(t.get('current_bid')) * (t.get('count') or 1) for t in live_positions), 2)
-        positions_cost = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in live_positions), 2)
+        open_positions = get_open_positions()
+        open_count = len(open_positions)
 
-        cash = round(balance, 2)
         mode = "PAPER" if not ENABLE_TRADING else "LIVE"
 
         return jsonify({
-            'balance': round(balance + positions_cost, 2),
+            'balance': round(balance, 2),
             'net_pnl': round(net_pnl, 4),
             'wins': wins,
             'losses': losses,
             'open_count': open_count,
-            'positions_value': positions_value,
-            'positions_cost': positions_cost,
-            'cash': cash,
-            'banked_profit': round(banked_profit, 4),
             'mode': mode,
         })
     except Exception as e:
         logger.error(f"API status error: {e}")
-        mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-        return jsonify({
-            'balance': 0, 'net_pnl': 0, 'wins': 0, 'losses': 0,
-            'open_count': 0, 'positions_value': 0, 'positions_cost': 0,
-            'cash': 0, 'banked_profit': 0, 'mode': mode, 'error': str(e),
-        })
+        return jsonify({'balance': 0, 'net_pnl': 0, 'wins': 0, 'losses': 0, 'open_count': 0, 'mode': 'PAPER', 'error': str(e)})
 
 
 @app.route('/api/trades')
 def api_trades():
     try:
-        result = db.table('trades').select('*') \
-            .gte('created_at', PAPER_RESET_TIME) \
-            .order('created_at', desc=True).limit(200).execute()
+        result = db.table('trades').select('*').order('created_at', desc=True).limit(50).execute()
         return jsonify(result.data or [])
     except Exception as e:
         logger.error(f"API trades error: {e}")
@@ -800,17 +443,12 @@ def api_trades():
 @app.route('/api/open')
 def api_open():
     try:
-        result = db.table('trades').select('*') \
-            .eq('action', 'buy').is_('pnl', 'null') \
-            .gte('created_at', PAPER_RESET_TIME).execute()
         positions = []
-        for t in (result.data or []):
+        for t in get_open_positions():
             price = sf(t.get('price'))
             current = sf(t.get('current_bid'))
             count = int(t.get('count') or 1)
-            if not current or current <= 0:
-                continue
-            if price > 0:
+            if price > 0 and current > 0:
                 unrealized = round((current - price) * count, 4)
                 gain_pct = round(((current - price) / price) * 100, 1)
             else:
@@ -824,6 +462,7 @@ def api_open():
                 'current_bid': current,
                 'unrealized': unrealized,
                 'gain_pct': gain_pct,
+                'created_at': t.get('created_at', ''),
             })
         positions.sort(key=lambda x: x['gain_pct'], reverse=True)
         return jsonify(positions)
@@ -847,7 +486,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kalshi Bot - Clean Reset</title>
+<title>Kalshi Scalper</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
@@ -901,22 +540,14 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; golden hour &mdash; crypto hourly 3-15c &mdash; sell at 50%, expiry save</div>
+  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; simple scalper &mdash; crypto 3-20c &mdash; sell at 30%</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
-    <div class="item"><div class="label">Positions</div><div class="val" id="p-positions">...</div></div>
-    <div class="item"><div class="label">Cash</div><div class="val" id="p-cash">...</div></div>
+    <div class="item"><div class="label">Open</div><div class="val" id="p-positions">...</div></div>
+    <div class="item"><div class="label">Balance</div><div class="val" id="p-cash">...</div></div>
     <div class="item"><div class="label">Record</div><div class="val" id="p-record">...</div></div>
-    <div class="item"><div class="label">Banked</div><div class="val green" id="p-banked">...</div></div>
   </div>
-</div>
-
-<div class="panel">
-  <div class="panel-header"><h2>Hot Markets</h2><div class="count" id="hot-count"></div></div>
-  <div class="panel-body"><table><thead><tr>
-    <th>Ticker</th><th>Title</th><th>Volume</th><th>Yes</th><th>No</th><th></th>
-  </tr></thead><tbody id="hot-body"><tr><td colspan="6" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
@@ -927,10 +558,17 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="panel">
-  <div class="panel-header"><h2>Recent Trades (Last 20)</h2><div class="count" id="trades-count"></div></div>
+  <div class="panel-header"><h2>Hot Markets</h2><div class="count" id="hot-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>P&amp;L</th><th>Gain</th>
-  </tr></thead><tbody id="trades-body"><tr><td colspan="6" class="loading">Loading...</td></tr></tbody></table></div>
+    <th>Ticker</th><th>Title</th><th>Volume</th><th>Yes</th><th>No</th><th></th>
+  </tr></thead><tbody id="hot-body"><tr><td colspan="6" class="loading">Loading...</td></tr></tbody></table></div>
+</div>
+
+<div class="panel">
+  <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
+  <div class="panel-body"><table><thead><tr>
+    <th>Time</th><th>Ticker</th><th>Action</th><th>Side</th><th>Qty</th><th>Price</th><th>P&amp;L</th>
+  </tr></thead><tbody id="trades-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="equity-section">
@@ -940,13 +578,13 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="live-dot dot-paper" id="status-dot"></span> <span id="status-mode">PAPER</span></div>
-  <div class="status-item">Buy: 3-15c, bid &gt; 0, no 15M</div>
-  <div class="status-item">Sell: 50% all, expiry save &gt;0%@1m</div>
-  <div class="status-item">Max: 3 contracts, 10 positions</div>
-  <div class="status-item">Series: Crypto hourly only</div>
+  <div class="status-item">Buy: 3-20c, cheapest first</div>
+  <div class="status-item">Sell: 30% gain</div>
+  <div class="status-item">5 contracts, 30s cycles</div>
+  <div class="status-item">Series: KXBTC/ETH/SOL + daily</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
-<div class="footer">Clean Reset &mdash; auto-refresh 15s</div>
+<div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
@@ -969,22 +607,15 @@ async function refresh(){
   ]);
 
   if(status&&!status.error){
-    var posVal=status.positions_value||0;
-    var posCost=status.positions_cost||0;
-    var cash=status.cash||0;
-    var portfolio=cash+posVal;
-    var unrealized=posVal-posCost;
-    $('p-total').textContent='$'+portfolio.toFixed(2);
+    $('p-total').textContent='$'+(status.balance||0).toFixed(2);
 
     var pnl=status.net_pnl||0;
     var arrow=pnl>=0?'\\u25B2':'\\u25BC';
-    $('p-pnl').innerHTML='<span class="'+cls(pnl)+'">'+arrow+' '+(pnl>=0?'+':'')+pnl.toFixed(2)+' realized</span>'
-      +(unrealized!==0?' <span class="'+cls(unrealized)+'" style="font-size:14px">'+(unrealized>=0?'+':'')+unrealized.toFixed(2)+' open</span>':'');
+    $('p-pnl').innerHTML='<span class="'+cls(pnl)+'">'+arrow+' '+(pnl>=0?'+':'')+pnl.toFixed(2)+' realized</span>';
 
-    $('p-positions').textContent='$'+posVal.toFixed(2);
-    $('p-cash').textContent='$'+cash.toFixed(2);
+    $('p-positions').textContent=status.open_count||0;
+    $('p-cash').textContent='$'+(status.balance||0).toFixed(2);
     $('p-record').innerHTML='<span class="green">'+status.wins+'W</span> <span class="gray">/</span> <span class="red">'+status.losses+'L</span>';
-    $('p-banked').textContent='$'+(status.banked_profit||0).toFixed(2);
 
     var mode=status.mode||'PAPER';
     var isLive=mode==='LIVE';
@@ -1014,27 +645,27 @@ async function refresh(){
   }
 
   if(trades&&!trades.error){
-    var completed=trades.filter(function(t){return t.action==='sell'&&t.pnl!==null&&t.pnl!==0});
-    $('trades-count').textContent=completed.length+' trades';
+    $('trades-count').textContent=trades.length+' trades';
     var h='';
-    completed.slice(0,20).forEach(function(t){
-      var p=t.pnl||0;
-      var pc=cls(p);
-      var rc=p>0?'row-green':'row-red';
+    trades.slice(0,50).forEach(function(t){
+      var p=t.pnl;
+      var hasPnl=p!==null&&p!==undefined;
+      var pc=hasPnl?cls(p):'gray';
+      var rc=hasPnl?(p>0?'row-green':p<0?'row-red':''):'';
       var time=(t.created_at||'').replace('T',' ').substring(5,19);
-      var count=t.count||1;
-      var gainPct=t.sell_gain_pct||0;
       h+='<tr class="'+rc+'">';
       h+='<td>'+esc(time)+'</td>';
       h+='<td style="font-size:10px">'+esc(t.ticker||'')+'</td>';
+      h+='<td>'+esc(t.action||'')+'</td>';
       h+='<td>'+esc(t.side||'')+'</td>';
-      h+='<td>'+count+'</td>';
-      h+='<td class="'+pc+'">'+(p>=0?'+':'')+p.toFixed(4)+'</td>';
-      h+='<td class="'+pc+'">'+(gainPct>=0?'+':'')+gainPct.toFixed(0)+'%</td>';
+      h+='<td>'+(t.count||1)+'</td>';
+      h+='<td>$'+(t.price||0).toFixed(2)+'</td>';
+      h+='<td class="'+pc+'">'+(hasPnl?((p>=0?'+':'')+p.toFixed(4)):'--')+'</td>';
       h+='</tr>';
     });
-    $('trades-body').innerHTML=h||'<tr><td colspan="6" class="gray" style="text-align:center">No completed trades</td></tr>';
+    $('trades-body').innerHTML=h||'<tr><td colspan="7" class="gray" style="text-align:center">No trades yet</td></tr>';
 
+    var completed=trades.filter(function(t){return t.action==='sell'&&t.pnl!==null&&t.pnl!==0});
     drawEquity(completed);
   }
 
@@ -1115,12 +746,9 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- golden hour: ${BUY_MIN}-${BUY_MAX}, adaptive sell ({SELL_BASELINE_PCT}%+), {CYCLE_SECONDS}s cycles")
-    logger.info(f"Series: {ALL_SERIES}")
-    logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, max {MAX_POSITIONS} positions")
-
-    cancel_all_resting()
-    sync_with_kalshi()
+    logger.info(f"Bot starting [{mode}] -- simple scalper: ${BUY_MIN}-${BUY_MAX}, sell at {SELL_THRESHOLD*100:.0f}%, {CYCLE_SECONDS}s cycles")
+    logger.info(f"Series: {CRYPTO_SERIES}")
+    logger.info(f"Sizing: {CONTRACTS_PER_TRADE} contracts per trade")
 
     while True:
         try:
