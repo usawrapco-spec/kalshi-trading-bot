@@ -24,7 +24,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === SETTINGS ===
 BUY_MIN = 0.03
 BUY_MAX = 0.45
-CYCLE_SECONDS = 30
+CYCLE_SECONDS = 10
 CONTRACTS_PER_TRADE = 5
 SELL_THRESHOLD = 0.30
 STARTING_BALANCE = 50.00
@@ -561,7 +561,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <span>Series: 15M crypto (5 series) | No expiry filter | 50% stop loss</span>
-  <span>Buy: 3-45c | Sell: 30% | 5 contracts | 30s cycles</span>
+  <span>Buy: 3-45c | Sell: 30% | 5 contracts | 10s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
