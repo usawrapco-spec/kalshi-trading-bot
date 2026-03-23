@@ -21,7 +21,7 @@ CYCLE_SECONDS = 30
 # === FAST TURNOVER DEPLOYMENT — sell fast, recycle capital, repeat ===
 MAX_DEPLOYMENT_PCT = 0.75       # Deploy up to 75% of balance
 MIN_CASH_RESERVE_PCT = 0.25     # 25% protected (saved profits live here)
-MAX_CONTRACTS_PER_TRADE = 5     # Max 5 contracts (was 3 — sells work now)
+MAX_CONTRACTS_PER_TRADE = 10    # Max 10 contracts per trade (was 5)
 MIN_CONTRACTS_PER_TRADE = 2     # Minimum 2 contracts per trade
 MAX_SPEND_PER_TRADE_PCT = 0.15  # Max 15% of trading_balance per trade (fewer bigger bets)
 MAX_SPEND_PER_CYCLE = 25
@@ -1038,7 +1038,7 @@ def check_sells():
 
 def double_down_on_winners():
     """Check open positions. If any are up 25%+, buy MORE of the same contract.
-    Momentum is confirmed — pile on. By the time it hits 100%, we have 10-15 contracts."""
+    Momentum is confirmed — pile on. By the time it hits 100%, we have 15-20 contracts."""
     total_balance, trading_balance, saved_balance = get_trading_balance()
 
     open_buys = db.table('trades').select('*') \
@@ -1071,9 +1071,9 @@ def double_down_on_winners():
         if ticker in ticker_doubled:
             continue
 
-        # Skip if total contracts already at 10+ (cap at 15)
+        # Skip if total contracts already at 20 (cap)
         total_contracts = ticker_contracts.get(ticker, 0)
-        if total_contracts >= 10:
+        if total_contracts >= 20:
             continue
 
         # Get live bid to check current gain
@@ -1106,8 +1106,8 @@ def double_down_on_winners():
         else:
             add_contracts = 2   # Early winner (+25%), small add
 
-        # Cap total at 15
-        add_contracts = min(add_contracts, 15 - total_contracts)
+        # Cap total at 20
+        add_contracts = min(add_contracts, 20 - total_contracts)
         if add_contracts <= 0:
             continue
 
@@ -1645,7 +1645,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
   <div class="status-item">15M: <span class="dot-blocked"></span> BLOCKED</div>
-  <div class="status-item">Max contracts: 5</div>
+  <div class="status-item">Max contracts: 10</div>
   <div class="status-item">Sell: 100%+ or expiry save</div>
   <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span> protected</div>
   <div class="status-item">Ghosts: <span class="yellow" id="sb-ghosts">0</span> expired cleaned</div>
