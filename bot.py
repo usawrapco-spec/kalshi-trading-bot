@@ -20,6 +20,15 @@ CYCLE_SECONDS = 30
 STARTING_BALANCE = 50.00
 RESERVE_BALANCE = 3.00
 
+# === LIVE TRADING CONFIG ===
+ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
+LIVE_STRATEGIES = [s.strip() for s in os.environ.get('LIVE_STRATEGIES', '').split(',') if s.strip()]
+LIVE_MAX_PRICE = 0.50         # Max $0.50 per contract for live
+LIVE_MAX_COUNT = 1            # Max 1 contract per live trade
+LIVE_MAX_EXPOSURE = 45.00     # Max $45 total live exposure
+LIVE_MAX_PER_CYCLE = 5        # Max 5 live trades per cycle
+LIVE_RESERVE = 5.00           # Never go below $5 real balance
+
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 auth = KalshiAuth()
@@ -126,12 +135,88 @@ def kalshi_get(path):
     return resp.json()
 
 
+def kalshi_post(path, data):
+    url = f"{KALSHI_HOST}/trade-api/v2{path}"
+    headers = auth.get_headers("POST", f"/trade-api/v2{path}")
+    headers['Content-Type'] = 'application/json'
+    resp = requests.post(url, headers=headers, json=data, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def get_market(ticker):
     try:
         resp = kalshi_get(f"/markets/{ticker}")
         return resp.get('market', resp)
     except:
         return None
+
+
+def get_kalshi_balance():
+    """Get real Kalshi account balance."""
+    try:
+        resp = kalshi_get('/portfolio/balance')
+        return float(resp.get('balance', 0)) / 100  # Kalshi returns cents
+    except Exception as e:
+        logger.error(f"Balance fetch failed: {e}")
+        return 0.0
+
+
+def get_live_exposure():
+    """Total $ deployed in live trades."""
+    result = db.table('trades').select('price,count') \
+        .eq('action', 'buy').is_('pnl', 'null').eq('strategy', 'crypto_live').execute()
+    return sum(sf(t['price']) * (t['count'] or 1) for t in (result.data or []))
+
+
+def place_live_order(ticker, side, price, count):
+    """Place a real Kalshi order. Returns order_id or None."""
+    # Convert price to cents for Kalshi API
+    price_cents = int(round(price * 100))
+    try:
+        logger.info(f"LIVE ORDER: {ticker} {side} x{count} @ ${price:.2f} ({price_cents}c)")
+        resp = kalshi_post('/portfolio/orders', {
+            'ticker': ticker,
+            'action': 'buy',
+            'side': side,
+            'type': 'limit',
+            'count': count,
+            'yes_price' if side == 'yes' else 'no_price': price_cents,
+        })
+        order = resp.get('order', {})
+        order_id = order.get('order_id', '')
+        status = order.get('status', '')
+        logger.info(f"LIVE ORDER PLACED: {order_id} status={status}")
+        return order_id
+    except Exception as e:
+        logger.error(f"LIVE ORDER FAILED: {e}")
+        return None
+
+
+def place_live_sell(ticker, side, price, count):
+    """Place a real Kalshi sell order."""
+    price_cents = int(round(price * 100))
+    try:
+        logger.info(f"LIVE SELL ORDER: {ticker} {side} x{count} @ ${price:.2f}")
+        resp = kalshi_post('/portfolio/orders', {
+            'ticker': ticker,
+            'action': 'sell',
+            'side': side,
+            'type': 'limit',
+            'count': count,
+            'yes_price' if side == 'yes' else 'no_price': price_cents,
+        })
+        order = resp.get('order', {})
+        order_id = order.get('order_id', '')
+        logger.info(f"LIVE SELL PLACED: {order_id}")
+        return order_id
+    except Exception as e:
+        logger.error(f"LIVE SELL FAILED: {e}")
+        return None
+
+
+def is_live_enabled():
+    return ENABLE_TRADING and 'crypto' in LIVE_STRATEGIES
 
 
 # === CRYPTO ONLY ===
@@ -209,6 +294,14 @@ def run_buys(markets):
     # Sort by tightest spread
     buys.sort(key=lambda x: x['spread'])
 
+    # Live trading state
+    live_enabled = is_live_enabled()
+    live_bought = 0
+    live_exposure = get_live_exposure() if live_enabled else 0
+
+    if live_enabled:
+        logger.info(f"LIVE TRADING ENABLED — exposure=${live_exposure:.2f}/{LIVE_MAX_EXPOSURE}")
+
     bought = 0
     for b in buys:
         if bought >= MAX_BUYS_PER_CYCLE:
@@ -219,13 +312,29 @@ def run_buys(markets):
         if cost > trading_bal - RESERVE_BALANCE:
             continue
 
-        logger.info(f"BUY: {b['ticker']} {b['side']} x{b['count']} @ ${b['price']:.2f} (bid=${b['bid']:.2f} spread=${b['spread']:.2f})")
+        # Try live order if enabled and within limits
+        is_live = False
+        order_id = None
+        if (live_enabled
+            and live_bought < LIVE_MAX_PER_CYCLE
+            and b['price'] <= LIVE_MAX_PRICE
+            and live_exposure + b['price'] <= LIVE_MAX_EXPOSURE):
+            order_id = place_live_order(b['ticker'], b['side'], b['price'], 1)
+            if order_id:
+                is_live = True
+                live_bought += 1
+                live_exposure += b['price']
+
+        strategy = 'crypto_live' if is_live else 'crypto'
+        label = 'LIVE BUY' if is_live else 'BUY'
+        logger.info(f"{label}: {b['ticker']} {b['side']} x{b['count']} @ ${b['price']:.2f} (bid=${b['bid']:.2f} spread=${b['spread']:.2f})")
+
         try:
             db.table('trades').insert({
                 'ticker': b['ticker'], 'side': b['side'], 'action': 'buy',
-                'price': float(b['price']), 'count': b['count'],
-                'strategy': 'crypto',
-                'reason': f"crypto: {b['side'].upper()} @ ${b['price']:.2f} bid=${b['bid']:.2f} spread=${b['spread']:.2f}",
+                'price': float(b['price']), 'count': 1 if is_live else b['count'],
+                'strategy': strategy,
+                'reason': f"{strategy}: {b['side'].upper()} @ ${b['price']:.2f} bid=${b['bid']:.2f}",
                 'last_seen_bid': float(b['bid']),
                 'current_bid': float(b['bid']),
             }).execute()
@@ -235,7 +344,7 @@ def run_buys(markets):
         except Exception as e:
             logger.error(f"Buy insert failed: {e}")
 
-    logger.info(f"Bought {bought}, balance ${trading_bal:.2f}")
+    logger.info(f"Bought {bought} (live={live_bought}), balance ${trading_bal:.2f}")
 
 
 # === SELL LOGIC — ADAPTIVE THRESHOLD, HANDLE SETTLEMENTS ===
@@ -354,20 +463,31 @@ def check_sells():
 
         if should_sell:
             pnl = round((current_bid - entry_price) * count, 4)
+            strategy = trade.get('strategy', 'crypto')
 
-            logger.info(f"INSERTING SELL: {ticker} {side} +{gain_pct:.0f}% pnl=${pnl:.4f}")
+            # Live sell for live positions
+            if strategy == 'crypto_live' and is_live_enabled():
+                sell_order_id = place_live_sell(ticker, side, current_bid, count)
+                if not sell_order_id:
+                    logger.error(f"LIVE SELL FAILED — skipping {ticker}")
+                    continue
+                label = 'LIVE SELL'
+            else:
+                label = 'SELL'
+
+            logger.info(f"INSERTING {label}: {ticker} {side} +{gain_pct:.0f}% pnl=${pnl:.4f}")
             try:
                 sell_result = db.table('trades').insert({
                     'ticker': ticker, 'side': side, 'action': 'sell',
                     'price': float(current_bid), 'count': count,
-                    'pnl': float(pnl), 'strategy': 'crypto',
+                    'pnl': float(pnl), 'strategy': strategy,
                     'reason': reason,
                     'sell_gain_pct': float(round(gain_pct, 1)),
                 }).execute()
-                logger.info(f"SELL SAVED: {len(sell_result.data) if sell_result.data else 0} rows")
+                logger.info(f"{label} SAVED: {len(sell_result.data) if sell_result.data else 0} rows")
             except Exception as e:
-                logger.error(f"SELL INSERT FAILED: {e}")
-                logger.error(f"SELL traceback: {traceback.format_exc()}")
+                logger.error(f"{label} INSERT FAILED: {e}")
+                logger.error(f"{label} traceback: {traceback.format_exc()}")
 
             try:
                 db.table('trades').update({
@@ -565,7 +685,11 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — CRYPTO ONLY — BTC/ETH/SOL — 5% sell threshold")
+    logger.info("Bot starting — CRYPTO ONLY — adaptive sell threshold (30% floor)")
+    if is_live_enabled():
+        logger.info(f"LIVE TRADING ENABLED — max ${LIVE_MAX_PRICE}/contract, {LIVE_MAX_PER_CYCLE}/cycle, ${LIVE_MAX_EXPOSURE} exposure")
+    else:
+        logger.info("Paper trading only")
     close_all_old_positions()
     while True:
         try:
