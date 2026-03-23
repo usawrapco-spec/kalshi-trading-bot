@@ -524,25 +524,30 @@ def get_time_to_expiry(market):
 
 
 def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
-    """Smart tiered sell: let winners ride to 100%+, save profits before expiry.
+    """Moonshot sell: half at 100%, ride rest to 300%+, expiry save catches remainder.
     Returns (should_sell, sell_qty, reason)."""
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # === TIER 1: BIG WINNER — 100%+ gain, sell immediately ===
-    if gain_pct >= 100:
-        return True, count, f"BIG WIN +{gain_pct:.0f}%"
+    # === TIER 1: MOONSHOT — 300%+ sell EVERYTHING, take the massive win ===
+    if gain_pct >= 300:
+        return True, count, f"MOONSHOT +{gain_pct:.0f}%"
 
-    # === TIER 2: EXPIRY SAFETY NET — save profits before contract expires ===
+    # === TIER 2: BIG WIN — 100%+ sell HALF, let the rest ride to 300% ===
+    if gain_pct >= 100:
+        sell_qty = max(1, count // 2)  # Sell half, keep half
+        return True, sell_qty, f"HALF SELL +{gain_pct:.0f}% — selling {sell_qty}, riding {count - sell_qty}"
+
+    # === TIER 3: EXPIRY SAFETY NET — save profits before contract expires ===
     if time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS:
         if gain_pct >= 25:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}% with {int(time_to_expiry)}s left"
         elif gain_pct > 0:
             return True, count, f"EXPIRY EXIT +{gain_pct:.0f}% with {int(time_to_expiry)}s left"
 
-    # === TIER 3: HOLD — under 100%, not near expiry, let it ride ===
+    # === TIER 4: HOLD — under 100%, not near expiry, let it ride ===
     # Don't sell at a loss (binary contracts can come back)
     # Don't sell 25-99% winners — they might hit 200-300%
     return False, 0, None
