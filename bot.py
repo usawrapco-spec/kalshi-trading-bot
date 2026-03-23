@@ -24,7 +24,7 @@ PORT = int(os.environ.get('PORT', 8080))
 MIN_PRICE = 0.03
 MAX_PRICE = 0.20
 CYCLE_SECONDS = 5
-MAX_CONTRACTS_PER_TRADE = 10
+MAX_CONTRACTS_PER_TRADE = 3
 MAX_BUYS_PER_CYCLE = 15
 MAX_DEPLOYMENT_PCT = 0.95
 MAX_SPEND_PER_TRADE_PCT = 0.15
@@ -228,9 +228,9 @@ def cleanup_stale():
 
 
 # === SELL LOGIC ===
-# Sell when price stops moving. If bid is unchanged for 5s and profitable, sell.
+# Fast scalper: sell at +25% instantly, or sell any profit after 10s timeout.
 
-last_bids = {}  # trade_id -> (last_bid, timestamp)
+entry_times = {}  # trade_id -> first_seen_timestamp
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
     if current_bid <= 0 or entry_price <= 0:
@@ -238,24 +238,23 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_i
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
     now = time.time()
 
-    # Track bid changes
-    if trade_id in last_bids:
-        prev_bid, prev_time = last_bids[trade_id]
+    # Track when we first saw this position
+    if trade_id not in entry_times:
+        entry_times[trade_id] = now
 
-        if current_bid != prev_bid:
-            # Price moved — update and hold
-            last_bids[trade_id] = (current_bid, now)
-        else:
-            # Price hasn't moved — check how long
-            stale_seconds = now - prev_time
+    age = now - entry_times[trade_id]
 
-            # 5 seconds of no movement + profitable = sell
-            if stale_seconds >= 5 and gain_pct > 0:
-                del last_bids[trade_id]
-                return True, count, f"STALE +{gain_pct:.0f}% (no move {stale_seconds:.0f}s)"
-    else:
-        # First time seeing this position
-        last_bids[trade_id] = (current_bid, now)
+    # Up 25%+ at any time — sell, great trade
+    if gain_pct >= 25:
+        if trade_id in entry_times:
+            del entry_times[trade_id]
+        return True, count, f"WIN +{gain_pct:.0f}%"
+
+    # 10 seconds old + profitable but under 25% — sell, move on
+    if age >= 10 and gain_pct > 0:
+        if trade_id in entry_times:
+            del entry_times[trade_id]
+        return True, count, f"TIMEOUT +{gain_pct:.0f}% ({age:.0f}s)"
 
     # Expiry save
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
