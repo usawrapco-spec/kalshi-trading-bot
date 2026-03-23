@@ -62,12 +62,12 @@ def get_time_to_expiry(ticker):
     month = months.get(mon_str)
     if not month:
         return None
-    hour = int(h1 + h2)
-    extra_days = hour // 24
-    hour = hour % 24
+    hour = int(h1)
+    minute = int(h2)
     try:
-        expiry = datetime(2026, month, int(day_str) + extra_days, hour, 59, 59, tzinfo=timezone.utc)
-        return max(0, (expiry - datetime.now(timezone.utc)).total_seconds())
+        expiry = datetime(2026, month, int(day_str), hour, minute, 0, tzinfo=timezone.utc)
+        tte = max(0, (expiry - datetime.now(timezone.utc)).total_seconds())
+        return tte
     except:
         return None
 
@@ -646,6 +646,7 @@ def check_sells():
 
         gain_pct = ((current_bid - entry_price) / entry_price) * 100
         time_to_expiry = get_time_to_expiry(ticker)
+        logger.info(f"EXPIRY CHECK: {ticker} tte={time_to_expiry}")
 
         # Update current price in DB
         try:
