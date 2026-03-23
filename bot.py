@@ -22,8 +22,12 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === SETTINGS ===
-MIN_PRICE = 0.03
-MAX_PRICE = 0.30
+# Crypto brackets (cheap)
+CRYPTO_BUY_MIN = 0.03
+CRYPTO_BUY_MAX = 0.30
+# Sports/tennis moneylines (underdog side)
+SPORTS_BUY_MIN = 0.08
+SPORTS_BUY_MAX = 0.50
 CYCLE_SECONDS = 30
 MAX_CONTRACTS_PER_TRADE = 3
 MIN_CONTRACTS_PER_TRADE = 1
@@ -35,11 +39,12 @@ MAX_SPREAD_PCT = 0.80
 MAX_EXPIRY_SECONDS = 14400      # 4 hours
 MIN_EXPIRY_SECONDS = 180        # 3 minutes
 PROFIT_BANK_PCT = 0.20
-PAPER_STARTING_BALANCE = 50.00
+PAPER_STARTING_BALANCE = 20.00
+PAPER_RESET_TIME = '2026-03-23T20:40:00Z'
 
 # === SERIES TO SCAN ===
 CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
-SPORTS_SERIES = ['KXNCAAMBGAME', 'KXNBAGAME']
+SPORTS_SERIES = ['KXNCAAMBGAME', 'KXNBAGAME', 'KXTENNIS', 'KXMLB', 'KXNHL']
 ALL_SERIES = CRYPTO_SERIES + SPORTS_SERIES
 
 # === HARD BLOCKS ===
@@ -63,28 +68,38 @@ def sf(val):
 
 # === EXPIRY PARSING ===
 
-def get_time_to_expiry(ticker):
+def get_time_to_expiry(ticker, market=None):
     if isinstance(ticker, dict):
+        market = ticker
         ticker = ticker.get('ticker', '')
+    # Try parsing from ticker (works for crypto with hour in ticker)
     match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})(\d{2})-', ticker)
-    if not match:
-        return None
-    g1, mon_str, g3, g4 = match.groups()
-    months = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
-              'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
-    month = months.get(mon_str)
-    if not month:
-        return None
-    year = 2000 + int(g1)
-    day = int(g3)
-    hour = int(g4)
-    try:
-        expiry = datetime(year, month, day, hour, 59, 59, tzinfo=timezone.utc)
-        now = datetime.now(timezone.utc)
-        tte = max(0, (expiry - now).total_seconds())
-        return tte
-    except:
-        return None
+    if match:
+        g1, mon_str, g3, g4 = match.groups()
+        months = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
+                  'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
+        month = months.get(mon_str)
+        if month:
+            year = 2000 + int(g1)
+            day = int(g3)
+            hour = int(g4)
+            try:
+                expiry = datetime(year, month, day, hour, 59, 59, tzinfo=timezone.utc)
+                now = datetime.now(timezone.utc)
+                return max(0, (expiry - now).total_seconds())
+            except:
+                pass
+    # Fallback: use market close_time/expiration_time from API (sports tickers)
+    if market:
+        close_time = market.get('close_time') or market.get('expiration_time')
+        if close_time:
+            try:
+                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                now = datetime.now(timezone.utc)
+                return max(0, (close_dt - now).total_seconds())
+            except:
+                pass
+    return None
 
 
 # === KALSHI API ===
@@ -196,7 +211,8 @@ def get_kalshi_balance():
 def get_realized_pnl():
     try:
         sells = db.table('trades').select('pnl') \
-            .eq('action', 'sell').not_.is_('pnl', 'null').execute()
+            .eq('action', 'sell').not_.is_('pnl', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
         return sum(sf(t['pnl']) for t in (sells.data or []))
     except Exception as e:
         logger.error(f"get_realized_pnl failed: {e}")
@@ -206,7 +222,8 @@ def get_realized_pnl():
 def get_open_position_cost():
     try:
         open_buys = db.table('trades').select('price,count') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
+            .eq('action', 'buy').is_('pnl', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
         return sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
     except Exception as e:
         logger.error(f"get_open_position_cost failed: {e}")
@@ -226,7 +243,8 @@ def get_balance():
 def get_owned():
     try:
         result = db.table('trades').select('ticker') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
+            .eq('action', 'buy').is_('pnl', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
         return {t['ticker'] for t in (result.data or [])}
     except Exception as e:
         logger.error(f"get_owned failed: {e}")
@@ -261,22 +279,38 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
 
 # === BUY LOGIC ===
 
+def _is_sports(ticker):
+    return any(ticker.startswith(s) for s in SPORTS_SERIES)
+
+
+def _price_range(ticker):
+    if _is_sports(ticker):
+        return SPORTS_BUY_MIN, SPORTS_BUY_MAX
+    return CRYPTO_BUY_MIN, CRYPTO_BUY_MAX
+
+
 def find_buy_candidates(markets):
     candidates = []
+    blocked = no_expiry = wrong_expiry = too_soon = no_volume = wrong_price = no_bid = wide_spread = 0
+
     for market in markets:
         ticker = market.get('ticker', '')
 
         # Hard blocks
         if any(pat in ticker for pat in BLOCKED_PATTERNS):
+            blocked += 1
             continue
 
-        # Expiry check
-        expiry = get_time_to_expiry(ticker)
+        # Expiry check (pass market dict for sports fallback)
+        expiry = get_time_to_expiry(ticker, market=market)
         if expiry is None:
+            no_expiry += 1
             continue
         if expiry > MAX_EXPIRY_SECONDS:
+            wrong_expiry += 1
             continue
         if expiry < MIN_EXPIRY_SECONDS:
+            too_soon += 1
             continue
 
         # Price + liquidity
@@ -287,10 +321,14 @@ def find_buy_candidates(markets):
         volume = int(market.get('volume_24h', 0) or 0)
 
         if volume < MIN_VOLUME:
+            no_volume += 1
             continue
 
+        min_p, max_p = _price_range(ticker)
+        added = False
+
         # YES side
-        if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid > 0:
+        if min_p <= yes_ask <= max_p and yes_bid > 0:
             spread_pct = (yes_ask - yes_bid) / yes_ask if yes_ask > 0 else 1
             if spread_pct <= MAX_SPREAD_PCT:
                 candidates.append({
@@ -298,9 +336,12 @@ def find_buy_candidates(markets):
                     'price': yes_ask, 'bid': yes_bid,
                     'volume': volume
                 })
+                added = True
+            else:
+                wide_spread += 1
 
         # NO side
-        if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid > 0:
+        if min_p <= no_ask <= max_p and no_bid > 0:
             spread_pct = (no_ask - no_bid) / no_ask if no_ask > 0 else 1
             if spread_pct <= MAX_SPREAD_PCT:
                 candidates.append({
@@ -308,10 +349,49 @@ def find_buy_candidates(markets):
                     'price': no_ask, 'bid': no_bid,
                     'volume': volume
                 })
+                added = True
+            else:
+                wide_spread += 1
+
+        if not added:
+            # Check why it didn't pass price filter
+            if not ((min_p <= yes_ask <= max_p) or (min_p <= no_ask <= max_p)):
+                wrong_price += 1
+            elif yes_bid <= 0 and no_bid <= 0:
+                no_bid += 1
 
     # Sort by volume descending
     candidates.sort(key=lambda x: x['volume'], reverse=True)
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (3-30c, vol>=5, spread<=80%, 4hr expiry)")
+    total = len(markets)
+    logger.info(f"FILTER: {total} total | {blocked} blocked | {no_expiry} no expiry parse | {wrong_expiry} too far | {too_soon} expiring too soon | {no_volume} low vol | {wrong_price} price out of range | {no_bid} no bid | {wide_spread} wide spread | {len(candidates)} candidates")
+
+    # Log samples for debugging
+    samples = []
+    for m in markets:
+        t = m.get('ticker', '')
+        ya = sf(m.get('yes_ask_dollars', '0'))
+        na = sf(m.get('no_ask_dollars', '0'))
+        yb = sf(m.get('yes_bid_dollars', '0'))
+        nb = sf(m.get('no_bid_dollars', '0'))
+        v = int(m.get('volume_24h', 0) or 0)
+        exp = get_time_to_expiry(t, market=m)
+        if v >= 5 and exp is not None and MIN_EXPIRY_SECONDS < exp < MAX_EXPIRY_SECONDS:
+            samples.append(f"{t}: yes={ya}/{yb} no={na}/{nb} vol={v} exp={exp:.0f}s")
+        if len(samples) >= 5:
+            break
+    if samples:
+        logger.info(f"SAMPLES: {' | '.join(samples)}")
+    else:
+        logger.info(f"NO markets passed volume+expiry check. Loosest 3 by volume:")
+        by_vol = sorted(markets, key=lambda m: int(m.get('volume_24h', 0) or 0), reverse=True)[:3]
+        for m in by_vol:
+            t = m.get('ticker', '')
+            ya = sf(m.get('yes_ask_dollars', '0'))
+            na = sf(m.get('no_ask_dollars', '0'))
+            v = int(m.get('volume_24h', 0) or 0)
+            exp = get_time_to_expiry(t, market=m)
+            logger.info(f"  {t}: yes=${ya:.2f} no=${na:.2f} vol={v} exp={exp}")
+
     return candidates
 
 
@@ -405,7 +485,8 @@ def check_sells():
     logger.info("check_sells() -- half at 100%, full at 200%, expiry save 25%+")
     try:
         open_buys = db.table('trades').select('*') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
+            .eq('action', 'buy').is_('pnl', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
     except Exception as e:
         logger.error(f"check_sells DB query failed: {e}")
         return
@@ -476,7 +557,7 @@ def check_sells():
             continue
 
         # Clear expired contracts
-        time_to_expiry = get_time_to_expiry(ticker)
+        time_to_expiry = get_time_to_expiry(ticker, market=market)
         if time_to_expiry is not None and time_to_expiry == 0:
             loss = round(-entry_price * count, 4)
             try:
@@ -574,7 +655,8 @@ def run_buys(markets):
     # Get deployed capital
     try:
         open_buys = db.table('trades').select('price,count') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
+            .eq('action', 'buy').is_('pnl', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
         total_deployed = sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
     except Exception as e:
         logger.error(f"Failed to get deployed capital: {e}")
@@ -702,14 +784,16 @@ def api_status():
         balance = get_balance()
 
         sells = db.table('trades').select('pnl') \
-            .eq('action', 'sell').not_.is_('pnl', 'null').execute()
+            .eq('action', 'sell').not_.is_('pnl', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
         sell_data = sells.data or []
         net_pnl = sum(sf(t['pnl']) for t in sell_data)
         wins = sum(1 for t in sell_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in sell_data if sf(t['pnl']) < 0)
 
         open_buys = db.table('trades').select('id,price,count,current_bid') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
+            .eq('action', 'buy').is_('pnl', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
         open_data = open_buys.data or []
         live_positions = [t for t in open_data if sf(t.get('current_bid')) > 0]
         open_count = len(live_positions)
@@ -745,6 +829,7 @@ def api_status():
 def api_trades():
     try:
         result = db.table('trades').select('*') \
+            .gte('created_at', PAPER_RESET_TIME) \
             .order('created_at', desc=True).limit(200).execute()
         return jsonify(result.data or [])
     except Exception as e:
@@ -756,7 +841,8 @@ def api_trades():
 def api_open():
     try:
         result = db.table('trades').select('*') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
+            .eq('action', 'buy').is_('pnl', 'null') \
+            .gte('created_at', PAPER_RESET_TIME).execute()
         positions = []
         for t in (result.data or []):
             price = sf(t.get('price'))
@@ -882,10 +968,10 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="live-dot dot-paper" id="status-dot"></span> <span id="status-mode">PAPER</span></div>
-  <div class="status-item">Buy: 3-30c, vol>=5, spread<=80%</div>
+  <div class="status-item">Buy: crypto 3-30c, sports 8-50c, vol>=5</div>
   <div class="status-item">Sell: half@100%, full@200%, expiry@25%</div>
   <div class="status-item">Max: 3 contracts, 10 positions</div>
-  <div class="status-item">Series: Crypto + March Madness + NBA</div>
+  <div class="status-item">Series: Crypto + NCAA + NBA + Tennis + MLB + NHL</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
 <div class="footer">Clean Reset &mdash; auto-refresh 15s</div>
@@ -1038,7 +1124,7 @@ def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
     logger.info(f"Bot starting [{mode}] -- half at 100%, full at 200%, 30s cycles, crypto + sports")
     logger.info(f"Series: {ALL_SERIES}")
-    logger.info(f"Settings: {MIN_PRICE}-{MAX_PRICE}, vol>={MIN_VOLUME}, spread<={MAX_SPREAD_PCT:.0%}, expiry {MIN_EXPIRY_SECONDS/60:.0f}m-{MAX_EXPIRY_SECONDS/3600:.0f}h")
+    logger.info(f"Settings: crypto={CRYPTO_BUY_MIN}-{CRYPTO_BUY_MAX}, sports={SPORTS_BUY_MIN}-{SPORTS_BUY_MAX}, vol>={MIN_VOLUME}, spread<={MAX_SPREAD_PCT:.0%}, expiry {MIN_EXPIRY_SECONDS/60:.0f}m-{MAX_EXPIRY_SECONDS/3600:.0f}h")
     logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, {MAX_DEPLOYMENT_PCT:.0%} max deploy, {MIN_CASH_RESERVE:.0%} cash reserve, {MAX_POSITIONS} max positions")
 
     cancel_all_resting()
