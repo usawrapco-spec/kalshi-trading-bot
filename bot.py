@@ -29,8 +29,8 @@ MAX_TRADES_PER_CYCLE = 10
 MAX_OPEN_POSITIONS = 200
 
 # === SELL THRESHOLDS ===
-BASE_SELL_PCT = 25              # Sell at 25% gain — fast turnover beats big holds
-EXPIRY_SELL_SECONDS = 300       # Sell anything profitable with <5 min to expiry
+# Tiered: 100%+ = instant sell, <100% near expiry + profitable = save, otherwise HOLD
+# See decide_sell() for full logic
 
 # === PROFIT COMPOUNDING ===
 PROFIT_SAVE_PCT = 0.20          # 20% of every win gets banked permanently
@@ -466,10 +466,11 @@ def run_buys(markets, strategy='crypto'):
     logger.info(f"[{strategy}] Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
 
 
-# === SELL LOGIC — 50% BASE + MOMENTUM RIDING + 5-MIN EXPIRY SELL ===
+# === SELL LOGIC — SMART TIERED: 100% instant sell, save profits before expiry, let winners ride ===
 
 sell_history = []  # Rolling last 20 sell gain percentages
-peak_bids = {}     # trade_id -> highest bid seen, for trailing stop
+
+EXPIRY_WINDOW_SECONDS = 300  # 5 minutes — save profits before expiry
 
 
 def get_time_to_expiry(market):
@@ -487,36 +488,27 @@ def get_time_to_expiry(market):
 
 
 def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
-    """Simple sell logic: 50% base, ride momentum, always exit before expiry.
+    """Smart tiered sell: let winners ride to 100%+, save profits before expiry.
     Returns (should_sell, sell_qty, reason)."""
-    gain_pct = ((current_bid - entry_price) / entry_price) * 100
-
-    # Track peak bid for momentum riding
-    prev_peak = peak_bids.get(trade_id, current_bid)
-    if current_bid > prev_peak:
-        peak_bids[trade_id] = current_bid
-    peak = peak_bids.get(trade_id, current_bid)
-    peak_gain_pct = ((peak - entry_price) / entry_price) * 100
-
-    # === #1 PRIORITY: EXPIRY SELL — any profit with <5 min left, DUMP IT ===
-    if time_to_expiry is not None and time_to_expiry < EXPIRY_SELL_SECONDS and gain_pct > 0:
-        return True, count, f"EXPIRY SELL <5min, locking +{gain_pct:.0f}% ({int(time_to_expiry)}s left)"
-
-    # === NEVER sell at a loss ===
-    if gain_pct <= 0 or current_bid <= entry_price:
+    if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
 
-    # === TRAILING STOP: only triggers if price DROPS from a tracked peak ===
-    # If peak was tracked from a previous cycle AND price has fallen significantly, sell
-    if trade_id in peak_bids and peak_gain_pct >= 100:
-        trailing_floor = peak_gain_pct * 0.50
-        if gain_pct <= trailing_floor:
-            return True, count, f"TRAILING STOP: peak +{peak_gain_pct:.0f}% -> now +{gain_pct:.0f}%"
+    gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # === BASE THRESHOLD: sell at 50%+ gain — ALWAYS ===
-    if gain_pct >= BASE_SELL_PCT:
-        return True, count, f"PROFIT +{gain_pct:.0f}% (>={BASE_SELL_PCT}% target)"
+    # === TIER 1: BIG WINNER — 100%+ gain, sell immediately ===
+    if gain_pct >= 100:
+        return True, count, f"BIG WIN +{gain_pct:.0f}%"
 
+    # === TIER 2: EXPIRY SAFETY NET — save profits before contract expires ===
+    if time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS:
+        if gain_pct >= 25:
+            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}% with {int(time_to_expiry)}s left"
+        elif gain_pct > 0:
+            return True, count, f"EXPIRY EXIT +{gain_pct:.0f}% with {int(time_to_expiry)}s left"
+
+    # === TIER 3: HOLD — under 100%, not near expiry, let it ride ===
+    # Don't sell at a loss (binary contracts can come back)
+    # Don't sell 25-99% winners — they might hit 200-300%
     return False, 0, None
 
 
@@ -555,8 +547,6 @@ def execute_sell(trade, ticker, side, entry_price, current_bid, sell_qty, total_
                 'current_bid': float(current_bid),
                 'sell_gain_pct': float(round(gain_pct, 1)),
             }).eq('id', trade['id']).execute()
-            # Clean up peak tracking
-            peak_bids.pop(trade['id'], None)
             logger.info(f"BUY RESOLVED: id={trade['id']}")
         else:
             # Partial sell — update remaining count on buy record
@@ -594,9 +584,9 @@ def get_live_bid(ticker, side):
 
 
 def check_sells():
-    """50% base sell + momentum riding + 5-min expiry sell. Never sell at a loss."""
+    """Smart tiered sell: 100% instant, save profits before expiry, let winners ride."""
     global sell_history
-    logger.info("check_sells() called — 50% base + momentum riding + 5-min expiry")
+    logger.info("check_sells() — smart sell: 100%+ instant, expiry save, let winners ride")
 
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -666,7 +656,6 @@ def check_sells():
                 }).eq('id', trade['id']).execute()
             except:
                 pass
-            peak_bids.pop(trade.get('id'), None)
             settled += 1
             continue
 
@@ -691,7 +680,10 @@ def check_sells():
         evaluated += 1
 
         # Log EVERY position evaluation
-        logger.info(f"EVAL: {ticker} {side} x{count} | entry=${entry_price:.2f} bid=${current_bid:.2f} | gain={gain_pct:+.0f}% | threshold=50%")
+        time_to_expiry = get_time_to_expiry(market)
+        expiry_str = f"{int(time_to_expiry)}s" if time_to_expiry is not None else "unknown"
+        action_preview = "SELL" if gain_pct >= 100 or (time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS and gain_pct > 0) else "HOLD"
+        logger.info(f"EVAL: {ticker} {side} x{count} | entry=${entry_price:.2f} bid=${current_bid:.2f} | gain={gain_pct:+.0f}% | expiry={expiry_str} | {action_preview}")
 
         # Update current price for dashboard
         try:
@@ -703,7 +695,6 @@ def check_sells():
             pass
 
         # === DECIDE SELL ===
-        time_to_expiry = get_time_to_expiry(market)
         should_sell, sell_qty, reason = decide_sell(
             entry_price, current_bid, count, time_to_expiry, trade.get('id')
         )
@@ -721,8 +712,8 @@ def check_sells():
                     sell_history = sell_history[-20:]
             else:
                 logger.error(f"SELL EXECUTION FAILED: {ticker} — order did not go through")
-        elif gain_pct >= 25:
-            logger.warning(f"NOT SELLING despite {gain_pct:+.0f}% gain: {ticker} | should_sell={should_sell} sell_qty={sell_qty} reason={reason}")
+        elif gain_pct >= 50:
+            logger.info(f"RIDING: {ticker} +{gain_pct:.0f}% — holding for 100%+ (expiry={expiry_str})")
 
     avg_win = (sum(sell_history) / len(sell_history)) if sell_history else 0
     logger.info(f"SELL SUMMARY: evaluated={evaluated} sold={sold} settled={settled} skipped_no_market={skipped_no_market} skipped_no_bid={skipped_no_bid} | avg_win={avg_win:.0f}%")
@@ -1044,7 +1035,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
   <div class="status-item">15M: <span class="dot-blocked"></span> BLOCKED</div>
   <div class="status-item">Max contracts: 5</div>
-  <div class="status-item">Sell: 25%+</div>
+  <div class="status-item">Sell: 100%+ or expiry</div>
   <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
 </div>
 <div class="footer">Kalshi Scalp Bot v5 &mdash; auto-refresh 15s</div>
