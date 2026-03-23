@@ -504,16 +504,14 @@ def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
     if gain_pct <= 0 or current_bid <= entry_price:
         return False, 0, None
 
-    # === MOMENTUM RIDING: if we're past 50%, let it ride but protect gains ===
-    # Once past 100%, use trailing stop at 50% of peak to let big runs develop
-    if peak_gain_pct >= 100 and gain_pct >= 50:
+    # === TRAILING STOP: only triggers if price DROPS from a tracked peak ===
+    # If peak was tracked from a previous cycle AND price has fallen significantly, sell
+    if trade_id in peak_bids and peak_gain_pct >= 100:
         trailing_floor = peak_gain_pct * 0.50
         if gain_pct <= trailing_floor:
             return True, count, f"TRAILING STOP: peak +{peak_gain_pct:.0f}% -> now +{gain_pct:.0f}%"
-        # Still above trailing floor — let it ride
-        return False, 0, None
 
-    # === BASE THRESHOLD: sell at 50%+ gain ===
+    # === BASE THRESHOLD: sell at 50%+ gain — ALWAYS ===
     if gain_pct >= BASE_SELL_PCT:
         return True, count, f"PROFIT +{gain_pct:.0f}% (>={BASE_SELL_PCT}% target)"
 
@@ -571,6 +569,28 @@ def execute_sell(trade, ticker, side, entry_price, current_bid, sell_qty, total_
     return True
 
 
+def get_live_bid(ticker, side):
+    """Fetch LIVE bid from Kalshi orderbook — don't trust stale market data."""
+    try:
+        resp = kalshi_get(f"/markets/{ticker}/orderbook?depth=3")
+        if side == 'yes':
+            bids = resp.get('yes', resp.get('orderbook', {}).get('yes', []))
+        else:
+            bids = resp.get('no', resp.get('orderbook', {}).get('no', []))
+        # Orderbook format varies — try to extract best bid
+        if isinstance(bids, list) and bids:
+            # Each entry might be [price, qty] or {price: qty}
+            if isinstance(bids[0], list):
+                return float(bids[0][0]) / 100.0  # cents to dollars
+            elif isinstance(bids[0], dict):
+                prices = [float(k) for k in bids[0].keys()]
+                return max(prices) / 100.0 if prices else 0.0
+        return 0.0
+    except Exception as e:
+        logger.warning(f"Orderbook fetch failed for {ticker}: {e}")
+        return 0.0
+
+
 def check_sells():
     """50% base sell + momentum riding + 5-min expiry sell. Never sell at a loss."""
     global sell_history
@@ -585,6 +605,9 @@ def check_sells():
 
     sold = 0
     settled = 0
+    skipped_no_market = 0
+    skipped_no_bid = 0
+    evaluated = 0
 
     for trade in open_buys.data:
         ticker = trade['ticker']
@@ -596,9 +619,13 @@ def check_sells():
 
         try:
             market = get_market(ticker)
-        except:
+        except Exception as e:
+            logger.warning(f"Market fetch FAILED for {ticker}: {e}")
+            skipped_no_market += 1
             continue
         if not market:
+            logger.warning(f"Market returned None for {ticker}")
+            skipped_no_market += 1
             continue
 
         status = market.get('status', '')
@@ -641,16 +668,28 @@ def check_sells():
             settled += 1
             continue
 
-        # === PRICE CHECK ===
+        # === PRICE CHECK — try market data first, then live orderbook ===
         if side == 'yes':
             current_bid = float(market.get('yes_bid_dollars', '0') or '0')
         else:
             current_bid = float(market.get('no_bid_dollars', '0') or '0')
 
+        # If market-level bid is 0, fetch live orderbook
         if current_bid <= 0:
+            current_bid = get_live_bid(ticker, side)
+            if current_bid > 0:
+                logger.info(f"Orderbook fallback for {ticker}: got bid=${current_bid:.2f}")
+
+        if current_bid <= 0:
+            skipped_no_bid += 1
+            logger.info(f"SKIP {ticker} — no bid available (market or orderbook)")
             continue
 
         gain_pct = ((current_bid - entry_price) / entry_price) * 100
+        evaluated += 1
+
+        # Log EVERY position evaluation
+        logger.info(f"EVAL: {ticker} {side} x{count} | entry=${entry_price:.2f} bid=${current_bid:.2f} | gain={gain_pct:+.0f}% | threshold=50%")
 
         # Update current price for dashboard
         try:
@@ -668,6 +707,7 @@ def check_sells():
         )
 
         if should_sell and sell_qty > 0:
+            logger.info(f"SELLING: {ticker} {side} x{sell_qty} at ${current_bid:.2f} | gain={gain_pct:+.0f}% | {reason}")
             success = execute_sell(
                 trade, ticker, side, entry_price, current_bid,
                 sell_qty, count, gain_pct, reason
@@ -677,9 +717,13 @@ def check_sells():
                 sell_history.append(gain_pct)
                 if len(sell_history) > 20:
                     sell_history = sell_history[-20:]
+            else:
+                logger.error(f"SELL EXECUTION FAILED: {ticker} — order did not go through")
+        elif gain_pct >= 50:
+            logger.warning(f"NOT SELLING despite {gain_pct:+.0f}% gain: {ticker} | should_sell={should_sell} sell_qty={sell_qty} reason={reason}")
 
     avg_win = (sum(sell_history) / len(sell_history)) if sell_history else 0
-    logger.info(f"Checked {len(open_buys.data)} positions | sold={sold} settled={settled} | avg_win={avg_win:.0f}%")
+    logger.info(f"SELL SUMMARY: evaluated={evaluated} sold={sold} settled={settled} skipped_no_market={skipped_no_market} skipped_no_bid={skipped_no_bid} | avg_win={avg_win:.0f}%")
 
 
 # === MAIN CYCLE ===
