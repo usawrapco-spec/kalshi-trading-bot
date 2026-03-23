@@ -172,16 +172,23 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # SAFETY NET: If up 5%+ sell it. We saw +38% expire unsold.
-    # Better to grab +5% than watch +38% die.
-    if gain_pct >= 5:
-        return True, count, f"PROFIT TAKE +{gain_pct:.0f}%"
+    # Far from expiry — HOLD. Let it run. No ceiling.
+    # As expiry gets closer, get more aggressive about taking profit.
 
-    # EXPIRY SAVE: 5 minutes before expiry, sell anything green at all
-    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
-        if gain_pct > 0:
-            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
+    if time_to_expiry_seconds is not None:
+        # 10 min left: sell if up 25%+
+        if time_to_expiry_seconds < 600 and gain_pct >= 25:
+            return True, count, f"10MIN SAVE +{gain_pct:.0f}%"
 
+        # 5 min left: sell if up 10%+
+        if time_to_expiry_seconds < 300 and gain_pct >= 10:
+            return True, count, f"5MIN SAVE +{gain_pct:.0f}%"
+
+        # 2 min left: sell if up anything
+        if time_to_expiry_seconds < 120 and gain_pct > 0:
+            return True, count, f"2MIN SAVE +{gain_pct:.0f}%"
+
+    # Otherwise HOLD. Could be +7%, +50%, +500%. Let it ride.
     return False, 0, None
 
 
@@ -257,7 +264,7 @@ def startup_purge():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — sell at +5%, expiry save at 5min")
+    logger.info("check_sells() — sliding expiry: 10min/25%, 5min/10%, 2min/any")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -617,7 +624,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 30s cycles &mdash; buy 3-20c, sell +5%, expiry save 5min</div>
+  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 30s cycles &mdash; buy 3-20c, sliding expiry save</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -650,8 +657,9 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c with bid</div>
-  <div class="status-item">Sell: +5% profit take</div>
-  <div class="status-item">Expiry save: 5min</div>
+  <div class="status-item">10min: +25%</div>
+  <div class="status-item">5min: +10%</div>
+  <div class="status-item">2min: any green</div>
   <div class="status-item">Max: 5 contracts</div>
   <div class="status-item">Full balance trading</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
@@ -797,7 +805,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — Simple crypto scalper — buy 3-20c, sell +5%, expiry save 5min")
+    logger.info("Bot starting — Simple crypto scalper — buy 3-20c, sliding expiry save")
     startup_purge()
     cycle_count = 0
     while True:
