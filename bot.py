@@ -1,8 +1,6 @@
 """
-Ride and protect: track peak by ticker, sell on 10pt reversal from 30%+.
-Buy cheap crypto contracts. Let winners run with no ceiling.
-Peak gains stored in DB so restarts don't lose tracking.
-Sell when: (1) peaked above 30% and dropped 10pts, or (2) expiry save.
+Expiry only sell, block monthly/weekly, fast capital cycling.
+Buy cheap crypto contracts. Sell only at expiry.
 """
 
 import os, time, logging, re, requests, traceback
@@ -247,94 +245,27 @@ def clear_non_btcd():
 
 
 # === SELL LOGIC ===
-# Ride and protect: track peak by ticker in DB, sell on 10pt reversal from 30%+
-
-def get_peak_gain(ticker, side):
-    """Get stored peak gain from DB."""
-    key = f"{ticker}_{side}"
-    try:
-        result = db.table('peak_gains').select('peak_pct').eq('key', key).execute()
-        if result.data:
-            return sf(result.data[0].get('peak_pct'))
-    except:
-        pass
-    return None
-
-def set_peak_gain(ticker, side, peak_pct):
-    """Store peak gain in DB (survives restarts)."""
-    key = f"{ticker}_{side}"
-    try:
-        existing = db.table('peak_gains').select('key').eq('key', key).execute()
-        if existing.data:
-            db.table('peak_gains').update({'peak_pct': float(peak_pct)}).eq('key', key).execute()
-        else:
-            db.table('peak_gains').insert({'key': key, 'peak_pct': float(peak_pct)}).execute()
-    except Exception as e:
-        logger.warning(f"Peak gain DB write failed for {key}: {e}")
-
-def clear_peak_gain(ticker, side):
-    """Remove peak gain after selling."""
-    key = f"{ticker}_{side}"
-    try:
-        db.table('peak_gains').delete().eq('key', key).execute()
-    except:
-        pass
+# Expiry only: sell everything 5 min before expiry
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker='', side=''):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
-    gain_pct = ((current_bid - entry_price) / entry_price) * 100
-
-    # Track peak in DB (survives restarts)
-    stored_peak = get_peak_gain(ticker, side)
-    if stored_peak is None or gain_pct > stored_peak:
-        set_peak_gain(ticker, side, gain_pct)
-        peak = gain_pct
-    else:
-        peak = stored_peak
-
-    drop = peak - gain_pct
-
-    # Hit 30%+ and dropped 10 points from peak — the run is over, sell
-    if peak >= 30 and drop >= 10:
-        clear_peak_gain(ticker, side)
-        return True, count, f"SELL +{gain_pct:.0f}% (peak +{peak:.0f}%)"
-
-    # 5 min before expiry — sell EVERYTHING, green or red
-    # A -20% sell recovers 80%. Expiry at $0 recovers nothing.
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
         if current_bid > 0:
-            clear_peak_gain(ticker, side)
+            gain_pct = ((current_bid - entry_price) / entry_price) * 100
             return True, count, f"EXPIRY EXIT {gain_pct:+.0f}%"
-
     return False, 0, None
 
 
 # === BUY LOGIC ===
 
 def find_buy_candidates(markets):
-    now = datetime.now(timezone.utc)
-    # Current and next hour tags like "2315", "2316"
-    current_h = f"{now.day:02d}{now.hour:02d}"
-    next_h = f"{now.day:02d}{(now.hour + 1) % 24:02d}"
-    # Handle day rollover
-    next_day_h = f"{now.day + 1:02d}00" if now.hour == 23 else None
-
     candidates = []
     for market in markets:
         ticker = market.get('ticker', '')
         if 'KXMVE' in ticker:
             continue
-
-        # ONLY current or next hour contracts
-        has_hour = current_h in ticker or next_h in ticker
-        if next_day_h:
-            has_hour = has_hour or next_day_h in ticker
-        if not has_hour:
-            continue
-
-        # Skip monthly/yearly
-        if any(x in ticker for x in ['MINMON', 'MAXMON', '2026', '2717']):
+        if any(x in ticker for x in ['MINMON', 'MAXMON', '2026250', '2717', 'MARMAD']):
             continue
 
         yes_ask = float(market.get('yes_ask_dollars', '0') or '0')
@@ -342,12 +273,12 @@ def find_buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars', '0') or '0')
         no_bid = float(market.get('no_bid_dollars', '0') or '0')
 
-        if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid >= yes_ask * 0.70:
+        if 0.03 <= yes_ask <= 0.20 and yes_bid >= yes_ask * 0.70:
             candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
-        if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid >= no_ask * 0.70:
+        if 0.03 <= no_ask <= 0.20 and no_bid >= no_ask * 0.70:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (current/next hour, 3-20c, 70% spread)")
+    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (block monthly/weekly, 3-20c, 70% spread)")
     return candidates
 
 
@@ -597,7 +528,7 @@ def sync_with_kalshi():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — ride and protect, 30%+ peak, 10pt drop sells")
+    logger.info("check_sells() — expiry only sell")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -996,7 +927,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; ride and protect + expiry exit all positions</div>
+  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; expiry only sell, block monthly/weekly, fast cycles</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1028,8 +959,8 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c, 70% spread</div>
-  <div class="status-item">Strategy: hold, protect 50%+</div>
-  <div class="status-item">Expiry save: 2min</div>
+  <div class="status-item">Strategy: expiry only sell</div>
+  <div class="status-item">Expiry exit: 5min</div>
   <div class="status-item">Max: 5 contracts</div>
   <div class="status-item">All crypto series</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
@@ -1173,7 +1104,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — ride and protect, all crypto, 5s cycles, peak gains in DB")
+    logger.info("Bot starting — expiry only sell, block monthly/weekly, fast cycles")
     cancel_all_resting()
     clear_dead()
     sync_with_kalshi()
