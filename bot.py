@@ -14,7 +14,7 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 
 MIN_PRICE = 0.02
-MAX_PRICE = 0.95
+MAX_PRICE = 0.50
 MAX_BUYS_PER_CYCLE = 50
 CYCLE_SECONDS = 30
 STARTING_BALANCE = 50.00
@@ -101,15 +101,10 @@ def get_balance():
         .eq('action', 'buy').is_('pnl', 'null').execute()
     open_cost = sum(sf(t['price']) * (t['count'] or 1) for t in (open_buys.data or []))
 
+    # Sell records are the SINGLE source of truth for P&L
     sells = db.table('trades').select('pnl') \
         .eq('action', 'sell').not_.is_('pnl', 'null').execute()
-    sell_pnls = [sf(t['pnl']) for t in (sells.data or [])]
-
-    settled = db.table('trades').select('pnl') \
-        .eq('action', 'buy').not_.is_('pnl', 'null').execute()
-    settled_pnls = [sf(t['pnl']) for t in (settled.data or [])]
-
-    all_pnls = sell_pnls + settled_pnls
+    all_pnls = [sf(t['pnl']) for t in (sells.data or [])]
     total_profit = sum(p for p in all_pnls if p > 0)
     total_loss = abs(sum(p for p in all_pnls if p < 0))
 
@@ -421,9 +416,11 @@ def check_sells():
                 logger.error(f"SETTLE INSERT FAILED: {e}")
 
             try:
+                # Mark buy as resolved with pnl=0 — sell record is the single source of truth
                 db.table('trades').update({
-                    'pnl': float(pnl),
+                    'pnl': 0.0,
                     'current_bid': float(settle_price),
+                    'reason': f"{trade.get('reason', '')} | {reason}",
                 }).eq('id', trade['id']).execute()
             except:
                 pass
@@ -490,12 +487,13 @@ def check_sells():
                 logger.error(f"{label} traceback: {traceback.format_exc()}")
 
             try:
+                # Mark buy as resolved with pnl=0 — sell record is single source of truth
                 db.table('trades').update({
-                    'pnl': float(pnl),
+                    'pnl': 0.0,
                     'current_bid': float(current_bid),
                     'sell_gain_pct': float(round(gain_pct, 1)),
                 }).eq('id', trade['id']).execute()
-                logger.info(f"BUY UPDATED: id={trade['id']} pnl={pnl}")
+                logger.info(f"BUY RESOLVED: id={trade['id']}")
             except Exception as e:
                 logger.error(f"BUY UPDATE FAILED: {e}")
             sold += 1
