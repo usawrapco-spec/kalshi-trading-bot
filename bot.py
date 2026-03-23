@@ -23,7 +23,7 @@ PORT = int(os.environ.get('PORT', 8080))
 # === SETTINGS ===
 MIN_PRICE = 0.03
 MAX_PRICE = 0.20
-CYCLE_SECONDS = 9
+CYCLE_SECONDS = 5
 MAX_CONTRACTS_PER_TRADE = 5
 MAX_BUYS_PER_CYCLE = 15
 MAX_DEPLOYMENT_PCT = 0.95
@@ -32,7 +32,7 @@ MAX_SPEND_PER_CYCLE = 25
 MAX_OPEN_POSITIONS = 200
 
 # === CRYPTO SERIES — the only thing we scan ===
-CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
+CRYPTO_SERIES = ['KXBTCD']
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -166,21 +166,24 @@ def get_owned():
     return {t['ticker'] for t in (result.data or [])}
 
 
-# === NUCLEAR CLEAR — sell everything on startup ===
+# === CLEAR NON-BTCD — sell everything that isn't KXBTCD on startup ===
 
-def nuclear_clear():
-    """Sell ALL open positions at whatever bid is available. Clean slate."""
+def clear_non_btcd():
+    """Sell any open position that isn't KXBTCD. Mark dead if no bid."""
     try:
         open_buys = db.table('trades').select('*') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         if not open_buys.data:
-            logger.info("Nuclear clear: no open positions")
+            logger.info("Clear non-BTCD: no open positions")
             return
 
         sold = 0
         dead = 0
         for trade in open_buys.data:
             ticker = trade['ticker']
+            if 'KXBTCD' in ticker:
+                continue  # keep these
+
             side = trade['side']
             count = trade.get('count') or 1
             entry_price = sf(trade['price'])
@@ -193,18 +196,18 @@ def nuclear_clear():
 
                 pnl = round((bid - entry_price) * count, 4)
                 gain_pct = ((bid - entry_price) / entry_price) * 100 if entry_price > 0 else 0
-                logger.info(f"CLEAR: {ticker} {side} x{count} @ ${bid:.2f} | pnl=${pnl:.4f}")
+                logger.info(f"CLEAR: sold {ticker} {side} x{count} @ ${bid:.2f} | pnl=${pnl:.4f}")
 
                 try:
                     db.table('trades').insert({
                         'ticker': ticker, 'side': side, 'action': 'sell',
                         'price': float(bid), 'count': count,
                         'pnl': float(pnl), 'strategy': 'crypto',
-                        'reason': f"NUCLEAR CLEAR {gain_pct:+.0f}%",
+                        'reason': f"CLEAR NON-BTCD {gain_pct:+.0f}%",
                         'sell_gain_pct': float(round(gain_pct, 1)),
                     }).execute()
                 except Exception as e:
-                    logger.error(f"Nuclear clear DB insert failed: {e}")
+                    logger.error(f"Clear non-BTCD DB insert failed: {e}")
 
                 try:
                     db.table('trades').update({
@@ -215,7 +218,6 @@ def nuclear_clear():
                     pass
                 sold += 1
             else:
-                # No bid — mark as dead
                 loss = round(-entry_price * count, 4)
                 try:
                     db.table('trades').update({
@@ -224,12 +226,12 @@ def nuclear_clear():
                     }).eq('id', trade['id']).execute()
                 except:
                     pass
-                logger.info(f"CLEAR: {ticker} no bid, marked dead (loss=${loss:.4f})")
+                logger.info(f"CLEAR: marked {ticker} dead (loss=${loss:.4f})")
                 dead += 1
 
-        logger.info(f"NUCLEAR CLEAR DONE: sold {sold}, dead {dead}")
+        logger.info(f"CLEAR NON-BTCD DONE: sold {sold}, dead {dead}")
     except Exception as e:
-        logger.error(f"Nuclear clear error: {e}")
+        logger.error(f"Clear non-BTCD error: {e}")
 
 
 # === SELL LOGIC ===
@@ -275,6 +277,8 @@ def find_buy_candidates(markets):
     candidates = []
     for market in markets:
         ticker = market.get('ticker', '')
+        if 'KXBTCD' not in ticker:
+            continue
         if 'KXMVE' in ticker:
             continue
 
@@ -997,9 +1001,10 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — resync from Kalshi, current hour only, sell 25% or 10s timeout, 3 contracts")
+    logger.info("Bot starting — KXBTCD ONLY, 5s cycles, 5 contracts, sell 25% or 10s timeout")
     startup_purge()
     resync_positions()
+    clear_non_btcd()
     sync_with_kalshi()
     cycle_count = 0
     while True:
