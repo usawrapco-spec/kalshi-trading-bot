@@ -14,7 +14,7 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 
 MIN_PRICE = 0.02
-MAX_PRICE = 0.35
+MAX_PRICE = 0.60
 MAX_BUYS_PER_CYCLE = 50
 CYCLE_SECONDS = 30
 STARTING_BALANCE = 50.00
@@ -104,6 +104,7 @@ def get_market(ticker):
 CRYPTO_SERIES = [
     'KXBTC15M', 'KXETH15M', 'KXSOL15M',
     'KXBTC1H', 'KXETH1H', 'KXSOL1H',
+    'KXBTCD', 'KXETHD', 'KXSOLD',
 ]
 
 
@@ -335,13 +336,12 @@ def run_cycle():
                              'strategy': strategy, 'volume': vol,
                              'reason': f"{strategy}: {title[:40]} NO@${no:.2f} vol={vol:.0f}"})
 
-        # Sort by volume — most active first
-        buys.sort(key=lambda x: x['volume'], reverse=True)
-        ordered_buys = buys
+        # Crypto first (all-in), then trending (only high volume)
+        crypto_buys = sorted([b for b in buys if b['strategy'] == 'crypto'], key=lambda x: x['volume'], reverse=True)
+        trending_buys = sorted([b for b in buys if b['strategy'] == 'trending' and b['volume'] >= 1000], key=lambda x: x['volume'], reverse=True)
+        ordered_buys = crypto_buys + trending_buys
 
-        trending_ct = sum(1 for b in buys if b['strategy'] == 'trending')
-        crypto_ct = sum(1 for b in buys if b['strategy'] == 'crypto')
-        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} crypto | trending={trending_ct} crypto={crypto_ct}")
+        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} crypto | crypto={len(crypto_buys)} trending={len(trending_buys)} (vol>1000)")
 
         # Buy 1 contract each
         bought = 0
