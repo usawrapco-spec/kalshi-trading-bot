@@ -214,23 +214,38 @@ def check_sells():
         gain_pct = gain * 100
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        # 30% gain = take profit, otherwise hold until expiry
+        # Check if less than 60 seconds to expiry — sell to recover something
+        should_expiry_save = False
+        close_time = market.get('close_time') or market.get('expected_expiration_time')
+        if close_time:
+            close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+            secs_left = (close_dt - datetime.now(timezone.utc)).total_seconds()
+            if secs_left < 60 and current_bid > 0:
+                should_expiry_save = True
+
+        # 30% gain = take profit, or expiry save
         if gain >= SELL_THRESHOLD:
             pnl = round((current_bid - entry_price) * count, 4)
             reason = f"+{gain_pct:.0f}% PROFIT"
-            result = place_order(ticker, side, 'sell', current_bid, count)
-            if not result:
-                continue
+        elif should_expiry_save:
+            pnl = round((current_bid - entry_price) * count, 4)
+            reason = f"EXPIRY SAVE {gain_pct:+.0f}%"
+        else:
+            continue
 
-            logger.info(f"SELL ({reason}): {ticker} {side} x{count} @ ${current_bid:.2f} | pnl=${pnl:.4f}")
-            try:
-                db.table('trades').update({
-                    'pnl': float(pnl),
-                    'current_bid': float(current_bid),
-                }).eq('id', trade['id']).execute()
-            except Exception as e:
-                logger.error(f"Sell DB error: {e}")
-            sold += 1
+        result = place_order(ticker, side, 'sell', current_bid, count)
+        if not result:
+            continue
+
+        logger.info(f"SELL ({reason}): {ticker} {side} x{count} @ ${current_bid:.2f} | pnl=${pnl:.4f}")
+        try:
+            db.table('trades').update({
+                'pnl': float(pnl),
+                'current_bid': float(current_bid),
+            }).eq('id', trade['id']).execute()
+        except Exception as e:
+            logger.error(f"Sell DB error: {e}")
+        sold += 1
 
     logger.info(f"SELL SUMMARY: sold={sold} expired={expired}")
 
