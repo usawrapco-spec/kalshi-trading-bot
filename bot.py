@@ -1,6 +1,7 @@
 """
-Golden hour strategy: 3-15c brackets, sell ALL at 100%, expiry save 25%+.
-Crypto + index + oil hourlies. 10s cycles. Paper mode (ENABLE_TRADING=false).
+19W/0L winning strategy: crypto hourly brackets only.
+3-15c, sell ALL at 100%, expiry save 25%+. 10s cycles.
+Paper mode (ENABLE_TRADING=false).
 """
 
 import os, time, logging, re, requests, traceback
@@ -28,22 +29,16 @@ MAX_CONTRACTS_PER_TRADE = 3
 MIN_CONTRACTS_PER_TRADE = 1
 MAX_DEPLOYMENT_PCT = 0.60
 MIN_CASH_RESERVE = 0.30
-MAX_POSITIONS = 50
+MAX_POSITIONS = 10
 PROFIT_BANK_PCT = 0.20
 PAPER_STARTING_BALANCE = 20.00
-PAPER_RESET_TIME = '2026-03-23T20:40:00Z'
+PAPER_RESET_TIME = '2026-03-23T21:45:00Z'
 
-# === SERIES TO SCAN (bracket/hourly contracts only) ===
-CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
-INDEX_SERIES = ['KXINX', 'KXINXD', 'KXINXU', 'KXNASDAQ100', 'KXNASDAQ100U', 'KXNASDAQ100D']
-OIL_SERIES = ['KXWTI']
-ALL_SERIES = CRYPTO_SERIES + INDEX_SERIES + OIL_SERIES
-
-# Sports patterns to dump on startup (no longer trading these)
-SPORTS_DUMP_PATTERNS = ['NBAGAME', 'NCAAMBGAME', 'TENNIS', 'MLB', 'NHL']
+# === SERIES TO SCAN (crypto hourly brackets only — 19W/0L) ===
+ALL_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
 
 # === HARD BLOCKS ===
-BLOCKED_PATTERNS = ['KXMVE']
+BLOCKED_PATTERNS = ['KXMVE', '-15M']
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -329,13 +324,9 @@ def find_buy_candidates(markets):
             elif yes_bid <= 0 and no_bid <= 0:
                 no_bid += 1
 
-    # Crypto first (proven 19W/0L), then others — each pool sorted by volume
-    crypto_pats = ['KXBTC', 'KXETH', 'KXSOL']
-    crypto = sorted([c for c in candidates if any(p in c['ticker'] for p in crypto_pats)], key=lambda x: x['volume'], reverse=True)
-    other = sorted([c for c in candidates if not any(p in c['ticker'] for p in crypto_pats)], key=lambda x: x['volume'], reverse=True)
-    candidates = crypto + other
+    candidates.sort(key=lambda x: x['volume'], reverse=True)
     total = len(markets)
-    logger.info(f"FILTER: {total} total | {blocked} blocked | {wrong_price} price out | {no_bid} no bid | {len(candidates)} candidates ({len(crypto)} crypto, {len(other)} other)")
+    logger.info(f"FILTER: {total} total | {blocked} blocked | {wrong_price} price out | {no_bid} no bid | {len(candidates)} candidates")
 
     # Log first 10 candidates
     for c in candidates[:10]:
@@ -656,29 +647,18 @@ def run_buys(markets):
             logger.info(f"MAX POSITIONS: {num_open + bought} open, limit {MAX_POSITIONS}")
             break
 
-        # Re-check cash and deployment before each buy
-        cash = get_balance() if ENABLE_TRADING else cash
-        total_deployed_now = total_deployed + sum(c2['price'] * MAX_CONTRACTS_PER_TRADE for c2 in candidates[:bought] if bought > 0)
-
-        # Recalculate using simple running total
         cost = c['price'] * MAX_CONTRACTS_PER_TRADE
         projected_deployed = total_deployed + cost
         projected_balance = cash + projected_deployed
 
-        # Deployment limit check
+        # Deployment limit / cash checks — stop buying, don't spam logs
         if projected_balance > 0 and projected_deployed / projected_balance >= MAX_DEPLOYMENT_PCT:
-            logger.info(f"DEPLOYMENT LIMIT: {projected_deployed/projected_balance:.0%} deployed, max {MAX_DEPLOYMENT_PCT:.0%}")
-            continue
+            logger.info(f"DEPLOYMENT LIMIT: {projected_deployed/projected_balance:.0%} >= {MAX_DEPLOYMENT_PCT:.0%}, stopping buys")
+            break
 
-        # Cash reserve check
-        if projected_balance > 0 and (cash - cost) / projected_balance < MIN_CASH_RESERVE:
-            logger.info(f"CASH RESERVE: ${cash:.2f} - ${cost:.2f} is below {MIN_CASH_RESERVE:.0%} of ${projected_balance:.2f}")
-            continue
-
-        # Can we afford it?
         if cost > cash:
-            logger.info(f"INSUFFICIENT CASH: need ${cost:.2f}, have ${cash:.2f}")
-            continue
+            logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${cash:.2f}")
+            break
 
         count = MAX_CONTRACTS_PER_TRADE
         result = place_order(c['ticker'], c['side'], 'buy', c['price'], count)
@@ -988,7 +968,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; 10s cycles &mdash; 3-15c brackets &mdash; sell at 100%, expiry save 25%+</div>
+  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; 19W/0L strategy &mdash; crypto hourly 3-15c &mdash; sell at 100%</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1027,10 +1007,10 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="live-dot dot-paper" id="status-dot"></span> <span id="status-mode">PAPER</span></div>
-  <div class="status-item">Buy: 3-15c, bid &gt; 0</div>
+  <div class="status-item">Buy: 3-15c, bid &gt; 0, no 15M</div>
   <div class="status-item">Sell: 100% all, expiry save 25%</div>
-  <div class="status-item">Max: 3 contracts, cash limited</div>
-  <div class="status-item">Series: Crypto + Index + Oil brackets</div>
+  <div class="status-item">Max: 3 contracts, 10 positions</div>
+  <div class="status-item">Series: Crypto hourly only</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
 <div class="footer">Clean Reset &mdash; auto-refresh 15s</div>
@@ -1202,7 +1182,7 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- 3-15c, sell at 100%, expiry save 25%, 10s cycles")
+    logger.info(f"Bot starting [{mode}] -- 19W/0L strategy, crypto hourly only, 10s cycles")
     logger.info(f"Series: {ALL_SERIES}")
     logger.info(f"Settings: price=${BUY_MIN}-${BUY_MAX}, filter=price+bid only")
     logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, {MAX_DEPLOYMENT_PCT:.0%} max deploy, {MIN_CASH_RESERVE:.0%} cash reserve, {MAX_POSITIONS} max positions")
