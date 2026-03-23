@@ -30,7 +30,11 @@ SELL_THRESHOLD = 0.30
 STARTING_BALANCE = 50.00
 MAX_BUYS_PER_CYCLE = 10
 
-CRYPTO_SERIES = ['KXBTCD', 'KXETHD', 'KXBTC', 'KXETH', 'KXSOLD']
+CRYPTO_SERIES = [
+    'KXBTCD', 'KXETHD', 'KXSOLD',           # hourly direction
+    'KXBTC', 'KXETH', 'KXSOL',              # hourly bracket
+    'KXBTC15M', 'KXETH15M', 'KXSOL15M',     # 15-min direction
+]
 
 # Set dynamically at startup
 BOT_START_TIME = None
@@ -557,7 +561,7 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: KXBTCD, KXETHD, KXBTC, KXETH, KXSOLD</span>
+  <span>Series: KXBTCD, KXETHD, KXSOLD, KXBTC, KXETH, KXSOL, KXBTC15M, KXETH15M, KXSOL15M</span>
   <span>Buy: 3-20c | Sell: 30% | 5 contracts | 30s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
