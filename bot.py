@@ -166,38 +166,21 @@ def get_owned():
 
 
 # === SELL LOGIC ===
+# No trailing stop. No thresholds. No targets.
+# Hold everything. Sell before expiry if green. That's the whole strategy.
 
-# Track peak bids in memory (resets on restart but that's fine)
-peak_bids = {}  # key: trade_id, value: highest bid seen
-
-def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
+def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # Track peak bid
-    if trade_id not in peak_bids or current_bid > peak_bids[trade_id]:
-        peak_bids[trade_id] = current_bid
-
-    peak = peak_bids[trade_id]
-    drop_from_peak = ((peak - current_bid) / peak) * 100 if peak > 0 else 0
-
-    # TRAILING STOP: once in profit, sell if it drops 2% from peak
-    if gain_pct > 0 and drop_from_peak >= 2:
-        peak_gain = ((peak - entry_price) / entry_price) * 100
-        return True, count, f"TRAIL STOP +{gain_pct:.0f}% (peak was +{peak_gain:.0f}%, dropped {drop_from_peak:.1f}%)"
-
-    # Sliding expiry save
+    # ONLY sell near expiry if profitable
     if time_to_expiry_seconds is not None:
-        # 5 min left: sell if up 10%+
         if time_to_expiry_seconds < 300 and gain_pct >= 10:
             return True, count, f"5MIN SAVE +{gain_pct:.0f}%"
-
-        # 2 min left: sell if up anything
         if time_to_expiry_seconds < 120 and gain_pct > 0:
             return True, count, f"2MIN SAVE +{gain_pct:.0f}%"
 
-    # Otherwise HOLD. Let it ride.
     return False, 0, None
 
 
@@ -273,7 +256,7 @@ def startup_purge():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — trailing stop 25%/2% drop, expiry save: 5min/10%, 2min/any")
+    logger.info("check_sells() — hold everything, expiry save only: 5min/10%, 2min/any")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -359,7 +342,7 @@ def check_sells():
             pass
 
         # Decide sell
-        do_sell, sell_qty, reason = should_sell(entry_price, current_bid, count, time_to_expiry, trade['id'])
+        do_sell, sell_qty, reason = should_sell(entry_price, current_bid, count, time_to_expiry)
 
         if do_sell and sell_qty > 0:
             pnl = round((current_bid - entry_price) * sell_qty, 4)
@@ -633,7 +616,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 10s cycles &mdash; buy 3-20c, trailing stop + expiry save</div>
+  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 10s cycles &mdash; buy 3-20c, hold everything, expiry save only</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -666,7 +649,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c with bid</div>
-  <div class="status-item">Trail: 2% drop from peak</div>
+  <div class="status-item">Strategy: Hold, expiry save only</div>
   <div class="status-item">5min: +10%</div>
   <div class="status-item">2min: any green</div>
   <div class="status-item">Max: 5 contracts</div>
@@ -814,7 +797,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — Crypto scalper — buy 3-20c, trailing stop + expiry save")
+    logger.info("Bot starting — Crypto scalper — buy 3-20c, hold everything, expiry save only")
     startup_purge()
     cycle_count = 0
     while True:
