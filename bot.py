@@ -354,18 +354,19 @@ DASHBOARD_HTML = """
     <div class="panel">
         <h2>RECENT TRADES</h2>
         <table>
-            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Current</th><th>Gain</th><th>P&L</th><th>Strategy</th></tr>
+            <tr><th>Action</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Now/Exit</th><th>Gain</th><th>Strategy</th><th></th></tr>
             {% for t in trades %}
             <tr>
-                <td>{{ t.time }}</td>
                 <td>{{ t.action }}</td>
                 <td>{{ t.ticker }}</td>
                 <td>{{ t.side }}</td>
-                <td>${{ t.price }}</td>
+                <td>${{ t.entry }}</td>
                 <td>{{ ("$%.2f"|format(t.current)) if t.current else "—" }}</td>
-                <td class="{{ 'green' if t.gain and t.gain > 0 else 'red' if t.gain and t.gain < 0 else '' }}">{{ ("%+.0f%%"|format(t.gain)) if t.gain is not none else "—" }}</td>
-                <td class="{{ 'green' if t.pnl and t.pnl > 0 else 'red' if t.pnl and t.pnl < 0 else '' }}">{{ ("$%.4f"|format(t.pnl)) if t.pnl else "—" }}</td>
+                <td class="{{ 'green' if t.gain_pct and t.gain_pct > 0 else 'red' if t.gain_pct and t.gain_pct < 0 else '' }}">
+                    {% if t.gain_dollar is not none %}{{ "%+.2f¢"|format(t.gain_dollar * 100) }} ({{ "%+.0f%%"|format(t.gain_pct) }}){% else %}—{% endif %}
+                </td>
                 <td><span class="badge badge-{{ t.strategy }}">{{ t.strategy }}</span></td>
+                <td>{{ t.status }}</td>
             </tr>
             {% endfor %}
         </table>
@@ -411,23 +412,48 @@ def dashboard():
 
         trades_display = []
         for t in trades[:40]:
-            entry = sf(t['price'])
-            current = sf(t.get('current_bid')) if t.get('current_bid') is not None else None
-            is_open_buy = t['action'] == 'buy' and t.get('pnl') is None
-            gain = None
-            if is_open_buy and current and entry > 0:
-                gain = ((current - entry) / entry) * 100
-            trades_display.append({
-                'time': (t.get('created_at') or '')[:19],
-                'action': t['action'].upper(),
-                'ticker': t['ticker'],
-                'side': t['side'],
-                'price': f"{entry:.2f}",
-                'current': current if is_open_buy else None,
-                'gain': gain,
-                'pnl': sf(t['pnl']) if t.get('pnl') is not None else None,
-                'strategy': t.get('strategy') or '',
-            })
+            action = t['action']
+            price = sf(t['price'])
+            pnl = sf(t['pnl']) if t.get('pnl') is not None else None
+            count = t.get('count') or 1
+
+            if action == 'sell' and pnl is not None:
+                # Sell row: price is exit, derive entry from pnl
+                exit_price = price
+                entry_price = exit_price - (pnl / count) if count else exit_price
+                gain_dollar = pnl / count if count else 0
+                gain_pct = ((exit_price - entry_price) / entry_price * 100) if entry_price > 0 else 0
+                trades_display.append({
+                    'action': 'SELL', 'ticker': t['ticker'], 'side': t['side'],
+                    'entry': f"{entry_price:.2f}", 'current': exit_price,
+                    'gain_dollar': gain_dollar, 'gain_pct': gain_pct,
+                    'strategy': t.get('strategy') or '', 'status': '✅',
+                })
+            elif action == 'buy' and t.get('pnl') is None:
+                # Open buy: show current bid
+                current = sf(t.get('current_bid')) if t.get('current_bid') is not None else None
+                gain_dollar = None
+                gain_pct = None
+                if current and price > 0:
+                    gain_dollar = current - price
+                    gain_pct = ((current - price) / price) * 100
+                trades_display.append({
+                    'action': 'BUY', 'ticker': t['ticker'], 'side': t['side'],
+                    'entry': f"{price:.2f}", 'current': current,
+                    'gain_dollar': gain_dollar, 'gain_pct': gain_pct,
+                    'strategy': t.get('strategy') or '', 'status': '⏳',
+                })
+            elif action == 'buy' and pnl is not None:
+                # Settled buy
+                gain_dollar = pnl / count if count else 0
+                gain_pct = (pnl / count / price * 100) if price > 0 and count else 0
+                status = '✅' if pnl > 0 else '❌'
+                trades_display.append({
+                    'action': 'SETTLED', 'ticker': t['ticker'], 'side': t['side'],
+                    'entry': f"{price:.2f}", 'current': (1.0 if pnl > 0 else 0.0),
+                    'gain_dollar': gain_dollar, 'gain_pct': gain_pct,
+                    'strategy': t.get('strategy') or '', 'status': status,
+                })
 
         return render_template_string(DASHBOARD_HTML,
             trading_bal=f"{trading_bal:.2f}",
