@@ -174,12 +174,10 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # ONLY sell near expiry if profitable
-    if time_to_expiry_seconds is not None:
-        if time_to_expiry_seconds < 300 and gain_pct >= 10:
-            return True, count, f"5MIN SAVE +{gain_pct:.0f}%"
-        if time_to_expiry_seconds < 120 and gain_pct > 0:
-            return True, count, f"2MIN SAVE +{gain_pct:.0f}%"
+    # Near expiry and profitable — sell
+    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 120:
+        if gain_pct > 0:
+            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
     return False, 0, None
 
@@ -256,7 +254,7 @@ def startup_purge():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — hold everything, expiry save only: 5min/10%, 2min/any")
+    logger.info("check_sells() — hold everything, sell before expiry if green")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
