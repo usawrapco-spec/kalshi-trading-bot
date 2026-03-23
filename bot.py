@@ -30,10 +30,6 @@ MIN_CONTRACTS_PER_TRADE = 1
 MAX_DEPLOYMENT_PCT = 0.60
 MIN_CASH_RESERVE = 0.30
 MAX_POSITIONS = 10
-MIN_VOLUME = 5
-MAX_SPREAD_PCT = 0.80
-MAX_EXPIRY_SECONDS = 14400      # 4 hours
-MIN_EXPIRY_SECONDS = 180        # 3 minutes
 PROFIT_BANK_PCT = 0.20
 PAPER_STARTING_BALANCE = 20.00
 PAPER_RESET_TIME = '2026-03-23T20:40:00Z'
@@ -321,8 +317,8 @@ def find_buy_candidates(markets):
     total = len(markets)
     logger.info(f"FILTER: {total} total | {blocked} blocked | {wrong_price} price out of range | {no_bid} no bid | {len(candidates)} candidates")
 
-    # Log first 5 candidates
-    for c in candidates[:5]:
+    # Log first 10 candidates
+    for c in candidates[:10]:
         logger.info(f"  CANDIDATE: {c['ticker']} {c['side']} ask=${c['price']:.2f} bid=${c['bid']:.2f} vol={c['volume']}")
 
     return candidates
