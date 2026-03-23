@@ -324,12 +324,12 @@ def find_buy_candidates(markets):
         no_bid = float(market.get('no_bid_dollars', '0') or '0')
 
         # Tight spread = active contract. Bid must be 80%+ of ask.
-        if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid >= yes_ask * 0.80:
+        if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid >= yes_ask * 0.70:
             candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
-        if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid >= no_ask * 0.80:
+        if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid >= no_ask * 0.70:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (3-20c, 80% spread)")
+    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (3-20c, 70% spread)")
     return candidates
 
 
@@ -1009,7 +1009,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
-  <div class="status-item">Buy: 3-20c, 80% spread</div>
+  <div class="status-item">Buy: 3-20c, 70% spread</div>
   <div class="status-item">Strategy: hold, protect 50%+</div>
   <div class="status-item">Expiry save: 2min</div>
   <div class="status-item">Max: 5 contracts</div>
