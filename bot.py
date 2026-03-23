@@ -15,11 +15,10 @@ PORT = int(os.environ.get('PORT', 8080))
 
 MIN_PRICE = 0.03
 MAX_PRICE = 0.15
-TAKE_PROFIT_PCT = 30
 BUY_COUNT = 2
 MAX_BUYS_PER_CYCLE = 50
 CYCLE_SECONDS = 30
-STARTING_BALANCE = 10.00
+STARTING_BALANCE = 50.00
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -63,6 +62,23 @@ def get_owned():
     result = db.table('trades').select('ticker,side') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
     return {(t['ticker'], t['side']) for t in (result.data or [])}
+
+
+# === ADAPTIVE THRESHOLD ===
+
+def get_adaptive_threshold():
+    """Start at 30%, raise based on average winning sell gain."""
+    sells = db.table('trades').select('sell_gain_pct') \
+        .eq('action', 'sell').not_.is_('sell_gain_pct', 'null').execute()
+    if not sells.data or len(sells.data) < 3:
+        return 30
+    gains = [float(s['sell_gain_pct']) for s in sells.data if sf(s.get('sell_gain_pct')) > 0]
+    if not gains:
+        return 30
+    avg_gain = sum(gains) / len(gains)
+    threshold = max(30, min(avg_gain * 0.7, 200))
+    logger.info(f"Adaptive threshold: {threshold:.0f}% (avg sell: {avg_gain:.0f}%, {len(gains)} sells)")
+    return threshold
 
 
 # === KALSHI API ===
@@ -113,86 +129,9 @@ def get_series_markets(series_ticker):
         return []
 
 
-# === SCAN ALL MARKETS ===
-
-def categorize(ticker):
-    t = ticker.upper()
-    if 'KXBTC' in t or 'KXETH' in t or 'KXSOL' in t:
-        return 'crypto'
-    if 'KXHIGH' in t or 'KXLOWT' in t:
-        return 'weather'
-    if any(x in t for x in ['NCAA', 'NBA', 'NFL', 'NHL', 'MLB', 'SPORT']):
-        return 'sports'
-    if any(x in t for x in ['TRUMP', 'BIDEN', 'SENATE', 'HOUSE', 'ELECT', 'PRES', 'GOV']):
-        return 'politics'
-    return 'trending'
-
-
-def scan_all_markets():
-    """Fetch ALL open markets from Kalshi, return cheap ones sorted by volume."""
-    all_markets = []
-    cursor = None
-
-    for page in range(10):
-        url = '/markets?status=open&limit=200'
-        if cursor:
-            url += f'&cursor={cursor}'
-        try:
-            resp = kalshi_get(url)
-            markets = resp.get('markets', [])
-            cursor = resp.get('cursor', None)
-            all_markets.extend(markets)
-            if not cursor or not markets:
-                break
-        except Exception as e:
-            logger.error(f"Market fetch page {page}: {e}")
-            break
-
-    logger.info(f"Fetched {len(all_markets)} total markets from generic endpoint")
-
-    # Log first 3 markets raw prices to diagnose field names
-    for i, m in enumerate(all_markets[:3]):
-        logger.info(f"  Generic market[{i}]: {m.get('ticker','?')} yes_ask_dollars={m.get('yes_ask_dollars', 'MISSING')!r} no_ask_dollars={m.get('no_ask_dollars', 'MISSING')!r}")
-
-    cheap = []
-    for m in all_markets:
-        ticker = m.get('ticker', '')
-        if 'KXMVE' in ticker:
-            continue
-
-        yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
-        no_ask = float(m.get('no_ask_dollars', '0') or '0')
-        volume = float(m.get('volume_24h_fp', '0') or '0')
-        title = m.get('title', '')
-        strat = categorize(ticker)
-
-        if MIN_PRICE <= yes_ask <= MAX_PRICE:
-            cheap.append({
-                'ticker': ticker, 'side': 'yes', 'price': yes_ask,
-                'volume': volume, 'strategy': strat,
-                'reason': f"{strat}: {title[:40]} YES @ ${yes_ask:.2f}",
-            })
-        if MIN_PRICE <= no_ask <= MAX_PRICE:
-            cheap.append({
-                'ticker': ticker, 'side': 'no', 'price': no_ask,
-                'volume': volume, 'strategy': strat,
-                'reason': f"{strat}: {title[:40]} NO @ ${no_ask:.2f}",
-            })
-
-    cheap.sort(key=lambda x: x['volume'], reverse=True)
-    if cheap:
-        logger.info(f"  Generic scan: first 3 cheap: {[(c['ticker'], c['side'], c['price']) for c in cheap[:3]]}")
-
-    counts = {}
-    for c in cheap:
-        counts[c['strategy']] = counts.get(c['strategy'], 0) + 1
-    breakdown = ', '.join(f"{k}: {v}" for k, v in sorted(counts.items()))
-    logger.info(f"Generic scan: {len(cheap)} cheap ({breakdown})")
-    return cheap
-
+# === MARKET SCANNING ===
 
 def _scan_series(series_list, strategy):
-    """Scan a list of series tickers and return cheap contracts."""
     cheap = []
     for series in series_list:
         markets = get_series_markets(series)
@@ -214,7 +153,6 @@ def _scan_series(series_list, strategy):
 
 
 def scan_series_markets():
-    """Fetch crypto + weather + trending series individually."""
     crypto = _scan_series(CRYPTO_SERIES, 'crypto')
     weather = _scan_series(WEATHER_SERIES, 'weather')
     trending = _scan_series(TRENDING_SERIES, 'trending')
@@ -223,7 +161,67 @@ def scan_series_markets():
     return cheap
 
 
+def categorize(ticker):
+    t = ticker.upper()
+    if 'KXBTC' in t or 'KXETH' in t or 'KXSOL' in t:
+        return 'crypto'
+    if 'KXHIGH' in t or 'KXLOWT' in t:
+        return 'weather'
+    if any(x in t for x in ['NCAA', 'NBA', 'NFL', 'NHL', 'MLB', 'SPORT']):
+        return 'sports'
+    if any(x in t for x in ['TRUMP', 'BIDEN', 'SENATE', 'HOUSE', 'ELECT', 'PRES', 'GOV']):
+        return 'politics'
+    return 'trending'
+
+
+def scan_all_markets():
+    all_markets = []
+    cursor = None
+    for page in range(10):
+        url = '/markets?status=open&limit=200'
+        if cursor:
+            url += f'&cursor={cursor}'
+        try:
+            resp = kalshi_get(url)
+            markets = resp.get('markets', [])
+            cursor = resp.get('cursor', None)
+            all_markets.extend(markets)
+            if not cursor or not markets:
+                break
+        except Exception as e:
+            logger.error(f"Market fetch page {page}: {e}")
+            break
+
+    cheap = []
+    for m in all_markets:
+        ticker = m.get('ticker', '')
+        if 'KXMVE' in ticker:
+            continue
+        yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
+        no_ask = float(m.get('no_ask_dollars', '0') or '0')
+        volume = float(m.get('volume_24h_fp', '0') or '0')
+        title = m.get('title', '')
+        strat = categorize(ticker)
+        if MIN_PRICE <= yes_ask <= MAX_PRICE:
+            cheap.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
+                          'volume': volume, 'strategy': strat,
+                          'reason': f"{strat}: {title[:40]} YES @ ${yes_ask:.2f}"})
+        if MIN_PRICE <= no_ask <= MAX_PRICE:
+            cheap.append({'ticker': ticker, 'side': 'no', 'price': no_ask,
+                          'volume': volume, 'strategy': strat,
+                          'reason': f"{strat}: {title[:40]} NO @ ${no_ask:.2f}"})
+
+    cheap.sort(key=lambda x: x['volume'], reverse=True)
+    logger.info(f"Generic scan: {len(all_markets)} markets, {len(cheap)} cheap")
+    return cheap
+
+
 # === PAPER TRADING ===
+
+def kalshi_fee(price):
+    """Taker fee per contract: ceil(0.07 * price * (1-price) * 100) / 100"""
+    return math.ceil(0.07 * price * (1 - price) * 100) / 100
+
 
 def buy(ticker, side, price, strategy, reason):
     cost = price * BUY_COUNT
@@ -241,25 +239,21 @@ def buy(ticker, side, price, strategy, reason):
         return False
 
 
-def kalshi_fee(price):
-    """Taker fee per contract: ceil(0.07 * price * (1-price) * 100) / 100"""
-    return math.ceil(0.07 * price * (1 - price) * 100) / 100
-
-
 def sell(trade, current_bid, reason):
     entry_price = sf(trade['price'])
     count = trade['count'] or 1
     buy_fee = kalshi_fee(entry_price)
     sell_fee = kalshi_fee(current_bid)
     pnl = round((current_bid - entry_price - buy_fee - sell_fee) * count, 4)
+    gain_pct = round(((current_bid - entry_price) / entry_price) * 100, 2) if entry_price > 0 else 0
 
-    logger.info(f"SELL: {trade['ticker']} {trade['side']} @ ${current_bid:.2f} | fees: ${buy_fee:.2f}+${sell_fee:.2f} | P&L: ${pnl:.4f} | {reason}")
+    logger.info(f"SELL: {trade['ticker']} {trade['side']} @ ${current_bid:.2f} | fees: ${buy_fee:.2f}+${sell_fee:.2f} | P&L: ${pnl:.4f} ({gain_pct:+.0f}%) | {reason}")
     try:
         db.table('trades').insert({
             'ticker': trade['ticker'], 'side': trade['side'], 'action': 'sell',
-            'price': float(current_bid), 'count': trade['count'] or 1,
+            'price': float(current_bid), 'count': count,
             'pnl': float(pnl), 'strategy': trade.get('strategy', ''),
-            'reason': reason,
+            'reason': reason, 'sell_gain_pct': float(gain_pct),
         }).execute()
         db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
         return True
@@ -282,12 +276,14 @@ def log_settlement(trade, pnl, label):
 # === POSITION MONITOR ===
 
 def check_positions():
-    """Check open buys — sell at 30%+ when momentum fades, record settlements."""
+    """Check open buys — adaptive sell when momentum fades, record settlements."""
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
     if not open_buys.data:
         return
+
+    threshold = get_adaptive_threshold()
 
     for trade in open_buys.data:
         ticker = trade['ticker']
@@ -324,14 +320,14 @@ def check_positions():
         pct = ((current_bid - entry_price) / entry_price) * 100
         last_seen = sf(trade.get('last_seen_bid'))
 
-        # Update price tracking: prev_bid = old last_seen, then update both
+        # Update price tracking
         db.table('trades').update({
             'prev_bid': float(last_seen) if last_seen > 0 else None,
             'last_seen_bid': float(current_bid),
             'current_bid': float(current_bid),
         }).eq('id', trade['id']).execute()
 
-        if pct >= TAKE_PROFIT_PCT:
+        if pct >= threshold:
             if current_bid > last_seen and last_seen > 0:
                 logger.info(f"HOLD: {ticker} {side} +{pct:.0f}% — still climbing ({last_seen:.2f}->{current_bid:.2f})")
             else:
@@ -355,11 +351,9 @@ def run_cycle():
     logger.info(f"Own {len(owned)} positions, balance ${trading_bal:.2f}")
 
     try:
-        # Combine both scans: series (proven working) + generic (more markets)
         series_cheap = scan_series_markets()
         generic_cheap = scan_all_markets()
 
-        # Merge: series first, then generic (dedup by ticker+side)
         seen = set()
         cheap = []
         for s in series_cheap:
@@ -410,14 +404,14 @@ DASHBOARD_HTML = """
         .header { text-align: center; margin-bottom: 20px; }
         .header h1 { color: #00ff88; font-size: 24px; }
         .header .subtitle { color: #666; font-size: 12px; }
-        .stats { display: flex; gap: 15px; margin-bottom: 20px; flex-wrap: wrap; }
-        .stat-box { background: #12121a; border: 1px solid #222; border-radius: 8px; padding: 15px; flex: 1; min-width: 120px; text-align: center; }
-        .stat-label { color: #666; font-size: 11px; text-transform: uppercase; }
-        .stat-value { font-size: 22px; font-weight: bold; margin-top: 4px; }
+        .stats { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+        .stat-box { background: #12121a; border: 1px solid #222; border-radius: 8px; padding: 12px; flex: 1; min-width: 100px; text-align: center; }
+        .stat-label { color: #666; font-size: 10px; text-transform: uppercase; }
+        .stat-value { font-size: 20px; font-weight: bold; margin-top: 4px; }
         .green { color: #00ff88; }
         .red { color: #ff4444; }
         .yellow { color: #ffaa00; }
-        .gray { color: #666; }
+        .gray { color: #555; }
         .section { background: #12121a; border: 1px solid #222; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
         .section h2 { color: #00ff88; font-size: 14px; margin-bottom: 10px; text-transform: uppercase; }
         table { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -433,12 +427,13 @@ DASHBOARD_HTML = """
         .badge-sports { background: #220033; color: #aa44ff; }
         .badge-politics { background: #003322; color: #44ffaa; }
         .badge-trending { background: #333300; color: #ffff44; }
+        .badge-unknown { background: #222; color: #888; }
     </style>
 </head>
 <body>
     <div class="header">
         <h1>KALSHI SCALP BOT</h1>
-        <div class="subtitle">Paper Trading — Started $10.00 — 30s cycles — All markets</div>
+        <div class="subtitle">Paper Trading — Started $50.00 — 30s cycles — All markets</div>
     </div>
 
     <div class="stats">
@@ -451,11 +446,11 @@ DASHBOARD_HTML = """
             <div class="stat-value yellow">${{saved}}</div>
         </div>
         <div class="stat-box">
-            <div class="stat-label">Total P&L</div>
-            <div class="stat-value {{'green' if total_pnl_positive else 'red'}}">${{total_pnl}}</div>
+            <div class="stat-label">Realized P&L</div>
+            <div class="stat-value {{'green' if realized_pnl_positive else 'red'}}">${{realized_pnl}}</div>
         </div>
         <div class="stat-box">
-            <div class="stat-label">Open Positions</div>
+            <div class="stat-label">Open</div>
             <div class="stat-value">{{total_open}}</div>
         </div>
         <div class="stat-box">
@@ -464,14 +459,22 @@ DASHBOARD_HTML = """
         </div>
         <div class="stat-box">
             <div class="stat-label">Record</div>
-            <div class="stat-value"><span class="green">{{total_wins}}W</span> / <span class="red">{{total_losses}}L</span></div>
+            <div class="stat-value"><span class="green">{{total_wins}}W</span>/<span class="red">{{total_losses}}L</span></div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Sell Target</div>
+            <div class="stat-value yellow">{{threshold}}%</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-label">Avg Sell Gain</div>
+            <div class="stat-value green">{{avg_sell_gain}}%</div>
         </div>
     </div>
 
     <div class="section">
         <h2>Strategy Breakdown</h2>
         <table>
-            <tr><th>Strategy</th><th>Open</th><th>Sold</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>P&L</th></tr>
+            <tr><th>Strategy</th><th>Open</th><th>Sold</th><th>Wins</th><th>Losses</th><th>Win Rate</th><th>Realized P&L</th></tr>
             {% for name, s in strats.items() %}
             <tr>
                 <td><span class="badge badge-{{name}}">{{name}}</span></td>
@@ -489,7 +492,7 @@ DASHBOARD_HTML = """
     <div class="section">
         <h2>Positions & Trades</h2>
         <table>
-            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Current</th><th>Gain</th><th>Gain%</th><th>Chg</th><th>Strategy</th></tr>
+            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Now/Exit</th><th>Gain</th><th>Gain%</th><th>Chg</th><th>Strategy</th></tr>
             {% for t in trades %}
             <tr>
                 <td>{{t.time}}</td>
@@ -498,10 +501,10 @@ DASHBOARD_HTML = """
                 <td>{{t.side}}</td>
                 <td>${{"%.2f"|format(t.entry)}}</td>
                 <td>{% if t.current > 0 %}${{"%.2f"|format(t.current)}}{% else %}—{% endif %}</td>
-                <td class="{{'green' if t.gain > 0 else 'red' if t.gain < 0 else 'gray'}}">
+                <td class="{{t.gain_color}}">
                     {% if t.gain != 0 %}{{"$%.4f"|format(t.gain)}}{% else %}—{% endif %}
                 </td>
-                <td class="{{'green' if t.gain_pct > 0 else 'red' if t.gain_pct < 0 else 'gray'}}">
+                <td class="{{t.gain_color}}">
                     {% if t.gain_pct != 0 %}{{"%.0f"|format(t.gain_pct)}}%{% else %}—{% endif %}
                 </td>
                 <td>
@@ -528,11 +531,12 @@ def health():
 def dashboard():
     try:
         trading_bal, saved = get_balance()
+        threshold = get_adaptive_threshold()
 
         all_trades = db.table('trades').select('*').order('created_at', desc=True).limit(500).execute()
         trades = all_trades.data or []
 
-        # Strategy breakdown from ALL trades
+        # Strategy breakdown — only realized (sells + settled)
         strats = {}
         for t in trades:
             s = t.get('strategy') or 'unknown'
@@ -540,7 +544,7 @@ def dashboard():
                 strats[s] = {'open': 0, 'sells': 0, 'wins': 0, 'losses': 0, 'pnl': 0.0}
             if t['action'] == 'buy' and t.get('pnl') is None:
                 strats[s]['open'] += 1
-            if t['action'] == 'sell':
+            elif t['action'] == 'sell':
                 strats[s]['sells'] += 1
                 p = sf(t.get('pnl'))
                 strats[s]['pnl'] += p
@@ -548,8 +552,7 @@ def dashboard():
                     strats[s]['wins'] += 1
                 elif p < 0:
                     strats[s]['losses'] += 1
-            # Count settled buys too
-            if t['action'] == 'buy' and t.get('pnl') is not None:
+            elif t['action'] == 'buy' and t.get('pnl') is not None:
                 p = sf(t.get('pnl'))
                 strats[s]['pnl'] += p
                 if p > 0:
@@ -560,7 +563,12 @@ def dashboard():
         total_open = sum(s['open'] for s in strats.values())
         total_wins = sum(s['wins'] for s in strats.values())
         total_losses = sum(s['losses'] for s in strats.values())
-        total_pnl = sum(s['pnl'] for s in strats.values())
+        realized_pnl = sum(s['pnl'] for s in strats.values())
+
+        # Average sell gain %
+        sell_gains = [sf(t.get('sell_gain_pct')) for t in trades
+                      if t['action'] == 'sell' and t.get('sell_gain_pct') is not None and sf(t.get('sell_gain_pct')) > 0]
+        avg_sell_gain = sum(sell_gains) / len(sell_gains) if sell_gains else 0
 
         # Build display trades
         display_trades = []
@@ -573,24 +581,24 @@ def dashboard():
             prev = sf(t.get('prev_bid'))
 
             if action == 'sell':
-                # Sell: price=exit, derive entry from pnl
                 exit_price = price
                 entry = exit_price - (pnl / count) if count else exit_price
                 gain = pnl
-                gain_pct = ((exit_price - entry) / entry * 100) if entry > 0 else 0
+                gain_pct = sf(t.get('sell_gain_pct')) if t.get('sell_gain_pct') is not None else (
+                    ((exit_price - entry) / entry * 100) if entry > 0 else 0)
                 change = 0
                 action_class = 'sell'
                 display_action = 'SELL'
+                gain_color = 'green' if gain > 0 else 'red' if gain < 0 else 'gray'
             elif action == 'buy' and t.get('pnl') is None:
-                # Open position
                 entry = price
                 gain = (current - entry) * count if current > 0 else 0
                 gain_pct = ((current - entry) / entry * 100) if entry > 0 and current > 0 else 0
                 change = current - prev if current > 0 and prev > 0 else 0
                 action_class = 'buy'
                 display_action = 'BUY'
+                gain_color = 'gray'  # unrealized = gray
             elif action == 'buy' and t.get('pnl') is not None:
-                # Settled
                 entry = price
                 gain = pnl
                 gain_pct = (pnl / (entry * count) * 100) if entry > 0 and count > 0 else 0
@@ -598,11 +606,12 @@ def dashboard():
                 change = 0
                 action_class = 'settled'
                 display_action = 'WIN' if pnl > 0 else 'LOSS'
+                gain_color = 'green' if pnl > 0 else 'red'
             else:
                 continue
 
             display_trades.append({
-                'time': (t.get('created_at') or '')[-8:],  # just HH:MM:SS
+                'time': (t.get('created_at') or '')[-8:],
                 'action': display_action,
                 'action_class': action_class,
                 'ticker': t.get('ticker', ''),
@@ -611,6 +620,7 @@ def dashboard():
                 'current': current,
                 'gain': gain,
                 'gain_pct': gain_pct,
+                'gain_color': gain_color,
                 'change': change,
                 'strategy': t.get('strategy') or 'unknown',
             })
@@ -618,12 +628,14 @@ def dashboard():
         return render_template_string(DASHBOARD_HTML,
             balance=f"{trading_bal:.2f}",
             saved=f"{saved:.2f}",
-            total_pnl=f"{total_pnl:.4f}",
-            total_pnl_positive=total_pnl >= 0,
+            realized_pnl=f"{realized_pnl:.4f}",
+            realized_pnl_positive=realized_pnl >= 0,
             total_open=total_open,
             total_wins=total_wins,
             total_losses=total_losses,
             win_rate=f"{(total_wins/(total_wins+total_losses)*100):.0f}" if (total_wins + total_losses) > 0 else "—",
+            threshold=f"{threshold:.0f}",
+            avg_sell_gain=f"{avg_sell_gain:.0f}",
             strats=strats,
             trades=display_trades,
         )
@@ -635,10 +647,9 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — paper trading, 30s cycles, scan ALL markets")
+    logger.info("Bot starting — $50 paper, 30s cycles, adaptive selling")
     try:
         db.table('trades').delete().eq('strategy', 'test').execute()
-        logger.info("Cleaned up test trades")
     except:
         pass
     while True:
