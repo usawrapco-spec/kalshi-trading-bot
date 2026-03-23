@@ -1,4 +1,9 @@
-import os, time, logging, math, re, requests, traceback
+"""
+NUCLEAR RESTART — Simple crypto price scalper.
+Buy cheap crypto contracts, sell when price goes up. That's it.
+"""
+
+import os, time, logging, re, requests, traceback
 from datetime import datetime, timezone
 from flask import Flask, render_template_string, jsonify
 from threading import Thread
@@ -14,33 +19,26 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 
+# === SETTINGS ===
 MIN_PRICE = 0.03
 MAX_PRICE = 0.20
 CYCLE_SECONDS = 30
-
-# === GOLDEN HOUR SETTINGS — simple, fast turnover ===
-MAX_DEPLOYMENT_PCT = 0.90       # Deploy up to 90% of balance — keep capital working
-MIN_CASH_RESERVE_PCT = 0.10     # 10% cash reserve
-MAX_CONTRACTS_PER_TRADE = 5     # 5 contracts per trade — golden hour setting
-MAX_SPEND_PER_TRADE_PCT = 0.15  # Max 15% of trading_balance per trade
+MAX_CONTRACTS_PER_TRADE = 5
+MAX_BUYS_PER_CYCLE = 15
+MAX_DEPLOYMENT_PCT = 0.95
+MAX_SPEND_PER_TRADE_PCT = 0.15
 MAX_SPEND_PER_CYCLE = 25
-MAX_BUYS_PER_CYCLE = 15         # High volume: golden hour did ~2.7/cycle at 30s
 MAX_OPEN_POSITIONS = 200
+PROFIT_SAVE_PCT = 0.20
+PROFIT_REINVEST_PCT = 0.80
 
-# === SELL THRESHOLDS ===
-# 15M contracts: scalp at 15%. Hourly+: scalp at 50%. Never let profit expire.
-
-# === PROFIT COMPOUNDING ===
-PROFIT_SAVE_PCT = 0.20          # 20% of every win gets banked permanently
-PROFIT_REINVEST_PCT = 0.80      # 80% of every win goes back to trading
+# === CRYPTO SERIES — the only thing we scan ===
+CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 auth = KalshiAuth()
 app = Flask(__name__)
-
-# Scanner stats — updated each cycle for dashboard
-last_scan = {'total': 0, 'categories': {}, 'timestamp': None}
 
 
 def sf(val):
@@ -50,109 +48,29 @@ def sf(val):
         return 0.0
 
 
-# === STARTUP ===
+# === EXPIRY PARSING ===
 
-def close_all_old_positions():
-    """Resolve old positions + fix both-sides. Run ONCE at startup."""
+def get_time_to_expiry(ticker):
+    """Parse expiry from ticker. Format: KXBTCD-26MAR2305-T68499.99"""
+    if isinstance(ticker, dict):
+        ticker = ticker.get('ticker', '')
+    match = re.search(r'-(\d{2})([A-Z]{3})(\d{2})(\d{2})-', ticker)
+    if not match:
+        return None
+    day_str, mon_str, h1, h2 = match.groups()
+    months = {'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+              'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12}
+    month = months.get(mon_str)
+    if not month:
+        return None
+    hour = int(h1 + h2)
+    extra_days = hour // 24
+    hour = hour % 24
     try:
-        for reason in ['CLOSED — nuclear reset', 'RESOLVED — fresh start',
-                       'RESOLVED — fresh start v2', 'RESOLVED — activity reset',
-                       'RESOLVED — velocity reset']:
-            db.table('trades').delete().eq('reason', reason).execute()
-
-        # Fix both-sides: keep cheapest, resolve rest
-        open_buys = db.table('trades').select('id,ticker,side,price') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
-        if open_buys.data:
-            ticker_sides = {}
-            for t in open_buys.data:
-                tk = t['ticker']
-                if tk not in ticker_sides:
-                    ticker_sides[tk] = []
-                ticker_sides[tk].append(t)
-
-            resolved = 0
-            for tk, trades in ticker_sides.items():
-                if len(trades) >= 2:
-                    trades.sort(key=lambda x: sf(x.get('price')))
-                    for t in trades[1:]:
-                        db.table('trades').update({
-                            'pnl': 0.0,
-                            'reason': 'RESOLVED — both-sides fix',
-                        }).eq('id', t['id']).execute()
-                        resolved += 1
-            if resolved:
-                logger.info(f"Fixed both-sides: resolved {resolved} duplicates")
-
-        # Resolve any non-supported positions (trending/weather leftovers)
-        all_open = db.table('trades').select('id,ticker,strategy') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
-        if all_open.data:
-            # All strategies from categorize_market are valid now
-            valid_strategies = {
-                'crypto', 'mm_scalp',  # legacy
-                'crypto direction', 'crypto bracket', 'NCAA basketball',
-                'march madness futures', 'weather', 'oil', 'sports',
-                'elections', 'tennis', 'economics', 'other',
-            }
-            stale = [t for t in all_open.data if t.get('strategy') not in valid_strategies]
-            for t in stale:
-                db.table('trades').update({
-                    'pnl': 0.0,
-                    'reason': 'RESOLVED — unsupported strategy reset',
-                }).eq('id', t['id']).execute()
-            if stale:
-                logger.info(f"Resolved {len(stale)} non-supported positions")
-
-        logger.info("Startup cleanup complete")
-    except Exception as e:
-        logger.info(f"Startup cleanup: {e}")
-
-
-# === BALANCE ===
-
-def get_balance():
-    """Get real Kalshi balance via API."""
-    try:
-        resp = kalshi_get('/portfolio/balance')
-        balance_cents = resp.get('balance', 0)
-        return float(balance_cents) / 100.0
-    except Exception as e:
-        logger.error(f"Balance fetch failed: {e}")
-        return 0.0
-
-
-def get_realized_pnl():
-    """P&L from sell records ONLY — single source of truth."""
-    sells = db.table('trades').select('pnl') \
-        .eq('action', 'sell').not_.is_('pnl', 'null').execute()
-    return sum(sf(t['pnl']) for t in (sells.data or []))
-
-
-def get_saved_balance():
-    """Saved balance = 20% of all winning sells. Computed from DB, survives restarts.
-    This money is PROTECTED — never traded with."""
-    sells = db.table('trades').select('pnl') \
-        .eq('action', 'sell').not_.is_('pnl', 'null').execute()
-    total_wins = sum(max(0.0, sf(t['pnl'])) for t in (sells.data or []))
-    return round(total_wins * PROFIT_SAVE_PCT, 4)
-
-
-def get_trading_balance():
-    """Trading balance = Kalshi balance minus saved (protected) balance.
-    Position sizing uses ONLY this, never the saved portion."""
-    total = get_balance()
-    saved = get_saved_balance()
-    trading = max(0.0, total - saved)
-    logger.info(f"Balance split: ${total:.2f} total | ${trading:.2f} trading | ${saved:.2f} SAVED (protected)")
-    return total, trading, saved
-
-
-def get_owned():
-    """Returns set of TICKER STRINGS — one side per market only."""
-    result = db.table('trades').select('ticker') \
-        .eq('action', 'buy').is_('pnl', 'null').execute()
-    return {t['ticker'] for t in (result.data or [])}
+        expiry = datetime(2026, month, int(day_str) + extra_days, hour, 59, 59, tzinfo=timezone.utc)
+        return max(0, (expiry - datetime.now(timezone.utc)).total_seconds())
+    except:
+        return None
 
 
 # === KALSHI API ===
@@ -183,10 +101,8 @@ def get_market(ticker):
 
 
 def place_order(ticker, side, action, price, count):
-    """Place a real Kalshi order. Returns order_id or None."""
-    # HARD SAFETY: cap buy orders at 5 contracts max
     if action == 'buy':
-        count = min(count, 5)
+        count = min(count, MAX_CONTRACTS_PER_TRADE)
     price_cents = int(round(price * 100))
     try:
         logger.info(f"ORDER: {action.upper()} {ticker} {side} x{count} @ ${price:.2f} ({price_cents}c)")
@@ -208,373 +124,16 @@ def place_order(ticker, side, action, price, count):
         return None
 
 
-# === UNIVERSAL MARKET SCANNER ===
-
-def categorize_market(ticker):
-    """Categorize any Kalshi market by ticker pattern."""
-    if '15M' in ticker: return '15-min crypto'
-    elif any(x in ticker for x in ['KXBTCD', 'KXETHD', 'KXSOLD']): return 'crypto direction'
-    elif any(x in ticker for x in ['KXBTC-', 'KXETH-', 'KXSOL-']): return 'crypto bracket'
-    elif 'KXNCAAMBGAME' in ticker or 'KXNCAAMB' in ticker or 'KXCBB' in ticker: return 'NCAA basketball'
-    elif 'KXMARMAD' in ticker or 'KXMM' in ticker: return 'march madness futures'
-    elif 'KXHIGH' in ticker or 'KXLOWT' in ticker: return 'weather'
-    elif 'KXMVE' in ticker: return 'multivariate (SKIP)'
-    elif any(x in ticker for x in ['OIL', 'WTI', 'CRUDE', 'BRENT']): return 'oil'
-    elif any(x in ticker for x in ['KXNFL', 'KXNBA', 'KXMLB', 'KXNHL', 'KXSOCCER', 'KXMLS', 'KXEPL', 'KXUCL']): return 'sports'
-    elif any(x in ticker for x in ['KXELECT', 'KXPRES', 'KXGOV', 'KXSEN', 'KXREFERENDUM']): return 'elections'
-    elif any(x in ticker for x in ['KXTENNIS', 'KXATP', 'KXWTA']): return 'tennis'
-    elif any(x in ticker for x in ['KXFED', 'KXCPI', 'KXGDP', 'KXJOBS', 'KXINFL']): return 'economics'
-    else: return 'other'
-
-
-CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
-SPORTS_SERIES = ['KXNCAAMBGAME', 'KXMARMAD']
-
-
-
-
-
-
-def fetch_crypto_markets():
-    """Fetch crypto + March Madness markets by series ticker."""
-    all_markets = []
-    for series in CRYPTO_SERIES + SPORTS_SERIES:
-        try:
-            resp = kalshi_get(f'/markets?series_ticker={series}&status=open&limit=200')
-            all_markets.extend(resp.get('markets', []))
-        except Exception as e:
-            logger.error(f"Fetch {series} failed: {e}")
-
-    logger.info(f"Fetched {len(all_markets)} markets (crypto + March Madness, including 15M)")
-
-    # Categorize for dashboard
-    categories = {}
-    for m in all_markets:
-        ticker = m.get('ticker', '')
-        cat = categorize_market(ticker)
-        categories[cat] = categories.get(cat, 0) + 1
-
-    for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
-        logger.info(f"  {cat}: {count} markets")
-
-    last_scan['total'] = len(all_markets)
-    last_scan['categories'] = categories
-    last_scan['timestamp'] = datetime.now(timezone.utc).isoformat()
-
-    return all_markets
-
-
-# === BUY LOGIC ===
-
-def calculate_position_size(contract_price, available_balance, volume=0, strategy='crypto'):
-    """Always 5 contracts — golden hour setting."""
-    return MAX_CONTRACTS_PER_TRADE
-
-
-
-def run_buys(markets):
-    """Crypto buy logic — buy any qualifying contract. Simple filters, high volume."""
-    total_balance, trading_balance, saved_balance = get_trading_balance()
-    owned = get_owned()
-    num_open = len(owned)
-    already_owned = 0
-    logger.info(f"[CRYPTO] Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f} (PROTECTED, never traded)")
-
-    if num_open >= MAX_OPEN_POSITIONS:
-        logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
-        return
-
-    buys = []
-    skipped_mve = 0
-    no_price = 0
-    no_bid = 0
-    price_ok = 0
-
-    for m in markets:
-        ticker = m.get('ticker', '')
-        status = m.get('status', '')
-
-        # Skip closed/settled markets
-        if status != 'open':
-            continue
-
-        # Skip multivariate parlays
-        if 'KXMVE' in ticker:
-            skipped_mve += 1
-            continue
-
-        if ticker in owned:
-            already_owned += 1
-            continue
-
-        category = categorize_market(ticker)
-        volume = sf(m.get('volume', 0)) or sf(m.get('volume_24h', 0))
-
-        yes_ask = sf(m.get('yes_ask_dollars', '0'))
-        yes_bid = sf(m.get('yes_bid_dollars', '0'))
-        no_ask = sf(m.get('no_ask_dollars', '0'))
-        no_bid = sf(m.get('no_bid_dollars', '0'))
-
-        # Also try non-dollar fields as fallback (cents)
-        if yes_ask == 0 and yes_bid == 0 and no_ask == 0 and no_bid == 0:
-            yes_ask = sf(m.get('yes_ask', 0)) / 100.0 if sf(m.get('yes_ask', 0)) > 1 else sf(m.get('yes_ask', 0))
-            yes_bid = sf(m.get('yes_bid', 0)) / 100.0 if sf(m.get('yes_bid', 0)) > 1 else sf(m.get('yes_bid', 0))
-            no_ask = sf(m.get('no_ask', 0)) / 100.0 if sf(m.get('no_ask', 0)) > 1 else sf(m.get('no_ask', 0))
-            no_bid = sf(m.get('no_bid', 0)) / 100.0 if sf(m.get('no_bid', 0)) > 1 else sf(m.get('no_bid', 0))
-
-        # SWEET SPOT: 3-20 cents — where all big wins came from
-        side_candidates = []
-        if 0.03 <= yes_ask <= 0.20 and yes_bid > 0:
-            side_candidates.append(('yes', yes_ask, yes_bid))
-        if 0.03 <= no_ask <= 0.20 and no_bid > 0:
-            side_candidates.append(('no', no_ask, no_bid))
-
-        if not side_candidates:
-            # Track why it failed for debug
-            has_any_ask = yes_ask > 0 or no_ask > 0
-            has_any_bid = yes_bid > 0 or no_bid > 0
-            if not has_any_ask:
-                no_price += 1
-            elif not has_any_bid:
-                no_bid += 1
-            else:
-                price_ok += 1  # Has price but outside 3-50c range
-            continue
-
-        # Add BOTH qualifying sides as separate buy candidates
-        for side, price, bid in side_candidates:
-            buys.append({
-                'ticker': ticker, 'side': side, 'price': price,
-                'bid': bid, 'spread': price - bid, 'count': MAX_CONTRACTS_PER_TRADE,
-                'volume': volume, 'strategy': category,
-            })
-
-    logger.info(f"FILTER DEBUG: total={len(markets)} | mve_skip={skipped_mve} | "
-                f"owned={already_owned} | no_price={no_price} | no_bid={no_bid} | "
-                f"out_of_range={price_ok} | final_candidates={len(buys)}")
-
-    # Sort by highest bid first (most liquid)
-    buys.sort(key=lambda x: x['bid'], reverse=True)
-
-    # Limits based on trading_balance (excludes saved/protected money)
-    max_exposure = trading_balance * MAX_DEPLOYMENT_PCT
-    max_per_trade = trading_balance * MAX_SPEND_PER_TRADE_PCT
-
-    # Get current deployed
-    open_buys = db.table('trades').select('price,count') \
-        .eq('action', 'buy').is_('pnl', 'null').execute()
-    current_deployed = sum(sf(t['price']) * (t['count'] or 1) for t in (open_buys.data or []))
-
-    bought = 0
-    cycle_spent = 0.0
-    for b in buys:
-        if bought >= MAX_BUYS_PER_CYCLE:
-            break
-        if cycle_spent >= MAX_SPEND_PER_CYCLE:
-            break
-        if num_open + bought >= MAX_OPEN_POSITIONS:
-            break
-        cost = b['price'] * b['count']
-        if cost > max_per_trade:
-            affordable = int(max_per_trade / b['price'])
-            if affordable < 1:
-                continue
-            b['count'] = affordable
-            cost = b['price'] * b['count']
-        if current_deployed + cost > max_exposure:
-            continue
-        if cost > trading_balance - current_deployed:
-            continue
-
-        # FINAL SAFETY: hard cap at 10 contracts before ANY order
-        b['count'] = min(b['count'], MAX_CONTRACTS_PER_TRADE)
-        cost = b['price'] * b['count']
-
-        # Place real Kalshi order
-        order_id = place_order(b['ticker'], b['side'], 'buy', b['price'], b['count'])
-        if not order_id:
-            continue
-
-        strat_label = b['strategy'].upper()
-        logger.info(f"BUY [{strat_label}]: {b['ticker']} {b['side']} x{b['count']} @ ${b['price']:.2f} (bid=${b['bid']:.2f} spread=${b['spread']:.2f} vol={b['volume']:.0f})")
-        try:
-            db.table('trades').insert({
-                'ticker': b['ticker'], 'side': b['side'], 'action': 'buy',
-                'price': float(b['price']), 'count': b['count'],
-                'strategy': b['strategy'],
-                'reason': f"{strat_label}: {b['side'].upper()} @ ${b['price']:.2f} bid=${b['bid']:.2f}",
-                'last_seen_bid': float(b['bid']),
-                'current_bid': float(b['bid']),
-            }).execute()
-            owned.add(b['ticker'])
-            trading_balance -= cost
-            current_deployed += cost
-            cycle_spent += cost
-            bought += 1
-        except Exception as e:
-            logger.error(f"Buy DB insert failed: {e}")
-
-    logger.info(f"[CRYPTO] Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
-
-    # Log category breakdown of buys
-    if bought > 0:
-        buy_cats = {}
-        for b in buys[:bought]:
-            buy_cats[b['strategy']] = buy_cats.get(b['strategy'], 0) + 1
-        for cat, cnt in sorted(buy_cats.items(), key=lambda x: -x[1]):
-            logger.info(f"  Bought {cnt} from {cat}")
-
-
-# === SELL LOGIC — SMART TIERED: 100% instant sell, save profits before expiry, let winners ride ===
-
-sell_history = []  # Rolling last 20 sell gain percentages
-
-
-def get_time_to_expiry(market_or_ticker):
-    """Returns seconds until market closes, or None if unknown.
-    Accepts a market dict OR a ticker string. Tries ticker parsing first,
-    falls back to market close_time field.
-
-    Ticker format: KXBTCD-26MAR2305-T68499.99
-    The date segment after the dash is: YYmmmDDHH
-      26=year(2026), MAR=month, 23=day, 05=hour
-    """
-    ticker = None
-    if isinstance(market_or_ticker, str):
-        ticker = market_or_ticker
-    elif isinstance(market_or_ticker, dict):
-        ticker = market_or_ticker.get('ticker', '')
-
-    if ticker:
-        # Match: -26MAR2305- where 26=year, MAR=month, 2305=day+hour
-        date_match = re.search(r'-(\d{2})([A-Z]{3})(\d{4})', ticker)
-        if date_match:
-            yy = int(date_match.group(1))
-            mon_str = date_match.group(2)
-            dayhr = date_match.group(3)
-            months = {'JAN':1,'FEB':2,'MAR':3,'APR':4,'MAY':5,'JUN':6,
-                      'JUL':7,'AUG':8,'SEP':9,'OCT':10,'NOV':11,'DEC':12}
-            month = months.get(mon_str)
-            if month:
-                try:
-                    year = 2000 + yy
-                    day = int(dayhr[:2])
-                    hour = int(dayhr[2:])
-                    expiry = datetime(year, month, day, hour, 59, 59, tzinfo=timezone.utc)
-                    now = datetime.now(timezone.utc)
-                    return max(0, (expiry - now).total_seconds())
-                except (ValueError, OverflowError):
-                    pass
-
-    # Fallback: use market close_time field
-    if isinstance(market_or_ticker, dict):
-        close_time_str = market_or_ticker.get('close_time') or market_or_ticker.get('expiration_time')
-        if close_time_str:
-            try:
-                close_time_str = close_time_str.replace('Z', '+00:00')
-                close_time = datetime.fromisoformat(close_time_str)
-                now = datetime.now(timezone.utc)
-                return max(0, (close_time - now).total_seconds())
-            except:
-                pass
-    return None
-
-
-def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id, ticker=''):
-    """Tiered sell logic: 15M scalp fast at 15%, hourly+ at 50%. Never let profit expire.
-    Returns (should_sell, sell_qty, reason)."""
-    if current_bid <= 0 or entry_price <= 0:
-        return False, 0, None
-
-    gain_pct = ((current_bid - entry_price) / entry_price) * 100
-    is_15m = '15M' in ticker
-
-    # === 15-MINUTE CONTRACTS: scalp fast, lower target ===
-    if is_15m:
-        # Take profit at 15%+
-        if gain_pct >= 15:
-            return True, count, f"15M SCALP +{gain_pct:.0f}%"
-        # 2 minutes before expiry — sell anything green
-        if time_to_expiry is not None and time_to_expiry < 120:
-            if gain_pct > 0:
-                return True, count, f"15M SAVE +{gain_pct:.0f}%"
-        return False, 0, None
-
-    # === HOURLY+ CONTRACTS: hold for bigger gains ===
-    # Take profit at 50%+
-    if gain_pct >= 50:
-        return True, count, f"SCALP +{gain_pct:.0f}%"
-
-    # 5 minutes before expiry — sell anything green
-    if time_to_expiry is not None and time_to_expiry < 300:
-        if gain_pct > 0:
-            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
-
-    return False, 0, None
-
-
-def execute_sell(trade, ticker, side, entry_price, current_bid, sell_qty, total_count, gain_pct, reason):
-    """Execute a sell order and update DB. Returns True on success."""
-    pnl = round((current_bid - entry_price) * sell_qty, 4)
-
-    sell_order_id = place_order(ticker, side, 'sell', current_bid, sell_qty)
-    if not sell_order_id:
-        logger.error(f"SELL ORDER FAILED — skipping {ticker}")
-        return False
-
-    logger.info(f"SELL: {ticker} {side} x{sell_qty} +{gain_pct:.0f}% pnl=${pnl:.4f} | {reason}")
-    if pnl > 0:
-        banked = pnl * PROFIT_SAVE_PCT
-        reinvested = pnl * PROFIT_REINVEST_PCT
-        logger.info(f"PROFIT SPLIT: ${pnl:.4f} total | ${banked:.4f} BANKED | ${reinvested:.4f} reinvested")
-    try:
-        db.table('trades').insert({
-            'ticker': ticker, 'side': side, 'action': 'sell',
-            'price': float(current_bid), 'count': sell_qty,
-            'pnl': float(pnl), 'strategy': trade.get('strategy', 'crypto'),
-            'reason': reason,
-            'sell_gain_pct': float(round(gain_pct, 1)),
-        }).execute()
-    except Exception as e:
-        logger.error(f"SELL INSERT FAILED: {e}")
-        logger.error(f"SELL traceback: {traceback.format_exc()}")
-
-    remaining = total_count - sell_qty
-    try:
-        if remaining <= 0:
-            # Fully sold — resolve the buy record
-            db.table('trades').update({
-                'pnl': 0.0,
-                'current_bid': float(current_bid),
-                'sell_gain_pct': float(round(gain_pct, 1)),
-            }).eq('id', trade['id']).execute()
-            logger.info(f"BUY RESOLVED: id={trade['id']}")
-        else:
-            # Partial sell — update remaining count on buy record
-            db.table('trades').update({
-                'count': remaining,
-                'current_bid': float(current_bid),
-            }).eq('id', trade['id']).execute()
-            logger.info(f"PARTIAL SELL: {sell_qty} sold, {remaining} remaining for id={trade['id']}")
-    except Exception as e:
-        logger.error(f"BUY UPDATE FAILED: {e}")
-
-    return True
-
-
 def get_live_bid(ticker, side):
-    """Fetch LIVE bid from Kalshi orderbook — don't trust stale market data."""
     try:
         resp = kalshi_get(f"/markets/{ticker}/orderbook?depth=3")
         if side == 'yes':
             bids = resp.get('yes', resp.get('orderbook', {}).get('yes', []))
         else:
             bids = resp.get('no', resp.get('orderbook', {}).get('no', []))
-        # Orderbook format varies — try to extract best bid
         if isinstance(bids, list) and bids:
-            # Each entry might be [price, qty] or {price: qty}
             if isinstance(bids[0], list):
-                return float(bids[0][0]) / 100.0  # cents to dollars
+                return float(bids[0][0]) / 100.0
             elif isinstance(bids[0], dict):
                 prices = [float(k) for k in bids[0].keys()]
                 return max(prices) / 100.0 if prices else 0.0
@@ -584,126 +143,166 @@ def get_live_bid(ticker, side):
         return 0.0
 
 
-def cleanup_ghosts():
-    """Purge ghost positions: bid=0 OR expired ticker. Fast, no API calls per position."""
-    open_buys = db.table('trades').select('id,ticker,side,price,count,current_bid') \
+# === BALANCE ===
+
+def get_balance():
+    try:
+        resp = kalshi_get('/portfolio/balance')
+        balance_cents = resp.get('balance', 0)
+        return float(balance_cents) / 100.0
+    except Exception as e:
+        logger.error(f"Balance fetch failed: {e}")
+        return 0.0
+
+
+def get_saved_balance():
+    sells = db.table('trades').select('pnl') \
+        .eq('action', 'sell').not_.is_('pnl', 'null').execute()
+    total_wins = sum(max(0.0, sf(t['pnl'])) for t in (sells.data or []))
+    return round(total_wins * PROFIT_SAVE_PCT, 4)
+
+
+def get_trading_balance():
+    total = get_balance()
+    saved = get_saved_balance()
+    trading = max(0.0, total - saved)
+    logger.info(f"Balance: ${total:.2f} total | ${trading:.2f} trading | ${saved:.2f} SAVED")
+    return total, trading, saved
+
+
+def get_owned():
+    result = db.table('trades').select('ticker') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
+    return {t['ticker'] for t in (result.data or [])}
 
-    cleaned = 0
-    for pos in (open_buys.data or []):
-        bid = sf(pos.get('current_bid'))
-        ticker = pos['ticker']
-        entry = sf(pos['price'])
-        count = pos.get('count') or 1
-        expiry = get_time_to_expiry(ticker)
 
-        # Ghost if: bid is 0 OR expiry has passed
-        is_ghost = (bid <= 0) or (expiry is not None and expiry <= 0)
-        if not is_ghost:
+# === SELL LOGIC ===
+
+def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
+    if current_bid <= 0 or entry_price <= 0:
+        return False, 0, None
+    gain_pct = ((current_bid - entry_price) / entry_price) * 100
+
+    # Price went up 15% or more — SELL
+    if gain_pct >= 15:
+        return True, count, f"SCALP +{gain_pct:.0f}%"
+
+    # Near expiry and any profit — SELL
+    if time_to_expiry_seconds is not None and time_to_expiry_seconds < 60:
+        if gain_pct > 0:
+            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
+
+    # Down 50%+ — cut the loss, free up capital
+    if gain_pct <= -50 and current_bid > 0.005:
+        return True, count, f"CUT LOSS {gain_pct:.0f}%"
+
+    return False, 0, None
+
+
+# === BUY LOGIC ===
+
+def find_buy_candidates(markets):
+    candidates = []
+    for market in markets:
+        ticker = market.get('ticker', '')
+        status = market.get('status', '')
+        if status != 'open':
+            continue
+        if 'KXMVE' in ticker:
             continue
 
-        loss = round(-entry * count, 4)
+        yes_ask = sf(market.get('yes_ask_dollars', '0'))
+        yes_bid = sf(market.get('yes_bid_dollars', '0'))
+        no_ask = sf(market.get('no_ask_dollars', '0'))
+        no_bid = sf(market.get('no_bid_dollars', '0'))
+
+        # Fallback to cents fields
+        if yes_ask == 0 and yes_bid == 0 and no_ask == 0 and no_bid == 0:
+            yes_ask = sf(market.get('yes_ask', 0)) / 100.0 if sf(market.get('yes_ask', 0)) > 1 else sf(market.get('yes_ask', 0))
+            yes_bid = sf(market.get('yes_bid', 0)) / 100.0 if sf(market.get('yes_bid', 0)) > 1 else sf(market.get('yes_bid', 0))
+            no_ask = sf(market.get('no_ask', 0)) / 100.0 if sf(market.get('no_ask', 0)) > 1 else sf(market.get('no_ask', 0))
+            no_bid = sf(market.get('no_bid', 0)) / 100.0 if sf(market.get('no_bid', 0)) > 1 else sf(market.get('no_bid', 0))
+
+        if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid > 0:
+            candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
+        if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid > 0:
+            candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
+
+    return candidates
+
+
+# === FETCH CRYPTO MARKETS ===
+
+def fetch_crypto_markets():
+    all_markets = []
+    for series in CRYPTO_SERIES:
         try:
-            db.table('trades').update({
-                'pnl': round(loss, 4),
-                'sell_gain_pct': -100,
-                'current_bid': 0,
-            }).eq('id', pos['id']).execute()
-            cleaned += 1
+            resp = kalshi_get(f'/markets?series_ticker={series}&status=open&limit=200')
+            all_markets.extend(resp.get('markets', []))
         except Exception as e:
-            logger.warning(f"Ghost cleanup failed for {ticker}: {e}")
-
-    if cleaned > 0:
-        logger.info(f"Cleaned {cleaned} ghost positions (expired contracts)")
-    return cleaned
+            logger.error(f"Fetch {series} failed: {e}")
+    logger.info(f"Fetched {len(all_markets)} crypto markets")
+    return all_markets
 
 
-def cleanup_stale_positions():
-    """Sell old underwater positions to free capital for new scalps.
-    If open 6+ hours AND down 30%+, cut it."""
-    open_buys = db.table('trades').select('*') \
-        .eq('action', 'buy').is_('pnl', 'null').execute()
+# === STARTUP PURGE ===
 
-    if not open_buys.data:
-        return 0
+def startup_purge():
+    """Mark bid=0 positions as losses. Sell anything down 50%+."""
+    try:
+        open_buys = db.table('trades').select('*') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        if not open_buys.data:
+            logger.info("Startup purge: no open positions")
+            return
 
-    now = datetime.now(timezone.utc)
-    cut = 0
+        purged = 0
+        cut = 0
+        for trade in open_buys.data:
+            ticker = trade['ticker']
+            side = trade['side']
+            entry_price = sf(trade['price'])
+            count = trade.get('count') or 1
+            current_bid = sf(trade.get('current_bid'))
 
-    for trade in open_buys.data:
-        ticker = trade['ticker']
-        side = trade['side']
-        entry_price = sf(trade['price'])
-        count = trade.get('count') or 1
-        if entry_price <= 0:
-            continue
+            # Ghost position — bid is 0, mark as loss
+            if current_bid <= 0:
+                loss = round(-entry_price * count, 4)
+                db.table('trades').update({
+                    'pnl': round(loss, 4),
+                    'current_bid': 0,
+                }).eq('id', trade['id']).execute()
+                purged += 1
+                continue
 
-        # Check age — must be 6+ hours old
-        created_str = trade.get('created_at', '')
-        if not created_str:
-            continue
-        try:
-            created_str = created_str.replace('Z', '+00:00')
-            created = datetime.fromisoformat(created_str)
-            age_hours = (now - created).total_seconds() / 3600
-        except (ValueError, TypeError):
-            continue
+            # Down 50%+ — sell immediately to free capital
+            if entry_price > 0:
+                gain_pct = ((current_bid - entry_price) / entry_price) * 100
+                if gain_pct <= -50 and current_bid > 0.005:
+                    pnl = round((current_bid - entry_price) * count, 4)
+                    sell_order_id = place_order(ticker, side, 'sell', current_bid, count)
+                    if sell_order_id:
+                        db.table('trades').insert({
+                            'ticker': ticker, 'side': side, 'action': 'sell',
+                            'price': float(current_bid), 'count': count,
+                            'pnl': float(pnl), 'strategy': 'crypto',
+                            'reason': f"STARTUP CUT {gain_pct:.0f}%",
+                        }).execute()
+                        db.table('trades').update({
+                            'pnl': 0.0,
+                            'current_bid': float(current_bid),
+                        }).eq('id', trade['id']).execute()
+                        cut += 1
 
-        if age_hours < 6:
-            continue
+        logger.info(f"Startup purge: {purged} ghosts marked as loss, {cut} underwater positions cut")
+    except Exception as e:
+        logger.error(f"Startup purge error: {e}")
 
-        # Get live bid
-        current_bid = get_live_bid(ticker, side)
-        if not current_bid or current_bid <= 0:
-            continue
 
-        gain_pct = ((current_bid - entry_price) / entry_price) * 100
-
-        # Cut if down 30%+
-        if gain_pct >= -30:
-            continue
-
-        pnl = round((current_bid - entry_price) * count, 4)
-        reason = f"CUT STALE: {age_hours:.0f}h old, {gain_pct:.0f}% — freeing capital"
-
-        sell_order_id = place_order(ticker, side, 'sell', current_bid, count)
-        if not sell_order_id:
-            continue
-
-        logger.info(f"CUT STALE: {ticker} {side} x{count} @ ${current_bid:.2f} | {gain_pct:.0f}% | {age_hours:.0f}h old | pnl=${pnl:.4f}")
-
-        try:
-            db.table('trades').insert({
-                'ticker': ticker, 'side': side, 'action': 'sell',
-                'price': float(current_bid), 'count': count,
-                'pnl': float(pnl), 'strategy': trade.get('strategy', 'crypto'),
-                'reason': reason,
-                'sell_gain_pct': float(round(gain_pct, 1)),
-            }).execute()
-        except Exception as e:
-            logger.error(f"Stale sell insert failed: {e}")
-
-        try:
-            db.table('trades').update({
-                'pnl': 0.0,
-                'current_bid': float(current_bid),
-                'sell_gain_pct': float(round(gain_pct, 1)),
-            }).eq('id', trade['id']).execute()
-        except Exception as e:
-            logger.error(f"Stale buy resolve failed: {e}")
-
-        cut += 1
-
-    if cut > 0:
-        logger.info(f"Cut {cut} stale positions to free capital")
-    return cut
-
+# === CHECK SELLS ===
 
 def check_sells():
-    """Tiered sell: 15M at 15%, hourly at 50%, never let profit expire."""
-    global sell_history
-    logger.info("check_sells() — 15M scalp 15%, hourly scalp 50%, expiry saves")
-
+    logger.info("check_sells() — 15% scalp, expiry save, -50% cut")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -713,33 +312,24 @@ def check_sells():
 
     sold = 0
     settled = 0
-    skipped_no_market = 0
-    skipped_no_bid = 0
-    evaluated = 0
 
     for trade in open_buys.data:
         ticker = trade['ticker']
         side = trade['side']
         entry_price = sf(trade['price'])
-        count = trade['count'] or 1
+        count = trade.get('count') or 1
         if entry_price <= 0:
             continue
 
-        try:
-            market = get_market(ticker)
-        except Exception as e:
-            logger.warning(f"Market fetch FAILED for {ticker}: {e}")
-            skipped_no_market += 1
-            continue
+        # Fetch market
+        market = get_market(ticker)
         if not market:
-            logger.warning(f"Market returned None for {ticker}")
-            skipped_no_market += 1
             continue
 
         status = market.get('status', '')
         result_val = market.get('result', '')
 
-        # === SETTLEMENT CHECK ===
+        # Settlement check
         if status in ('closed', 'settled', 'finalized') or result_val:
             if result_val == side:
                 pnl = round((1.0 - entry_price) * count, 4)
@@ -757,95 +347,153 @@ def check_sells():
                 db.table('trades').insert({
                     'ticker': ticker, 'side': side, 'action': 'sell',
                     'price': float(settle_price), 'count': count,
-                    'pnl': float(pnl), 'strategy': trade.get('strategy', 'crypto'),
+                    'pnl': float(pnl), 'strategy': 'crypto',
                     'reason': reason,
                     'sell_gain_pct': float(round(((settle_price - entry_price) / entry_price) * 100, 1)),
                 }).execute()
             except Exception as e:
-                logger.error(f"SETTLE INSERT FAILED: {e}")
+                logger.error(f"Settle insert failed: {e}")
 
             try:
                 db.table('trades').update({
                     'pnl': 0.0,
                     'current_bid': float(settle_price),
-                    'reason': f"{trade.get('reason', '')} | {reason}",
                 }).eq('id', trade['id']).execute()
             except:
                 pass
             settled += 1
             continue
 
-        # === PRICE CHECK — try market data first, then live orderbook ===
+        # Get current bid
         if side == 'yes':
-            current_bid = float(market.get('yes_bid_dollars', '0') or '0')
+            current_bid = sf(market.get('yes_bid_dollars', '0'))
         else:
-            current_bid = float(market.get('no_bid_dollars', '0') or '0')
+            current_bid = sf(market.get('no_bid_dollars', '0'))
 
-        # If market-level bid is 0, fetch live orderbook
         if current_bid <= 0:
             current_bid = get_live_bid(ticker, side)
-            if current_bid > 0:
-                logger.info(f"Orderbook fallback for {ticker}: got bid=${current_bid:.2f}")
 
         if current_bid <= 0:
-            skipped_no_bid += 1
-            logger.info(f"SKIP {ticker} — no bid available (market or orderbook)")
             continue
 
         gain_pct = ((current_bid - entry_price) / entry_price) * 100
-        evaluated += 1
+        time_to_expiry = get_time_to_expiry(ticker)
 
-        # Log position evaluation
-        time_to_expiry = get_time_to_expiry(market)
-        expiry_str = f"{int(time_to_expiry)}s" if time_to_expiry is not None else "unknown"
-        is_15m = '15M' in ticker
-        if is_15m and gain_pct >= 15:
-            action_preview = "15M SCALP"
-        elif is_15m and time_to_expiry is not None and time_to_expiry < 120 and gain_pct > 0:
-            action_preview = "15M SAVE"
-        elif not is_15m and gain_pct >= 50:
-            action_preview = "SCALP"
-        elif not is_15m and time_to_expiry is not None and time_to_expiry < 300 and gain_pct > 0:
-            action_preview = "EXPIRY SAVE"
-        else:
-            action_preview = "HOLD"
-        logger.info(f"EVAL: {ticker} {side} x{count} | entry=${entry_price:.2f} bid=${current_bid:.2f} | gain={gain_pct:+.0f}% | expiry={expiry_str} | {action_preview}")
-
-        # Near-expiry alert logging (< 2 min)
-        if time_to_expiry is not None and time_to_expiry < 120:
-            logger.info(f"NEAR EXPIRY: {ticker} | +{gain_pct:.0f}% | {int(time_to_expiry)}s left | "
-                        f"{'SELLING' if gain_pct > 0 else 'letting expire (underwater)'}")
-
-        # Update current price for dashboard
+        # Update current price in DB
         try:
             db.table('trades').update({
                 'current_bid': float(current_bid),
-                'last_seen_bid': float(current_bid),
             }).eq('id', trade['id']).execute()
         except:
             pass
 
-        # === DECIDE SELL ===
-        should_sell, sell_qty, reason = decide_sell(
-            entry_price, current_bid, count, time_to_expiry, trade.get('id'), ticker=ticker
-        )
+        # Decide sell
+        do_sell, sell_qty, reason = should_sell(entry_price, current_bid, count, time_to_expiry)
 
-        if should_sell and sell_qty > 0:
-            logger.info(f"SELLING: {ticker} {side} x{sell_qty} at ${current_bid:.2f} | gain={gain_pct:+.0f}% | {reason}")
-            success = execute_sell(
-                trade, ticker, side, entry_price, current_bid,
-                sell_qty, count, gain_pct, reason
-            )
-            if success:
-                sold += 1
-                sell_history.append(gain_pct)
-                if len(sell_history) > 20:
-                    sell_history = sell_history[-20:]
-            else:
-                logger.error(f"SELL EXECUTION FAILED: {ticker} — order did not go through")
+        if do_sell and sell_qty > 0:
+            pnl = round((current_bid - entry_price) * sell_qty, 4)
+            sell_order_id = place_order(ticker, side, 'sell', current_bid, sell_qty)
+            if not sell_order_id:
+                continue
 
-    avg_win = (sum(sell_history) / len(sell_history)) if sell_history else 0
-    logger.info(f"SELL SUMMARY: evaluated={evaluated} sold={sold} settled={settled} skipped_no_market={skipped_no_market} skipped_no_bid={skipped_no_bid} | avg_win={avg_win:.0f}%")
+            logger.info(f"SELL: {ticker} {side} x{sell_qty} @ ${current_bid:.2f} | {reason} | pnl=${pnl:.4f}")
+            if pnl > 0:
+                banked = pnl * PROFIT_SAVE_PCT
+                logger.info(f"PROFIT: ${pnl:.4f} total | ${banked:.4f} BANKED")
+
+            try:
+                db.table('trades').insert({
+                    'ticker': ticker, 'side': side, 'action': 'sell',
+                    'price': float(current_bid), 'count': sell_qty,
+                    'pnl': float(pnl), 'strategy': 'crypto',
+                    'reason': reason,
+                    'sell_gain_pct': float(round(gain_pct, 1)),
+                }).execute()
+            except Exception as e:
+                logger.error(f"Sell insert failed: {e}")
+
+            try:
+                db.table('trades').update({
+                    'pnl': 0.0,
+                    'current_bid': float(current_bid),
+                }).eq('id', trade['id']).execute()
+            except:
+                pass
+            sold += 1
+
+    logger.info(f"SELL SUMMARY: sold={sold} settled={settled}")
+
+
+# === RUN BUYS ===
+
+def run_buys(markets):
+    total_balance, trading_balance, saved_balance = get_trading_balance()
+    owned = get_owned()
+    num_open = len(owned)
+    logger.info(f"Own {num_open} positions | trading=${trading_balance:.2f} saved=${saved_balance:.2f}")
+
+    if num_open >= MAX_OPEN_POSITIONS:
+        logger.info(f"At max positions ({MAX_OPEN_POSITIONS}), skipping buys")
+        return
+
+    candidates = find_buy_candidates(markets)
+    # Remove already owned
+    candidates = [c for c in candidates if c['ticker'] not in owned]
+    # Sort by highest bid (most liquid)
+    candidates.sort(key=lambda x: x['bid'], reverse=True)
+
+    logger.info(f"Found {len(candidates)} buy candidates")
+
+    max_exposure = trading_balance * MAX_DEPLOYMENT_PCT
+    max_per_trade = trading_balance * MAX_SPEND_PER_TRADE_PCT
+
+    open_buys = db.table('trades').select('price,count') \
+        .eq('action', 'buy').is_('pnl', 'null').execute()
+    current_deployed = sum(sf(t['price']) * (t['count'] or 1) for t in (open_buys.data or []))
+
+    bought = 0
+    cycle_spent = 0.0
+    for c in candidates:
+        if bought >= MAX_BUYS_PER_CYCLE:
+            break
+        if cycle_spent >= MAX_SPEND_PER_CYCLE:
+            break
+        if num_open + bought >= MAX_OPEN_POSITIONS:
+            break
+
+        count = MAX_CONTRACTS_PER_TRADE
+        cost = c['price'] * count
+        if cost > max_per_trade:
+            count = int(max_per_trade / c['price'])
+            if count < 1:
+                continue
+            cost = c['price'] * count
+        if current_deployed + cost > max_exposure:
+            continue
+        if cost > trading_balance - current_deployed:
+            continue
+
+        order_id = place_order(c['ticker'], c['side'], 'buy', c['price'], count)
+        if not order_id:
+            continue
+
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{count} @ ${c['price']:.2f} (bid=${c['bid']:.2f})")
+        try:
+            db.table('trades').insert({
+                'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
+                'price': float(c['price']), 'count': count,
+                'strategy': 'crypto',
+                'reason': f"BUY {c['side'].upper()} @ ${c['price']:.2f} bid=${c['bid']:.2f}",
+                'current_bid': float(c['bid']),
+            }).execute()
+            owned.add(c['ticker'])
+            current_deployed += cost
+            cycle_spent += cost
+            bought += 1
+        except Exception as e:
+            logger.error(f"Buy DB insert failed: {e}")
+
+    logger.info(f"Bought {bought}, spent ${cycle_spent:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
 
 
 # === MAIN CYCLE ===
@@ -854,66 +502,22 @@ def run_cycle():
     total, trading, saved = get_trading_balance()
     logger.info(f"=== CYCLE START === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
 
-    # 0. Clean ghost positions (expired contracts Kalshi already settled)
-    try:
-        cleanup_ghosts()
-    except Exception as e:
-        logger.error(f"Ghost cleanup error: {e}")
-
-    # 1. Check sells — 15% on 15M, 50% on hourly, expiry saves
     try:
         check_sells()
     except Exception as e:
         logger.error(f"Sell check error: {e}")
 
-    # 2. Scan crypto + March Madness markets for new buys
     try:
-        crypto_markets = fetch_crypto_markets()
-        run_buys(crypto_markets)
+        markets = fetch_crypto_markets()
+        run_buys(markets)
     except Exception as e:
-        logger.error(f"Crypto buy error: {e}")
+        logger.error(f"Buy error: {e}")
 
     total, trading, saved = get_trading_balance()
     logger.info(f"=== CYCLE END === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
 
 
 # === DASHBOARD ===
-
-def categorize_for_dashboard(ticker, strategy=None):
-    """Categorize for dashboard display. Uses strategy tag if available, else ticker pattern."""
-    # Use strategy tag directly if it's from the universal scanner
-    if strategy and strategy not in ('crypto', 'mm_scalp', None, ''):
-        # Title-case the strategy for display
-        return strategy.replace('_', ' ').title()
-    # Legacy strategies
-    if strategy == 'mm_scalp':
-        return 'NCAA Basketball'
-    # Fallback to ticker pattern
-    if '15M' in ticker:
-        return '15-min Crypto'
-    elif 'KXBTCD' in ticker or 'KXETHD' in ticker or 'KXSOLD' in ticker:
-        return 'Crypto Direction'
-    elif any(x in ticker for x in ['KXBTC-', 'KXETH-', 'KXSOL-']):
-        return 'Crypto Bracket'
-    elif any(x in ticker for x in ['KXNCAAMBGAME', 'KXNCAAMB', 'KXCBB']):
-        return 'NCAA Basketball'
-    elif any(x in ticker for x in ['KXMARMAD', 'KXMM']):
-        return 'March Madness'
-    elif 'KXHIGH' in ticker or 'KXLOWT' in ticker:
-        return 'Weather'
-    elif any(x in ticker for x in ['OIL', 'WTI', 'CRUDE', 'BRENT']):
-        return 'Oil'
-    elif any(x in ticker for x in ['KXNFL', 'KXNBA', 'KXMLB', 'KXNHL', 'KXSOCCER', 'KXMLS', 'KXEPL', 'KXUCL']):
-        return 'Sports'
-    elif any(x in ticker for x in ['KXELECT', 'KXPRES', 'KXGOV', 'KXSEN', 'KXREFERENDUM']):
-        return 'Elections'
-    elif any(x in ticker for x in ['KXTENNIS', 'KXATP', 'KXWTA']):
-        return 'Tennis'
-    elif any(x in ticker for x in ['KXFED', 'KXCPI', 'KXGDP', 'KXJOBS', 'KXINFL']):
-        return 'Economics'
-    else:
-        return 'Other'
-
 
 @app.route('/')
 def health():
@@ -937,20 +541,12 @@ def api_status():
         open_buys = db.table('trades').select('id,price,count,current_bid') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         open_data = open_buys.data or []
-        # Split live (bid > 0) vs ghost (bid = 0)
         live_positions = [t for t in open_data if sf(t.get('current_bid')) > 0]
-        ghost_count = len(open_data) - len(live_positions)
         open_count = len(live_positions)
-        # Positions at market value — only live positions
-        positions_value = round(sum(
-            sf(t.get('current_bid')) * (t.get('count') or 1)
-            for t in live_positions
-        ), 2)
-        # Cost basis — only live positions
+        positions_value = round(sum(sf(t.get('current_bid')) * (t.get('count') or 1) for t in live_positions), 2)
         positions_cost = round(sum(sf(t.get('price')) * (t.get('count') or 1) for t in live_positions), 2)
-        cash = round(balance - positions_cost, 2)  # Cash = balance minus what we spent
+        cash = round(balance - positions_cost, 2)
 
-        # Saved today = 20% of today's winning sells
         today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
         today_sells = db.table('trades').select('pnl') \
             .eq('action', 'sell').not_.is_('pnl', 'null') \
@@ -966,7 +562,6 @@ def api_status():
             'wins': wins,
             'losses': losses,
             'open_count': open_count,
-            'ghost_count': ghost_count,
             'positions_value': positions_value,
             'positions_cost': positions_cost,
             'cash': max(0, cash),
@@ -985,56 +580,6 @@ def api_trades():
         return jsonify({'error': str(e)}), 500
 
 
-@app.route('/api/categories')
-def api_categories():
-    try:
-        sells = db.table('trades').select('ticker,pnl,sell_gain_pct,strategy,created_at') \
-            .eq('action', 'sell').not_.is_('pnl', 'null').execute()
-
-        cats = {}
-        for t in (sells.data or []):
-            cat = categorize_for_dashboard(t.get('ticker', ''), t.get('strategy'))
-            if cat not in cats:
-                cats[cat] = {'wins': 0, 'losses': 0, 'pnl': 0.0, 'win_pcts': [], 'last_trade': ''}
-            p = sf(t['pnl'])
-            cats[cat]['pnl'] += p
-            ts = t.get('created_at', '')
-            if ts > cats[cat]['last_trade']:
-                cats[cat]['last_trade'] = ts
-            if p > 0:
-                cats[cat]['wins'] += 1
-                cats[cat]['win_pcts'].append(sf(t.get('sell_gain_pct')))
-            elif p < 0:
-                cats[cat]['losses'] += 1
-
-        # Also count open positions per category
-        open_buys = db.table('trades').select('ticker,strategy') \
-            .eq('action', 'buy').is_('pnl', 'null').execute()
-        open_cats = {}
-        for t in (open_buys.data or []):
-            cat = categorize_for_dashboard(t.get('ticker', ''), t.get('strategy'))
-            open_cats[cat] = open_cats.get(cat, 0) + 1
-
-        result = []
-        all_cat_names = set(cats.keys()) | set(open_cats.keys())
-        for name in all_cat_names:
-            data = cats.get(name, {'wins': 0, 'losses': 0, 'pnl': 0.0, 'win_pcts': [], 'last_trade': ''})
-            avg_win = (sum(data['win_pcts']) / len(data['win_pcts'])) if data['win_pcts'] else 0
-            result.append({
-                'name': name,
-                'wins': data['wins'],
-                'losses': data['losses'],
-                'pnl': round(data['pnl'], 4),
-                'avg_win_pct': round(avg_win, 1),
-                'open': open_cats.get(name, 0),
-                'last_trade': data['last_trade'],
-            })
-        result.sort(key=lambda x: x['pnl'], reverse=True)
-        return jsonify(result)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-
 @app.route('/api/open')
 def api_open():
     try:
@@ -1043,13 +588,10 @@ def api_open():
         positions = []
         for t in (result.data or []):
             price = sf(t.get('price'))
-            current = sf(t.get('current_bid')) or sf(t.get('last_seen_bid'))
+            current = sf(t.get('current_bid'))
             count = int(t.get('count') or 1)
-
-            # Skip ghost positions (bid = 0, expired)
             if not current or current <= 0:
                 continue
-
             if price > 0:
                 unrealized = round((current - price) * count, 4)
                 gain_pct = round(((current - price) / price) * 100, 1)
@@ -1064,18 +606,11 @@ def api_open():
                 'current_bid': current,
                 'unrealized': unrealized,
                 'gain_pct': gain_pct,
-                'strategy': t.get('strategy', 'crypto'),
-                'category': categorize_for_dashboard(t.get('ticker', ''), t.get('strategy')),
             })
         positions.sort(key=lambda x: x['gain_pct'], reverse=True)
         return jsonify(positions)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-
-@app.route('/api/scanner')
-def api_scanner():
-    return jsonify(last_scan)
 
 
 @app.route('/dashboard')
@@ -1088,17 +623,15 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kalshi Scalp Bot &mdash; Scalper v2</title>
+<title>Crypto Scalper</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0a0a0a;color:#e0e0e0;font-family:'JetBrains Mono','SF Mono','Fira Code',monospace;padding:16px 20px;font-size:13px}
-a{color:#4488ff;text-decoration:none}
 
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .live-dot{display:inline-block;width:8px;height:8px;background:#00d673;border-radius:50%;margin-right:6px;animation:pulse 2s infinite}
 
-/* Portfolio hero */
 .portfolio{text-align:center;margin-bottom:20px;padding:20px 0 16px;border-bottom:1px solid #1a1a1a}
 .portfolio .sub{color:#555;font-size:11px;margin-bottom:12px}
 .portfolio-value{font-size:48px;font-weight:700;color:#fff;margin-bottom:4px}
@@ -1108,26 +641,7 @@ a{color:#4488ff;text-decoration:none}
 .portfolio-breakdown .item .label{color:#666;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
 .portfolio-breakdown .item .val{font-size:18px;font-weight:700}
 
-/* Category cards */
-.category-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px}
-.cat-card{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:10px 12px;transition:border-color .2s}
-.cat-card:hover{border-color:#333}
-.cat-card .cat-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px}
-.cat-card .cat-name{font-size:11px;font-weight:700;color:#4488ff}
-.cat-card .cat-record{font-size:10px;color:#888;margin-bottom:3px}
-.cat-card .cat-pnl{font-size:16px;font-weight:700}
-.cat-card .cat-detail{font-size:9px;color:#666;margin-top:2px}
-
-/* Status badges */
-.status-badge{padding:2px 6px;border-radius:3px;font-size:8px;font-weight:700;letter-spacing:.5px}
-.badge-active{background:#002211;color:#00d673}
-.badge-disabled{background:#220000;color:#ff4444}
-.badge-waiting{background:#221800;color:#ffaa00}
-.badge-idle{background:#1a1a1a;color:#555}
-
-/* Panels */
-.panels-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
-.panel{background:#111;border:1px solid #1a1a1a;border-radius:6px;overflow:hidden}
+.panel{background:#111;border:1px solid #1a1a1a;border-radius:6px;overflow:hidden;margin-bottom:14px}
 .panel-header{padding:10px 14px;border-bottom:1px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center}
 .panel-header h2{color:#ffaa00;font-size:12px;text-transform:uppercase;letter-spacing:1px}
 .panel-header .count{color:#555;font-size:11px}
@@ -1137,32 +651,16 @@ th{color:#555;text-align:left;padding:6px 8px;border-bottom:1px solid #222;text-
 td{padding:5px 8px;border-bottom:1px solid #141414}
 tr.row-green{background:rgba(0,214,115,.04)}
 tr.row-red{background:rgba(255,68,68,.04)}
-tr.row-yellow{background:rgba(255,170,0,.04)}
 tr:hover{background:#1a1a1a !important}
-.green{color:#00d673}.red{color:#ff4444}.yellow{color:#ffaa00}.blue{color:#4488ff}.gray{color:#555}
-.badge{padding:2px 6px;border-radius:3px;font-size:9px;font-weight:700}
-.badge-win{background:#002211;color:#00d673}
-.badge-loss{background:#220000;color:#ff4444}
-.badge-expired{background:#221100;color:#ff4444;font-size:9px}
-.type-badge{padding:1px 5px;border-radius:3px;font-size:8px;font-weight:700;background:#1a1a2a;color:#7799cc;white-space:nowrap}
+.green{color:#00d673}.red{color:#ff4444}.gray{color:#555}
 
-/* Equity */
 .equity-section{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:14px;margin-bottom:14px}
 .equity-section h2{color:#ffaa00;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
 #equity-chart{width:100%;height:120px}
 
-/* Scanner status bar */
-.scanner-bar{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:10px 16px;margin-bottom:14px;font-size:10px;color:#666}
-.scanner-bar .scanner-title{color:#ffaa00;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
-.scanner-cats{display:flex;flex-wrap:wrap;gap:6px 14px}
-.scanner-cats .sc-item{display:flex;align-items:center;gap:3px}
-.scanner-cats .sc-dot{width:5px;height:5px;border-radius:50%;background:#00d673}
-
-/* Status bar */
 .status-bar{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:10px 16px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:10px;color:#555}
 .status-bar .status-item{display:flex;align-items:center;gap:4px}
 .status-bar .dot-live{width:6px;height:6px;background:#00d673;border-radius:50%;animation:pulse 2s infinite}
-.status-bar .dot-blocked{width:6px;height:6px;background:#ff4444;border-radius:50%}
 .footer{text-align:center;color:#333;font-size:9px;margin-top:8px}
 .loading{color:#555;text-align:center;padding:20px}
 .panel-body::-webkit-scrollbar{width:4px}
@@ -1172,15 +670,13 @@ tr:hover{background:#1a1a1a !important}
 @media(max-width:900px){
 .portfolio-value{font-size:36px}
 .portfolio-breakdown{gap:16px}
-.panels-row{grid-template-columns:1fr}
 }
 </style>
 </head>
 <body>
 
-<!-- Portfolio Hero -->
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; Scalper v2 &mdash; 3-20c entries, 15M+hourly</div>
+  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 30s cycles &mdash; buy 3-20c, sell +15%</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1191,70 +687,41 @@ tr:hover{background:#1a1a1a !important}
   </div>
 </div>
 
-<!-- Category Cards (dynamic) -->
-<div class="category-row" id="categories">
-  <div class="cat-card"><div class="loading">Loading categories...</div></div>
-</div>
-
-<!-- Scanner Status -->
-<div class="scanner-bar" id="scanner-bar">
-  <div class="scanner-title">Market Scanner (Crypto + March Madness)</div>
-  <div class="scanner-cats" id="scanner-cats">Waiting for first scan...</div>
-</div>
-
-<!-- Combined Positions & Trades -->
-<div class="panel" style="margin-bottom:14px">
+<div class="panel">
   <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Bid</th><th>P&amp;L</th><th>Gain</th>
-  </tr></thead><tbody id="open-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
-</div>
-<div class="panel" style="margin-bottom:14px">
-  <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
-  <div class="panel-body"><table><thead><tr>
-    <th>Time</th><th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>P&amp;L</th><th>Gain</th>
-  </tr></thead><tbody id="trades-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
+    <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Bid</th><th>P&amp;L</th><th>Gain</th>
+  </tr></thead><tbody id="open-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
-<!-- Equity Curve -->
+<div class="panel">
+  <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
+  <div class="panel-body"><table><thead><tr>
+    <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>P&amp;L</th><th>Gain</th>
+  </tr></thead><tbody id="trades-body"><tr><td colspan="6" class="loading">Loading...</td></tr></tbody></table></div>
+</div>
+
 <div class="equity-section">
   <h2>Equity Curve</h2>
   <canvas id="equity-chart"></canvas>
 </div>
 
-<!-- Status Bar -->
 <div class="status-bar">
-  <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
-  <div class="status-item">15M: <span class="dot-live"></span> ENABLED (15% scalp)</div>
-  <div class="status-item">Max contracts: 5</div>
-  <div class="status-item">Sell: 15% on 15M, 50% on hourly, expiry saves</div>
-  <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span> protected</div>
-  <div class="status-item">Ghosts: <span class="yellow" id="sb-ghosts">0</span> expired cleaned</div>
-  <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
+  <div class="status-item"><span class="dot-live"></span> LIVE</div>
+  <div class="status-item">Buy: 3-20c with bid</div>
+  <div class="status-item">Sell: +15% scalp</div>
+  <div class="status-item">Cut: -50% loss</div>
+  <div class="status-item">Max: 5 contracts</div>
+  <div class="status-item">Bank: 20% of wins</div>
+  <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span></div>
+  <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
-<div class="footer">Kalshi Scalp Bot v9 &mdash; Scalper v2 &mdash; auto-refresh 15s</div>
+<div class="footer">Crypto Scalper &mdash; auto-refresh 15s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
 function cls(v){return v>0?'green':v<0?'red':'gray'}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
-
-function catType(ticker,strategy){
-  if(strategy&&strategy!=='crypto'&&strategy!=='mm_scalp'&&strategy!=='')return strategy.replace(/_/g,' ');
-  if(strategy==='mm_scalp')return 'NCAA Basketball';
-  if(!ticker)return 'Other';
-  if(ticker.indexOf('KXBTC')>=0||ticker.indexOf('KXETH')>=0||ticker.indexOf('KXSOL')>=0)return ticker.indexOf('-')>=0?'Crypto Bracket':'Crypto Direction';
-  if(ticker.indexOf('KXNCAA')>=0)return 'NCAA Basketball';
-  return 'Other';
-}
-
-function shortType(name){
-  var m={'Crypto Direction':'CRYPTO','Crypto Bracket':'CRYPTO','crypto direction':'CRYPTO','crypto bracket':'CRYPTO',
-    'NCAA Basketball':'NCAA','NCAA basketball':'NCAA','march madness futures':'MM','March Madness Futures':'MM',
-    'oil':'OIL','Oil':'OIL','sports':'SPORT','Sports':'SPORT','elections':'ELECT','Elections':'ELECT',
-    'tennis':'TENNIS','Tennis':'TENNIS','economics':'ECON','Economics':'ECON','weather':'WX','Weather':'WX','other':'OTHER','Other':'OTHER'};
-  return m[name]||name.substring(0,6).toUpperCase();
-}
 
 async function fetchJSON(url){
   try{var r=await fetch(url);return await r.json()}
@@ -1262,15 +729,12 @@ async function fetchJSON(url){
 }
 
 async function refresh(){
-  var [status,cats,open,trades,scanner]=await Promise.all([
+  var [status,open,trades]=await Promise.all([
     fetchJSON('/api/status'),
-    fetchJSON('/api/categories'),
     fetchJSON('/api/open'),
-    fetchJSON('/api/trades'),
-    fetchJSON('/api/scanner')
+    fetchJSON('/api/trades')
   ]);
 
-  // Portfolio hero
   if(status&&!status.error){
     var bal=status.balance||0;
     var posVal=status.positions_value||0;
@@ -1293,75 +757,27 @@ async function refresh(){
       +'<div style="font-size:9px;color:#555;margin-top:2px">Protected forever</div>';
     $('p-record').innerHTML='<span class="green">'+status.wins+'W</span> <span class="gray">/</span> <span class="red">'+status.losses+'L</span>';
     $('sb-saved').textContent='$'+(status.saved||0).toFixed(2);
-    $('sb-ghosts').textContent=(status.ghost_count||0);
   }
 
-  // Dynamic category cards — only show categories that have trades or open positions
-  if(cats&&!cats.error){
-    var h='';
-    cats.forEach(function(c){
-      var pc=cls(c.pnl);
-      var hasActivity=(c.wins+c.losses)>0;
-      var hasOpen=(c.open||0)>0;
-      var stLabel,stClass;
-      if(hasOpen){stLabel='ACTIVE';stClass='badge-active';}
-      else if(hasActivity){stLabel='IDLE';stClass='badge-idle';}
-      else{stLabel='SCANNING';stClass='badge-waiting';}
-      h+='<div class="cat-card">';
-      h+='<div class="cat-header"><span class="cat-name">'+esc(c.name)+'</span><span class="status-badge '+stClass+'">'+stLabel+'</span></div>';
-      h+='<div class="cat-record"><span class="green">'+c.wins+'W</span> / <span class="red">'+c.losses+'L</span>';
-      if(c.open)h+=' <span class="blue">'+c.open+' open</span>';
-      h+='</div>';
-      h+='<div class="cat-pnl '+pc+'">'+(c.pnl>=0?'+':'')+c.pnl.toFixed(2)+'</div>';
-      if(c.avg_win_pct>0)h+='<div class="cat-detail">Avg win: '+c.avg_win_pct.toFixed(0)+'%</div>';
-      h+='</div>';
-    });
-    $('categories').innerHTML=h||'<div class="cat-card"><div class="loading">No categories yet</div></div>';
-  }
-
-  // Scanner status bar
-  if(scanner&&scanner.total){
-    var scanCats=scanner.categories||{};
-    var pairs=Object.keys(scanCats).map(function(k){return{name:k,count:scanCats[k]}}).sort(function(a,b){return b.count-a.count});
-    var sh='<span style="color:#e0e0e0;margin-right:8px">Scanning '+scanner.total+' markets:</span>';
-    pairs.forEach(function(p){
-      if(p.name.indexOf('BLOCKED')>=0||p.name.indexOf('SKIP')>=0)return;
-      sh+='<span class="sc-item"><span class="sc-dot"></span>'+esc(p.name)+': '+p.count+'</span>';
-    });
-    if(scanner.timestamp){
-      var ago=Math.round((Date.now()-new Date(scanner.timestamp).getTime())/1000);
-      sh+='<span style="margin-left:auto;color:#555">'+ago+'s ago</span>';
-    }
-    $('scanner-cats').innerHTML=sh;
-  }
-
-  // Open positions with TYPE column
   if(open&&!open.error){
     $('open-count').textContent=open.length+' positions';
     var h='';
     open.forEach(function(p){
-      var rc=p.gain_pct>2?'row-green':p.gain_pct<-2?'row-red':'row-yellow';
+      var rc=p.gain_pct>2?'row-green':p.gain_pct<-2?'row-red':'';
       var gc=cls(p.gain_pct);
-      var typ=p.category||catType(p.ticker,p.strategy);
       h+='<tr class="'+rc+'">';
-      h+='<td><span class="type-badge">'+esc(shortType(typ))+'</span></td>';
       h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
       h+='<td>'+esc(p.side)+'</td>';
       h+='<td>'+p.count+'</td>';
       h+='<td>$'+p.entry.toFixed(2)+'</td>';
-      if(p.expired){
-        h+='<td><span class="badge badge-expired">EXPIRED</span></td>';
-      }else{
-        h+='<td>$'+(p.current_bid||0).toFixed(2)+'</td>';
-      }
+      h+='<td>$'+(p.current_bid||0).toFixed(2)+'</td>';
       h+='<td class="'+gc+'">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(4)+'</td>';
       h+='<td class="'+gc+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
       h+='</tr>';
     });
-    $('open-body').innerHTML=h||'<tr><td colspan="8" class="gray" style="text-align:center">No open positions</td></tr>';
+    $('open-body').innerHTML=h||'<tr><td colspan="7" class="gray" style="text-align:center">No open positions</td></tr>';
   }
 
-  // Recent completed trades with TYPE column
   if(trades&&!trades.error){
     var completed=trades.filter(function(t){return t.action==='sell'&&t.pnl!==null&&t.pnl!==0});
     $('trades-count').textContent=completed.length+' trades';
@@ -1373,10 +789,8 @@ async function refresh(){
       var time=(t.created_at||'').replace('T',' ').substring(5,19);
       var count=t.count||1;
       var gainPct=t.sell_gain_pct||0;
-      var typ=catType(t.ticker,t.strategy);
       h+='<tr class="'+rc+'">';
       h+='<td>'+esc(time)+'</td>';
-      h+='<td><span class="type-badge">'+esc(shortType(typ))+'</span></td>';
       h+='<td style="font-size:10px">'+esc(t.ticker||'')+'</td>';
       h+='<td>'+esc(t.side||'')+'</td>';
       h+='<td>'+count+'</td>';
@@ -1384,7 +798,7 @@ async function refresh(){
       h+='<td class="'+pc+'">'+(gainPct>=0?'+':'')+gainPct.toFixed(0)+'%</td>';
       h+='</tr>';
     });
-    $('trades-body').innerHTML=h||'<tr><td colspan="7" class="gray" style="text-align:center">No completed trades</td></tr>';
+    $('trades-body').innerHTML=h||'<tr><td colspan="6" class="gray" style="text-align:center">No completed trades</td></tr>';
 
     drawEquity(completed);
   }
@@ -1447,14 +861,8 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — Scalper v2 — 3-20c entries, 15% on 15M, 50% on hourly, never let profit expire")
-    close_all_old_positions()
-    cleanup_ghosts()
-    # Cut stale positions at startup to free capital immediately
-    try:
-        cleanup_stale_positions()
-    except Exception as e:
-        logger.error(f"Startup stale cleanup error: {e}")
+    logger.info("Bot starting — Simple crypto scalper — buy 3-20c, sell +15%, cut -50%")
+    startup_purge()
     cycle_count = 0
     while True:
         try:
@@ -1462,12 +870,6 @@ def bot_loop():
         except Exception as e:
             logger.error(f"Cycle error: {e}")
         cycle_count += 1
-        # Every 10 cycles (~5 min), cut stale underwater positions
-        if cycle_count % 10 == 0:
-            try:
-                cleanup_stale_positions()
-            except Exception as e:
-                logger.error(f"Stale cleanup error: {e}")
         time.sleep(CYCLE_SECONDS)
 
 
