@@ -219,7 +219,9 @@ CRYPTO_SERIES = [
 # === MARCH MADNESS ===
 
 MARCH_MADNESS_SERIES = [
-    'KXMARMAD', 'KXNCAAMB', 'KXNCAA', 'KXCBB', 'KXMM', 'KXMARCH',
+    'KXNCAAMBGAME',  # Individual NCAA men's basketball games — THE MAIN ONE (178+ markets)
+    'KXMARMAD',      # March Madness championship futures
+    'KXNCAAMB',      # NCAA men's basketball general
 ]
 
 BASKETBALL_KEYWORDS = [
@@ -739,23 +741,27 @@ def run_cycle():
         logger.error(f"Sell check error: {e}")
 
     # 2. Scan crypto (hourly only, 15M dropped)
+    crypto_count = 0
     try:
         crypto_markets = fetch_all_crypto()
+        crypto_count = len(crypto_markets)
         run_buys(crypto_markets, strategy='crypto')
     except Exception as e:
         logger.error(f"Crypto buy error: {e}")
 
     # 3. Scan March Madness
+    mm_count = 0
     try:
         mm_markets = fetch_march_madness()
-        logger.info(f"March Madness markets found: {len(mm_markets)} | Sample: {[m.get('ticker','') for m in mm_markets[:5]]}")
+        mm_count = len(mm_markets)
+        logger.info(f"March Madness markets found: {mm_count} | Sample: {[m.get('ticker','') for m in mm_markets[:5]]}")
         if mm_markets:
             run_buys(mm_markets, strategy='mm_scalp')
     except Exception as e:
         logger.error(f"MM buy error: {e}")
 
     total, trading, saved = get_trading_balance()
-    logger.info(f"=== CYCLE END === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
+    logger.info(f"=== CYCLE END === crypto={crypto_count} sports={mm_count} | Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
 
 
 # === DASHBOARD ===
@@ -767,7 +773,7 @@ def categorize_ticker(ticker):
         return 'Hourly Direction'
     elif any(x in ticker for x in ['KXBTC-', 'KXETH-', 'KXSOL-']):
         return 'Hourly Bracket'
-    elif any(x in ticker for x in ['NCAA', 'KXMARMAD', 'KXCBB', 'KXMM']):
+    elif any(x in ticker for x in ['KXNCAAMBGAME', 'NCAA', 'KXMARMAD', 'KXCBB', 'KXMM']):
         return 'March Madness'
     elif 'KXHIGH' in ticker or 'KXLOWT' in ticker:
         return 'Weather'
