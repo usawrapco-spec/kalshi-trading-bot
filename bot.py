@@ -129,6 +129,12 @@ CRYPTO_SERIES = [
     'KXBTC15M', 'KXETH15M', 'KXSOL15M',
     'KXBTC1H', 'KXETH1H', 'KXSOL1H',
     'KXBTCD', 'KXETHD', 'KXSOLD',
+    'KXBTC', 'KXETH', 'KXSOL',
+]
+MARKET_SERIES = [
+    'KXSP500', 'KXSP500D',
+    'KXNASDAQ100',
+    'KXOIL', 'KXGASPRICE',
 ]
 CRYPTO_15M = {'KXBTC15M', 'KXETH15M', 'KXSOL15M'}
 
@@ -150,16 +156,33 @@ def fetch_top_activity():
         return []
 
 
-def fetch_crypto_series():
-    """Source 2: 9 API calls — crypto series."""
+def fetch_series_markets():
+    """Source 2: crypto + market series."""
     markets = []
-    for series in CRYPTO_SERIES:
+    for series in CRYPTO_SERIES + MARKET_SERIES:
         try:
             resp = kalshi_get(f"/markets?series_ticker={series}&status=open&limit=50")
             markets.extend(resp.get('markets', []))
         except:
             pass
+    logger.info(f"Series: {len(markets)} markets from {len(CRYPTO_SERIES) + len(MARKET_SERIES)} series")
     return markets
+
+
+def fetch_events():
+    """Source 3: upcoming events with nested markets (NBA, NHL, etc)."""
+    try:
+        resp = kalshi_get('/events?status=open&with_nested_markets=true&limit=20')
+        events = resp.get('events', [])
+        markets = []
+        for event in events:
+            for m in event.get('markets', []):
+                markets.append(m)
+        logger.info(f"Events: {len(markets)} markets from {len(events)} events")
+        return markets
+    except Exception as e:
+        logger.warning(f"Events fetch: {e}")
+        return []
 
 
 # === BUY LOGIC — LIQUIDITY REQUIRED ===
@@ -363,14 +386,15 @@ def run_cycle():
     logger.info(f"Own {len(owned)} positions, balance ${trading_bal:.2f}")
 
     try:
-        # Two sources
+        # Three sources
         top_activity = fetch_top_activity()
-        crypto_markets = fetch_crypto_series()
+        series_markets = fetch_series_markets()
+        event_markets = fetch_events()
 
-        # Combine and deduplicate
+        # Combine and deduplicate — series first, then events, then top activity
         seen = set()
         all_markets = []
-        for m in crypto_markets + top_activity:  # Crypto first for dedup priority
+        for m in series_markets + event_markets + top_activity:
             t = m.get('ticker', '')
             if t not in seen:
                 seen.add(t)
@@ -435,7 +459,7 @@ def run_cycle():
         # Crypto first, then trending
         ordered = crypto_buys + trending_buys
 
-        logger.info(f"Scan: {len(top_activity)} active + {len(crypto_markets)} crypto | owned={len(owned)} | buyable: crypto={len(crypto_buys)} trending={len(trending_buys)}")
+        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} series + {len(event_markets)} events | owned={len(owned)} | buyable: crypto={len(crypto_buys)} trending={len(trending_buys)}")
 
         bought = 0
         for signal in ordered:
