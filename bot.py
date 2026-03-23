@@ -92,8 +92,13 @@ WEATHER_SERIES = [
     "KXLOWTNYC", "KXLOWTCHI", "KXLOWTMIA", "KXLOWTLAX", "KXLOWTDEN",
     "KXLOWTAUS", "KXLOWTPHIL"
 ]
-TRENDING_SERIES = [
+SPORTS_SERIES = [
     "KXNCAAMB", "KXNBA", "KXNHL", "KXMLB",
+    "KXNFL", "KXUFC", "KXMLS", "KXSOCCER",
+    "KXNCAAF", "KXNASCAR", "KXPGA", "KXTENNIS",
+    "KXWNBA", "KXCFB", "KXEPL",
+]
+TRENDING_SERIES = [
     "KXPRES", "KXTRUMPPARDONS", "KXSCOTUS", "KXSCOURT",
     "KXNEXTUKPM", "KXPRESPERSON", "KXPERFORMBONDSONG",
     "KXROASTSUBJECT", "KXBOND", "KXTERMLIMITS",
@@ -180,18 +185,38 @@ def scan_series_markets():
     crypto = _scan_series_verbose(CRYPTO_SERIES, 'crypto')
     weather = _scan_series(WEATHER_SERIES, 'weather')
     trending = _scan_series(TRENDING_SERIES, 'trending')
-    cheap = crypto + weather + trending
-    logger.info(f"Series scan: {len(cheap)} cheap (crypto:{len(crypto)} weather:{len(weather)} trending:{len(trending)})")
+    sports = _scan_series(SPORTS_SERIES, 'sports')
+    cheap = crypto + weather + trending + sports
+    logger.info(f"Series scan: {len(cheap)} cheap (crypto:{len(crypto)} weather:{len(weather)} trending:{len(trending)} sports:{len(sports)})")
     return cheap
 
 
-def categorize(ticker):
+SPORTS_TICKER_KEYWORDS = [
+    'NCAA', 'NBA', 'NFL', 'NHL', 'MLB', 'MLS', 'UFC', 'MMA', 'PGA', 'NASCAR',
+    'WNBA', 'CFB', 'EPL', 'SPORT', 'TENNIS', 'SOCCER',
+]
+SPORTS_TITLE_KEYWORDS = [
+    'SPREAD', 'OVER', 'UNDER', 'MONEYLINE', 'WINNER',
+    'HALFTIME', 'QUARTER', 'INNING', 'PERIOD',
+    'MARCH MADNESS', 'BRACKET', 'PLAYOFF', 'CHAMPIONSHIP',
+    'LAKERS', 'CELTICS', 'KNICKS', 'WARRIORS', 'NUGGETS',
+    'CAVALIERS', 'THUNDER', 'BRUINS', 'RANGERS', 'PENGUINS',
+]
+
+
+def categorize(ticker, title='', category=''):
     t = ticker.upper()
     if 'KXBTC' in t or 'KXETH' in t or 'KXSOL' in t:
         return 'crypto'
     if 'KXHIGH' in t or 'KXLOWT' in t:
         return 'weather'
-    if any(x in t for x in ['NCAA', 'NBA', 'NFL', 'NHL', 'MLB', 'SPORT']):
+    # Sports: check ticker, title, and category
+    if any(x in t for x in SPORTS_TICKER_KEYWORDS):
+        return 'sports'
+    if category.lower() in ('sports', 'basketball', 'football', 'hockey', 'soccer', 'baseball', 'mma'):
+        return 'sports'
+    title_upper = title.upper()
+    if any(x in title_upper for x in SPORTS_TITLE_KEYWORDS):
         return 'sports'
     if any(x in t for x in ['TRUMP', 'BIDEN', 'SENATE', 'HOUSE', 'ELECT', 'PRES', 'GOV']):
         return 'politics'
@@ -234,7 +259,8 @@ def scan_all_markets():
         no_ask = float(m.get('no_ask_dollars', '0') or '0')
         volume = float(m.get('volume_24h_fp', '0') or '0')
         title = m.get('title', '')
-        strat = categorize(ticker)
+        category = m.get('category', '')
+        strat = categorize(ticker, title, category)
 
         # Debug: log first 3 non-KXMVE markets under $0.20 to confirm parsing
         if debug_logged < 3 and (0 < yes_ask < 0.20 or 0 < no_ask < 0.20):
@@ -357,7 +383,9 @@ def check_positions():
             continue
 
         pct = ((current_bid - entry_price) / entry_price) * 100
+        count = trade['count'] or 1
         last_seen = sf(trade.get('last_seen_bid'))
+        strategy = trade.get('strategy', '')
 
         # Update price tracking
         db.table('trades').update({
@@ -366,12 +394,24 @@ def check_positions():
             'current_bid': float(current_bid),
         }).eq('id', trade['id']).execute()
 
-        if pct >= threshold:
+        # Compute net P&L including fees BEFORE deciding to sell
+        buy_fee = kalshi_fee(entry_price)
+        sell_fee = kalshi_fee(current_bid)
+        net_pnl = (current_bid - entry_price - buy_fee - sell_fee) * count
+
+        # TAKE PROFIT — only if gain is positive AND net P&L after fees is positive
+        if pct > 0 and net_pnl > 0 and pct >= threshold:
             if current_bid > last_seen and last_seen > 0:
-                logger.info(f"HOLD: {ticker} {side} +{pct:.0f}% — still climbing ({last_seen:.2f}->{current_bid:.2f})")
+                logger.info(f"HOLD: {ticker} {side} +{pct:.0f}% net=${net_pnl:.4f} — still climbing ({last_seen:.2f}->{current_bid:.2f})")
             else:
-                sell(trade, current_bid, f"TAKE PROFIT +{pct:.0f}% peaked ({entry_price:.2f}->{current_bid:.2f})")
-        # No stop loss — hold until pump or expiry
+                sell(trade, current_bid, f"TAKE PROFIT +{pct:.0f}% net=${net_pnl:.4f} ({entry_price:.2f}->{current_bid:.2f})")
+        elif pct > 0 and net_pnl <= 0 and pct >= threshold:
+            logger.info(f"SKIP SELL: {ticker} {side} +{pct:.0f}% but net=${net_pnl:.4f} (fees eat profit)")
+
+        # STOP LOSS — cut dead capital
+        stop = -30 if strategy == 'crypto' else -50
+        if pct <= stop:
+            sell(trade, current_bid, f"STOP LOSS {pct:.0f}% ({entry_price:.2f}->{current_bid:.2f})")
 
 
 # === MAIN CYCLE ===
@@ -628,7 +668,8 @@ def dashboard():
                 change = 0
                 action_class = 'sell'
                 display_action = 'SELL'
-                gain_color = 'green' if gain > 0 else 'red' if gain < 0 else 'gray'
+                # Color based on P&L, not raw gain% — fees can make a "gain" into a loss
+                gain_color = 'green' if pnl > 0 else 'red' if pnl < 0 else 'gray'
             elif action == 'buy' and t.get('pnl') is None:
                 entry = price
                 gain = (current - entry) * count if current > 0 else 0
@@ -636,7 +677,7 @@ def dashboard():
                 change = current - prev if current > 0 and prev > 0 else 0
                 action_class = 'buy'
                 display_action = 'BUY'
-                gain_color = 'gray'  # unrealized = gray
+                gain_color = 'green' if gain > 0 else 'red' if gain < 0 else 'gray'
             elif action == 'buy' and t.get('pnl') is not None:
                 entry = price
                 gain = pnl
