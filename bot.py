@@ -182,8 +182,8 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_i
     peak = peak_bids[trade_id]
     drop_from_peak = ((peak - current_bid) / peak) * 100 if peak > 0 else 0
 
-    # TRAILING STOP: once up 25%+, sell if it drops 2% from peak
-    if gain_pct >= 25 and drop_from_peak >= 2:
+    # TRAILING STOP: once in profit, sell if it drops 2% from peak
+    if gain_pct > 0 and drop_from_peak >= 2:
         peak_gain = ((peak - entry_price) / entry_price) * 100
         return True, count, f"TRAIL STOP +{gain_pct:.0f}% (peak was +{peak_gain:.0f}%, dropped {drop_from_peak:.1f}%)"
 
@@ -666,7 +666,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c with bid</div>
-  <div class="status-item">Trail: 25%/2% drop</div>
+  <div class="status-item">Trail: 2% drop from peak</div>
   <div class="status-item">5min: +10%</div>
   <div class="status-item">2min: any green</div>
   <div class="status-item">Max: 5 contracts</div>
