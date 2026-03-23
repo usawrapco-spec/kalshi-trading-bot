@@ -276,19 +276,22 @@ def buy_candidates(markets):
             if mins_left < 5:
                 continue
 
-        yes_ask = sf(market.get('yes_ask_dollars', '0'))
-        yes_bid = sf(market.get('yes_bid_dollars', '0'))
-        no_ask = sf(market.get('no_ask_dollars', '0'))
-        no_bid = sf(market.get('no_bid_dollars', '0'))
+        yes_ask = float(market.get('yes_ask_dollars') or '999')
+        yes_bid = float(market.get('yes_bid_dollars') or '0')
+        no_ask = float(market.get('no_ask_dollars') or '999')
+        no_bid = float(market.get('no_bid_dollars') or '0')
 
-        # Check yes side
-        if BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
+        # Pick whichever side is cheaper
+        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            side, price, bid = 'yes', yes_ask, yes_bid
+        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            side, price, bid = 'no', no_ask, no_bid
+        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            side, price, bid = 'yes', yes_ask, yes_bid
+        else:
             continue
 
-        # Check no side
-        if BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
-            candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
+        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
 
     # Sort cheapest first, buy up to 10
     candidates.sort(key=lambda x: x['price'])
