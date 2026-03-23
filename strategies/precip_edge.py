@@ -66,9 +66,9 @@ PRECIP_KEYWORDS = ['rain', 'snow', 'precipitation', 'inches of', 'measurable']
 
 OPEN_METEO_URL = 'https://ensemble-api.open-meteo.com/v1/ensemble'
 
-MIN_EDGE = 0.08          # Higher than temp — precip is noisier
-MAX_ENTRY_PRICE = 0.20   # Allow slightly more expensive contracts
-MIN_MODEL_CONFIDENCE = 0.75  # Lower threshold — use HyperThink to validate
+MIN_EDGE = 0.20          # 20% edge minimum for live trading safety
+MAX_ENTRY_PRICE = 0.20   # Only buy cheap contracts (scalping strategy)
+MIN_MODEL_CONFIDENCE = 0.85  # 85% ensemble confidence required for live
 
 
 class PrecipEdgeStrategy(BaseStrategy):

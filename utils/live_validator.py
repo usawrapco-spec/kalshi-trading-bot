@@ -9,7 +9,7 @@ logger = setup_logger('live_validator')
 LIVE_LIMITS = {
     'max_per_trade_dollars': 2.00,
     'max_total_exposure_dollars': 5.00,
-    'max_contract_price': 0.15,
+    'max_contract_price': 0.20,
     'max_contracts_per_trade': 20,
     'min_cash_reserve_pct': 0.50,
     'min_edge_pct': 0.20,

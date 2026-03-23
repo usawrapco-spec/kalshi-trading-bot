@@ -1124,6 +1124,14 @@ class KalshiBot:
                 except Exception as e:
                     logger.debug(f"  {series} failed: {e}")
 
+            # 4. Precipitation series (rain/snow markets)
+            from strategies.precip_edge import PRECIP_SERIES
+            for series in PRECIP_SERIES:
+                try:
+                    _add_markets(self.client.get_markets_by_series(series), series)
+                except Exception as e:
+                    logger.debug(f"  {series} failed: {e}")
+
             if not all_markets:
                 logger.warning("No markets returned")
                 self._log_status()
