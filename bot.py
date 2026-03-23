@@ -350,6 +350,53 @@ def startup_purge():
         logger.error(f"Startup purge error: {e}")
 
 
+# === RESYNC — reimport positions from Kalshi into DB ===
+
+def resync_positions():
+    """Pull real positions from Kalshi into our DB so the bot can track and sell them."""
+    try:
+        resp = kalshi_get('/portfolio/positions?limit=1000')
+        positions = resp.get('market_positions', [])
+
+        # Get tickers already tracked in DB
+        existing = db.table('trades').select('ticker') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        tracked = {t['ticker'] for t in (existing.data or [])}
+
+        imported = 0
+        for pos in positions:
+            ticker = pos.get('ticker', '')
+            quantity = pos.get('total_traded', 0)
+            if quantity <= 0:
+                continue
+            if ticker in tracked:
+                continue
+
+            side = 'yes' if pos.get('market_exposure', 0) > 0 else 'no'
+            exposure = abs(pos.get('market_exposure', 0))
+            price = exposure / quantity / 100 if quantity > 0 else 0
+
+            try:
+                db.table('trades').insert({
+                    'ticker': ticker,
+                    'side': side,
+                    'action': 'buy',
+                    'price': round(price, 4),
+                    'count': quantity,
+                    'strategy': 'resync',
+                    'reason': f"RESYNC from Kalshi {side} x{quantity} @ ${price:.4f}",
+                }).execute()
+                tracked.add(ticker)
+                imported += 1
+                logger.info(f"RESYNC: {ticker} {side} x{quantity} @ ${price:.4f}")
+            except Exception as e:
+                logger.error(f"RESYNC insert failed for {ticker}: {e}")
+
+        logger.info(f"RESYNC COMPLETE: imported {imported} positions from Kalshi")
+    except Exception as e:
+        logger.error(f"RESYNC ERROR: {e}")
+
+
 # === SYNC DB WITH KALSHI ===
 
 def sync_with_kalshi():
@@ -962,10 +1009,10 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — NUCLEAR CLEAR then current hour only, sell 25% or 10s timeout, 3 contracts")
+    logger.info("Bot starting — resync from Kalshi, current hour only, sell 25% or 10s timeout, 3 contracts")
     startup_purge()
+    resync_positions()
     sync_with_kalshi()
-    nuclear_clear()
     cycle_count = 0
     while True:
         try:
