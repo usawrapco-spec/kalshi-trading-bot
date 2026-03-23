@@ -723,7 +723,7 @@ def run_buys(markets):
 
 sell_history = []  # Rolling last 20 sell gain percentages
 
-EXPIRY_WINDOW_SECONDS = 300  # 5 minutes — save profits before expiry
+EXPIRY_WINDOW_SECONDS = 60  # 1 minute — sell anything green before close
 
 
 def get_time_to_expiry(market):
@@ -741,26 +741,25 @@ def get_time_to_expiry(market):
 
 
 def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
-    """No ceiling sell: half at 100%, ride rest unlimited, expiry save.
+    """3 rules: moonshot at 100%, save ALL profit at 1 min, hold everything else.
     Returns (should_sell, sell_qty, reason)."""
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # === HALF SELL at 100% — lock in profit, let the rest ride FOREVER ===
+    # RULE 1: Half sell at 100%+ (moonshot — lock profit, ride the rest)
     if gain_pct >= 100:
         sell_qty = max(1, count // 2)
         return True, sell_qty, f"HALF SELL +{gain_pct:.0f}% — riding {count - sell_qty} to the moon"
 
-    # === EXPIRY SAVE — profitable + close to expiry, save it ===
+    # RULE 2: 1 minute before expiry — sell EVERYTHING profitable
+    # Any profit at all. +1%, +5%, +60%, doesn't matter. Take it.
     if time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS:
-        if gain_pct >= 25:
-            return True, count, f"EXPIRY SAVE +{gain_pct:.0f}% with {int(time_to_expiry)}s left"
-        elif gain_pct > 0:
-            return True, count, f"EXPIRY EXIT +{gain_pct:.0f}% with {int(time_to_expiry)}s left"
+        if gain_pct > 0:
+            return True, count, f"LAST MINUTE +{gain_pct:.0f}% — saving profit ({int(time_to_expiry)}s left)"
 
-    # === HOLD — no ceiling, no limit. Let it ride to settlement. ===
+    # RULE 3: Everything else — HOLD. Let it ride.
     return False, 0, None
 
 
@@ -931,11 +930,16 @@ def check_sells():
         gain_pct = ((current_bid - entry_price) / entry_price) * 100
         evaluated += 1
 
-        # Log EVERY position evaluation
+        # Log position evaluation
         time_to_expiry = get_time_to_expiry(market)
         expiry_str = f"{int(time_to_expiry)}s" if time_to_expiry is not None else "unknown"
         action_preview = "SELL" if gain_pct >= 100 or (time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS and gain_pct > 0) else "HOLD"
         logger.info(f"EVAL: {ticker} {side} x{count} | entry=${entry_price:.2f} bid=${current_bid:.2f} | gain={gain_pct:+.0f}% | expiry={expiry_str} | {action_preview}")
+
+        # Near-expiry alert logging (< 2 min)
+        if time_to_expiry is not None and time_to_expiry < 120:
+            logger.info(f"NEAR EXPIRY: {ticker} | +{gain_pct:.0f}% | {int(time_to_expiry)}s left | "
+                        f"{'SELLING' if gain_pct > 0 else 'letting expire (underwater)'}")
 
         # Update current price for dashboard
         try:
