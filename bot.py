@@ -31,9 +31,14 @@ STARTING_BALANCE = 50.00
 MAX_BUYS_PER_CYCLE = 10
 
 CRYPTO_SERIES = [
-    'KXBTCD', 'KXETHD', 'KXSOLD',           # hourly direction
-    'KXBTC', 'KXETH', 'KXSOL',              # hourly bracket
-    'KXBTC15M', 'KXETH15M', 'KXSOL15M',     # 15-min direction
+    # Direction (hourly)
+    'KXBTCD', 'KXETHD', 'KXSOLD', 'KXXRPD', 'KXDOGED', 'KXADAD',
+    # Brackets (hourly)
+    'KXBTC', 'KXETH', 'KXSOL', 'KXXRP', 'KXDOGE', 'KXADA',
+    # 15-minute
+    'KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M',
+    # Monthly/yearly
+    'KXBTCMIN', 'KXETHMIN', 'KXSOLMIN',
 ]
 
 # Set dynamically at startup
@@ -276,7 +281,7 @@ def buy_candidates(markets):
         if close_time:
             try:
                 close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                if (close_dt - now).total_seconds() < 1800:
+                if (close_dt - now).total_seconds() < 300:
                     continue
             except:
                 pass
@@ -561,7 +566,7 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: KXBTCD, KXETHD, KXSOLD, KXBTC, KXETH, KXSOL, KXBTC15M, KXETH15M, KXSOL15M</span>
+  <span>Series: all crypto (20 series) | Min 5m to expiry</span>
   <span>Buy: 3-20c | Sell: 30% | 5 contracts | 30s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
