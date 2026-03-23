@@ -87,7 +87,13 @@ def close_all_old_positions():
         all_open = db.table('trades').select('id,ticker,strategy') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         if all_open.data:
-            valid_strategies = {'crypto', 'mm_scalp'}
+            # All strategies from categorize_market are valid now
+            valid_strategies = {
+                'crypto', 'mm_scalp',  # legacy
+                'crypto direction', 'crypto bracket', 'NCAA basketball',
+                'march madness futures', 'weather', 'oil', 'sports',
+                'elections', 'tennis', 'economics', 'other',
+            }
             stale = [t for t in all_open.data if t.get('strategy') not in valid_strategies]
             for t in stale:
                 db.table('trades').update({
@@ -205,113 +211,61 @@ def place_order(ticker, side, action, price, count):
         return None
 
 
-# === CRYPTO ONLY ===
+# === UNIVERSAL MARKET SCANNER ===
 
-CRYPTO_SERIES = [
-    # BTC first — the proven winners (hourly only, 15M dropped — data says they lose)
-    'KXBTCD', 'KXBTC', 'KXBTC1H',
-    # ETH — brackets work well
-    'KXETHD', 'KXETH', 'KXETH1H',
-    # SOL — weakest but keep for diversification
-    'KXSOLD', 'KXSOL', 'KXSOL1H',
-]
-
-# === MARCH MADNESS ===
-
-MARCH_MADNESS_SERIES = [
-    'KXNCAAMBGAME',  # Individual NCAA men's basketball games — THE MAIN ONE (178+ markets)
-    'KXMARMAD',      # March Madness championship futures
-    'KXNCAAMB',      # NCAA men's basketball general
-]
-
-BASKETBALL_KEYWORDS = [
-    'NCAA', 'March Madness', 'championship', 'tournament',
-    'Sweet 16', 'Elite Eight', 'Final Four',
-    'Duke', 'Michigan', 'Arizona', 'Florida', 'Auburn',
-    'Houston', 'Iowa State', 'UConn', 'Tennessee', 'Alabama',
-    'Purdue', 'Kansas', 'Kentucky', 'Arkansas',
-    'Gonzaga', "St. John", 'Illinois',
-]
+def categorize_market(ticker):
+    """Categorize any Kalshi market by ticker pattern."""
+    if '15M' in ticker: return '15-min crypto (BLOCKED)'
+    elif any(x in ticker for x in ['KXBTCD', 'KXETHD', 'KXSOLD']): return 'crypto direction'
+    elif any(x in ticker for x in ['KXBTC-', 'KXETH-', 'KXSOL-']): return 'crypto bracket'
+    elif 'KXNCAAMBGAME' in ticker or 'KXNCAAMB' in ticker or 'KXCBB' in ticker: return 'NCAA basketball'
+    elif 'KXMARMAD' in ticker or 'KXMM' in ticker: return 'march madness futures'
+    elif 'KXHIGH' in ticker or 'KXLOWT' in ticker: return 'weather'
+    elif 'KXMVE' in ticker: return 'multivariate (SKIP)'
+    elif any(x in ticker for x in ['OIL', 'WTI', 'CRUDE', 'BRENT']): return 'oil'
+    elif any(x in ticker for x in ['KXNFL', 'KXNBA', 'KXMLB', 'KXNHL', 'KXSOCCER', 'KXMLS', 'KXEPL', 'KXUCL']): return 'sports'
+    elif any(x in ticker for x in ['KXELECT', 'KXPRES', 'KXGOV', 'KXSEN', 'KXREFERENDUM']): return 'elections'
+    elif any(x in ticker for x in ['KXTENNIS', 'KXATP', 'KXWTA']): return 'tennis'
+    elif any(x in ticker for x in ['KXFED', 'KXCPI', 'KXGDP', 'KXJOBS', 'KXINFL']): return 'economics'
+    else: return 'other'
 
 
-def fetch_all_crypto():
-    """Fetch all crypto markets — hourly only, 15M dropped."""
-    markets = []
-    for series in CRYPTO_SERIES:
+def fetch_all_live_markets():
+    """Fetch ALL open markets on Kalshi -- crypto, sports, oil, elections, everything."""
+    all_markets = []
+    cursor = None
+
+    while True:
+        params = 'status=open&limit=1000'
+        if cursor:
+            params += f'&cursor={cursor}'
+
         try:
-            resp = kalshi_get(f"/markets?series_ticker={series}&status=open&limit=100")
-            for m in resp.get('markets', []):
-                ticker = m.get('ticker', '')
-                if '15M' in ticker:
-                    continue  # 15-min contracts lose money — data proven
-                markets.append(m)
-        except:
-            pass
-    logger.info(f"Fetched {len(markets)} crypto markets (hourly only)")
-    return markets
+            resp = kalshi_get(f'/markets?{params}')
+        except Exception as e:
+            logger.error(f"Market fetch failed: {e}")
+            break
 
+        markets = resp.get('markets', [])
+        all_markets.extend(markets)
 
-def fetch_march_madness():
-    """Find all March Madness markets via series tickers, keyword search, and events."""
-    mm_markets = []
+        cursor = resp.get('cursor')
+        if not cursor or not markets:
+            break
 
-    # Method 1: Try known series tickers
-    for series in MARCH_MADNESS_SERIES:
-        try:
-            resp = kalshi_get(f"/markets?series_ticker={series}&status=open&limit=200")
-            found = resp.get('markets', [])
-            mm_markets.extend(found)
-            if found:
-                logger.info(f"Found {len(found)} markets in series {series}")
-        except:
-            continue
+    logger.info(f"TOTAL LIVE MARKETS: {len(all_markets)}")
 
-    # Method 2: Keyword search across all open markets
-    if not mm_markets:
-        try:
-            resp = kalshi_get('/markets?status=open&limit=1000')
-            for m in resp.get('markets', []):
-                title = (m.get('title', '') + ' ' + m.get('subtitle', '')).lower()
-                if any(kw.lower() in title for kw in BASKETBALL_KEYWORDS):
-                    mm_markets.append(m)
-            if mm_markets:
-                logger.info(f"Found {len(mm_markets)} March Madness markets via keyword search")
-        except:
-            pass
+    # Categorize what we found
+    categories = {}
+    for m in all_markets:
+        ticker = m.get('ticker', '')
+        cat = categorize_market(ticker)
+        categories[cat] = categories.get(cat, 0) + 1
 
-    # Method 3: Try events API
-    if not mm_markets:
-        try:
-            resp = kalshi_get('/events?status=open&with_nested_markets=true&limit=100')
-            for event in resp.get('events', []):
-                title = event.get('title', '').lower()
-                if any(kw.lower() in title for kw in ['ncaa', 'march madness', 'basketball', 'tournament', 'champion']):
-                    for m in event.get('markets', []):
-                        mm_markets.append(m)
-            if mm_markets:
-                logger.info(f"Found {len(mm_markets)} March Madness markets via events")
-        except:
-            pass
+    for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
+        logger.info(f"  {cat}: {count} markets")
 
-    # Deduplicate by ticker
-    seen = set()
-    unique = []
-    for m in mm_markets:
-        t = m.get('ticker', '')
-        if t not in seen:
-            seen.add(t)
-            unique.append(m)
-    mm_markets = unique
-
-    # Log what we found for debugging
-    if mm_markets:
-        series_found = set(m.get('series_ticker', 'unknown') for m in mm_markets)
-        logger.info(f"MM series tickers: {series_found}")
-        logger.info(f"MM sample tickers: {[m['ticker'] for m in mm_markets[:10]]}")
-    else:
-        logger.info("No March Madness markets found")
-
-    return mm_markets
+    return all_markets
 
 
 # === BUY LOGIC ===
@@ -328,50 +282,52 @@ def calculate_position_size(contract_price, available_balance, volume=0, strateg
 
 
 def buy_priority(ticker, strategy='crypto'):
-    """Lower = buy first. BTC daily is the money maker, MM is secondary."""
-    if strategy == 'mm_scalp':
-        return 8  # After all crypto
+    """Lower = buy first. Prioritize by category, then volume sorts within."""
     if 'KXBTCD' in ticker: return 0
     if ticker.startswith('KXBTC-'): return 1
     if ticker.startswith('KXETH-'): return 2
     if 'KXETHD' in ticker: return 3
     if 'KXSOL' in ticker: return 4
-    return 5
+    if strategy == 'NCAA basketball' or strategy == 'march madness futures': return 5
+    if strategy == 'sports': return 6
+    if strategy == 'oil': return 7
+    if strategy == 'elections': return 8
+    return 9
 
 
-def run_buys(markets, strategy='crypto'):
+def run_buys(markets):
+    """Universal buy logic — evaluates ALL live markets regardless of category."""
     total_balance, trading_balance, saved_balance = get_trading_balance()
     owned = get_owned()
     num_open = len(owned)
-    logger.info(f"[{strategy}] Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f} (PROTECTED, never traded)")
+    logger.info(f"[UNIVERSAL] Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f} (PROTECTED, never traded)")
 
     if num_open >= MAX_OPEN_POSITIONS:
         logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
         return
 
-    # MM-specific: price range is wider (5-45c) and requires volume filter
-    min_price = 0.05 if strategy == 'mm_scalp' else MIN_PRICE
-    max_price = 0.45 if strategy == 'mm_scalp' else MAX_PRICE
-    max_spread = 0.12 if strategy == 'mm_scalp' else 1.0  # MM needs tight spreads
-    min_volume = 50 if strategy == 'mm_scalp' else 0
+    # Universal parameters: 5-45c price range, tight spreads, volume required
+    min_price = 0.05
+    max_price = 0.45
+    max_spread = 0.10
+    min_volume = 50
 
     buys = []
     for m in markets:
         ticker = m.get('ticker', '')
-        # HARD BLOCK: 15-min contracts — disabled, they lose money
+        category = categorize_market(ticker)
+
+        # HARD BLOCK: skip blocked categories
         if '15M' in ticker:
-            logger.info(f"BLOCKED: {ticker} — 15-min contracts disabled")
-            continue
-        if ticker in owned:
             continue
         if 'KXMVE' in ticker:
             continue
+        if ticker in owned:
+            continue
 
-        # Volume filter for MM
+        # Volume filter — need liquidity to sell later
         volume = sf(m.get('volume', 0)) or sf(m.get('volume_24h', 0))
-        if strategy == 'mm_scalp' and volume < min_volume:
-            if strategy == 'mm_scalp':
-                logger.info(f"MM SKIP {ticker}: low volume ({volume:.0f} < {min_volume})")
+        if volume < min_volume:
             continue
 
         yes_bid = float(m.get('yes_bid_dollars', '0') or '0')
@@ -391,39 +347,21 @@ def run_buys(markets, strategy='crypto'):
                 candidates.append(('no', no_ask, no_bid, spread))
 
         if not candidates:
-            if strategy == 'mm_scalp':
-                # Debug: explain WHY this market was skipped
-                yes_spread = (yes_ask - yes_bid) if yes_ask > 0 and yes_bid > 0 else 999
-                no_spread = (no_ask - no_bid) if no_ask > 0 and no_bid > 0 else 999
-                reasons = []
-                if yes_ask <= 0 and no_ask <= 0:
-                    reasons.append("no asks")
-                elif yes_bid <= 0 and no_bid <= 0:
-                    reasons.append("no bids")
-                else:
-                    if yes_ask > 0 and (yes_ask < min_price or yes_ask > max_price):
-                        reasons.append(f"YES price ${yes_ask:.2f} outside {min_price}-{max_price}")
-                    if no_ask > 0 and (no_ask < min_price or no_ask > max_price):
-                        reasons.append(f"NO price ${no_ask:.2f} outside {min_price}-{max_price}")
-                    if yes_spread > max_spread and no_spread > max_spread:
-                        reasons.append(f"spreads too wide (YES={yes_spread:.2f} NO={no_spread:.2f})")
-                logger.info(f"MM SKIP {ticker}: {', '.join(reasons) or 'no qualifying side'} | "
-                           f"YES=${yes_ask:.2f}/{yes_bid:.2f} NO=${no_ask:.2f}/{no_bid:.2f} vol={volume:.0f}")
             continue
 
         # Pick side with tightest spread
         candidates.sort(key=lambda x: x[3])
         side, price, bid, spread = candidates[0]
-        count = calculate_position_size(price, trading_balance, volume, strategy)
+        count = calculate_position_size(price, trading_balance, volume, category)
 
         buys.append({
             'ticker': ticker, 'side': side, 'price': price,
             'bid': bid, 'spread': spread, 'count': count,
-            'volume': volume, 'strategy': strategy,
+            'volume': volume, 'strategy': category,
         })
 
-    # Sort by priority then tightest spread
-    buys.sort(key=lambda x: (buy_priority(x['ticker'], x['strategy']), x['spread']))
+    # Sort by volume (most liquid first), then priority, then tightest spread
+    buys.sort(key=lambda x: (-x['volume'], buy_priority(x['ticker'], x['strategy']), x['spread']))
 
     # Limits based on trading_balance (excludes saved/protected money)
     max_exposure = trading_balance * MAX_DEPLOYMENT_PCT
@@ -464,13 +402,13 @@ def run_buys(markets, strategy='crypto'):
         if not order_id:
             continue
 
-        strat_label = 'MM' if strategy == 'mm_scalp' else 'CRYPTO'
-        logger.info(f"BUY [{strat_label}]: {b['ticker']} {b['side']} x{b['count']} @ ${b['price']:.2f} (bid=${b['bid']:.2f} spread=${b['spread']:.2f})")
+        strat_label = b['strategy'].upper()
+        logger.info(f"BUY [{strat_label}]: {b['ticker']} {b['side']} x{b['count']} @ ${b['price']:.2f} (bid=${b['bid']:.2f} spread=${b['spread']:.2f} vol={b['volume']:.0f})")
         try:
             db.table('trades').insert({
                 'ticker': b['ticker'], 'side': b['side'], 'action': 'buy',
                 'price': float(b['price']), 'count': b['count'],
-                'strategy': strategy,
+                'strategy': b['strategy'],
                 'reason': f"{strat_label}: {b['side'].upper()} @ ${b['price']:.2f} bid=${b['bid']:.2f}",
                 'last_seen_bid': float(b['bid']),
                 'current_bid': float(b['bid']),
@@ -483,7 +421,15 @@ def run_buys(markets, strategy='crypto'):
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
 
-    logger.info(f"[{strategy}] Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
+    logger.info(f"[UNIVERSAL] Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
+
+    # Log category breakdown of buys
+    if bought > 0:
+        buy_cats = {}
+        for b in buys[:bought]:
+            buy_cats[b['strategy']] = buy_cats.get(b['strategy'], 0) + 1
+        for cat, cnt in sorted(buy_cats.items(), key=lambda x: -x[1]):
+            logger.info(f"  Bought {cnt} from {cat}")
 
 
 # === SELL LOGIC — SMART TIERED: 100% instant sell, save profits before expiry, let winners ride ===
@@ -745,34 +691,21 @@ def run_cycle():
     total, trading, saved = get_trading_balance()
     logger.info(f"=== CYCLE START === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
 
-    # 1. Check sells (both crypto and MM positions)
+    # 1. Check sells (universal — works for any market type)
     try:
         check_sells()
     except Exception as e:
         logger.error(f"Sell check error: {e}")
 
-    # 2. Scan crypto (hourly only, 15M dropped)
-    crypto_count = 0
+    # 2. Fetch ALL live markets and buy the best opportunities
     try:
-        crypto_markets = fetch_all_crypto()
-        crypto_count = len(crypto_markets)
-        run_buys(crypto_markets, strategy='crypto')
+        all_markets = fetch_all_live_markets()
+        run_buys(all_markets)
     except Exception as e:
-        logger.error(f"Crypto buy error: {e}")
-
-    # 3. Scan March Madness
-    mm_count = 0
-    try:
-        mm_markets = fetch_march_madness()
-        mm_count = len(mm_markets)
-        logger.info(f"March Madness markets found: {mm_count} | Sample: {[m.get('ticker','') for m in mm_markets[:5]]}")
-        if mm_markets:
-            run_buys(mm_markets, strategy='mm_scalp')
-    except Exception as e:
-        logger.error(f"MM buy error: {e}")
+        logger.error(f"Universal buy error: {e}")
 
     total, trading, saved = get_trading_balance()
-    logger.info(f"=== CYCLE END === crypto={crypto_count} sports={mm_count} | Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
+    logger.info(f"=== CYCLE END === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
 
 
 # === DASHBOARD ===
@@ -784,10 +717,22 @@ def categorize_ticker(ticker):
         return 'Hourly Direction'
     elif any(x in ticker for x in ['KXBTC-', 'KXETH-', 'KXSOL-']):
         return 'Hourly Bracket'
-    elif any(x in ticker for x in ['KXNCAAMBGAME', 'NCAA', 'KXMARMAD', 'KXCBB', 'KXMM']):
+    elif any(x in ticker for x in ['KXNCAAMBGAME', 'KXNCAAMB', 'KXCBB']):
+        return 'NCAA Basketball'
+    elif any(x in ticker for x in ['KXMARMAD', 'KXMM']):
         return 'March Madness'
     elif 'KXHIGH' in ticker or 'KXLOWT' in ticker:
         return 'Weather'
+    elif any(x in ticker for x in ['OIL', 'WTI', 'CRUDE', 'BRENT']):
+        return 'Oil'
+    elif any(x in ticker for x in ['KXNFL', 'KXNBA', 'KXMLB', 'KXNHL', 'KXSOCCER', 'KXMLS', 'KXEPL', 'KXUCL']):
+        return 'Sports'
+    elif any(x in ticker for x in ['KXELECT', 'KXPRES', 'KXGOV', 'KXSEN', 'KXREFERENDUM']):
+        return 'Elections'
+    elif any(x in ticker for x in ['KXTENNIS', 'KXATP', 'KXWTA']):
+        return 'Tennis'
+    elif any(x in ticker for x in ['KXFED', 'KXCPI', 'KXGDP', 'KXJOBS', 'KXINFL']):
+        return 'Economics'
     else:
         return 'Other'
 
@@ -1027,7 +972,7 @@ tr:hover{background:#1a1a1a !important}
 
 <!-- Portfolio Hero -->
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; crypto + March Madness</div>
+  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; ALL markets</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1073,7 +1018,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item">Sell: 100%+ or expiry</div>
   <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
 </div>
-<div class="footer">Kalshi Scalp Bot v5 &mdash; auto-refresh 15s</div>
+<div class="footer">Kalshi Scalp Bot v6 &mdash; Universal Scanner &mdash; auto-refresh 15s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
@@ -1084,9 +1029,15 @@ var CAT_STATUS={
   '15-min Crypto':['DISABLED','badge-disabled'],
   'Hourly Direction':['ACTIVE','badge-active'],
   'Hourly Bracket':['ACTIVE','badge-active'],
+  'NCAA Basketball':['ACTIVE','badge-active'],
   'March Madness':['ACTIVE','badge-active'],
-  'Weather':['DISABLED','badge-gray'],
-  'Other':['MIXED','badge-gray']
+  'Oil':['ACTIVE','badge-active'],
+  'Sports':['ACTIVE','badge-active'],
+  'Elections':['ACTIVE','badge-active'],
+  'Tennis':['ACTIVE','badge-active'],
+  'Economics':['ACTIVE','badge-active'],
+  'Weather':['ACTIVE','badge-active'],
+  'Other':['ACTIVE','badge-active']
 };
 
 async function fetchJSON(url){
@@ -1129,7 +1080,7 @@ async function refresh(){
   // Category cards with status badges
   if(cats&&!cats.error){
     // Ensure all active categories show even if no trades yet
-    var allCats=['Hourly Direction','Hourly Bracket','March Madness'];
+    var allCats=['Hourly Direction','Hourly Bracket','NCAA Basketball','March Madness','Oil','Sports','Elections','Tennis','Economics','Other'];
     var catMap={};
     cats.forEach(function(c){catMap[c.name]=c});
     allCats.forEach(function(name){
@@ -1143,8 +1094,8 @@ async function refresh(){
       var c=catMap[name];
       var pc=cls(c.pnl);
       var st=CAT_STATUS[name]||['ACTIVE','badge-active'];
-      // March Madness: show WAITING if 0 trades
-      if(name==='March Madness'&&c.wins===0&&c.losses===0){
+      // Show SCANNING if 0 trades in any active category
+      if(c.wins===0&&c.losses===0&&st[0]==='ACTIVE'){
         st=['SCANNING','badge-waiting'];
       }
       h+='<div class="cat-card">';
@@ -1268,7 +1219,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — LIVE TRADING — crypto + March Madness — 25% fast sell + 5-min expiry exit + max 5 contracts")
+    logger.info("Bot starting — LIVE TRADING — ALL MARKETS — universal scanner — max 5 contracts")
     close_all_old_positions()
     while True:
         try:
