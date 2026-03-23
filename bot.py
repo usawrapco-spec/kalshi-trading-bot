@@ -229,6 +229,19 @@ def try_buy(market, side, field, strategy, owned, trading_bal):
     return False, 0
 
 
+def count_cheap(markets):
+    """Count markets with at least one side priced 3-15¢."""
+    cheap = []
+    for m in markets:
+        if 'KXMVE' in m.get('ticker', '') or m.get('status') != 'open':
+            continue
+        yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
+        no_ask = float(m.get('no_ask_dollars', '0') or '0')
+        if (MIN_PRICE <= yes_ask <= MAX_PRICE) or (MIN_PRICE <= no_ask <= MAX_PRICE):
+            cheap.append(m)
+    return cheap
+
+
 def scan_and_buy():
     """Scan crypto, trending, and weather markets. Buy cheap contracts."""
     trading_bal, _ = get_balance()
@@ -237,6 +250,7 @@ def scan_and_buy():
     open_positions = db.table('trades').select('ticker,side') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
     owned = {(t['ticker'], t['side']) for t in (open_positions.data or [])}
+    logger.info(f"Already own {len(owned)} positions")
     bought = 0
 
     def scan_markets(markets, strategy):
@@ -253,16 +267,34 @@ def scan_and_buy():
 
     # Priority 1: Crypto 15-min
     for series in CRYPTO_SERIES:
-        scan_markets(get_series_markets(series), 'crypto')
+        markets = get_series_markets(series)
+        cheap = count_cheap(markets)
+        logger.info(f"Crypto {series}: {len(markets)} markets, {len(cheap)} cheap (3-15¢)")
+        if cheap:
+            logger.info(f"  Sample: {cheap[0]['ticker']} YES={cheap[0].get('yes_ask_dollars')} NO={cheap[0].get('no_ask_dollars')}")
+        scan_markets(markets, 'crypto')
 
     # Priority 2: Trending/high-volume
     trending = get_trending_markets()
     trending.sort(key=lambda m: float(m.get('volume_24h_fp', '0') or '0'), reverse=True)
+    cheap = count_cheap(trending)
+    logger.info(f"Trending: {len(trending)} markets, {len(cheap)} cheap (3-15¢)")
+    if cheap:
+        logger.info(f"  Sample: {cheap[0]['ticker']} YES={cheap[0].get('yes_ask_dollars')} NO={cheap[0].get('no_ask_dollars')}")
     scan_markets(trending, 'trending')
 
     # Priority 3: Weather
+    weather_total = 0
+    weather_cheap = 0
     for series in WEATHER_SERIES:
-        scan_markets(get_series_markets(series), 'weather')
+        markets = get_series_markets(series)
+        cheap = count_cheap(markets)
+        weather_total += len(markets)
+        weather_cheap += len(cheap)
+        if cheap:
+            logger.info(f"Weather {series}: {len(markets)} markets, {len(cheap)} cheap — sample: {cheap[0]['ticker']} YES={cheap[0].get('yes_ask_dollars')} NO={cheap[0].get('no_ask_dollars')}")
+        scan_markets(markets, 'weather')
+    logger.info(f"Weather total: {weather_total} markets, {weather_cheap} cheap (3-15¢)")
 
     logger.info(f"Scan complete: bought {bought} contracts, balance now ${trading_bal:.2f}")
 
