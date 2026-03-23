@@ -149,12 +149,21 @@ def kalshi_fee(price):
     return math.ceil(0.07 * price * (1 - price) * 100) / 100
 
 
+CRYPTO_15M = {'KXBTC15M', 'KXETH15M', 'KXSOL15M'}
+
+
+def get_buy_count(ticker):
+    """3 contracts for 15-min crypto, 1 for everything else."""
+    return 3 if any(s in ticker for s in CRYPTO_15M) else 1
+
+
 def buy(ticker, side, price, strategy, reason):
-    logger.info(f"BUY: {ticker} {side} x1 @ ${price:.2f} | {reason}")
+    count = get_buy_count(ticker)
+    logger.info(f"BUY: {ticker} {side} x{count} @ ${price:.2f} = ${price*count:.2f} | {reason}")
     try:
         db.table('trades').insert({
             'ticker': ticker, 'side': side, 'action': 'buy',
-            'price': float(price), 'count': 1,
+            'price': float(price), 'count': count,
             'strategy': strategy, 'reason': reason,
             'last_seen_bid': float(price),
         }).execute()
@@ -350,7 +359,7 @@ def run_cycle():
                 break
             if trading_bal < RESERVE_BALANCE:
                 break
-            cost = signal['price']  # 1 contract
+            cost = signal['price'] * get_buy_count(signal['ticker'])
             if cost > trading_bal - RESERVE_BALANCE:
                 continue
             if buy(signal['ticker'], signal['side'], signal['price'],
