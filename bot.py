@@ -28,7 +28,7 @@ MAX_TRADES_PER_CYCLE = 10       # High volume: buy everything that qualifies
 MAX_OPEN_POSITIONS = 200
 
 # === SELL THRESHOLDS ===
-# Simple: 50% gain = sell ALL. 1min expiry = sell if green. That's it.
+# No ceiling — only sell 1min before expiry if profitable. Let winners ride to $1.00.
 
 # === PROFIT COMPOUNDING ===
 PROFIT_SAVE_PCT = 0.20          # 20% of every win gets banked permanently
@@ -487,18 +487,16 @@ def get_time_to_expiry(market_or_ticker):
 
 
 def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
-    """Simple golden hour sell: 50% gain = sell ALL. 1min expiry = sell if green.
+    """No ceiling — only sell 1min before expiry if profitable. Let winners ride to $1.00.
     Returns (should_sell, sell_qty, reason)."""
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
 
-    # 50% gain — sell ALL contracts. Take the profit. Move on.
-    if gain_pct >= 50:
-        return True, count, f"SCALP +{gain_pct:.0f}%"
-
-    # 1 minute before expiry — sell anything green
+    # ONLY sell 1 minute before expiry if profitable. That's it.
+    # Let everything else ride — 50%, 100%, 340%, doesn't matter.
+    # The contract either settles at $1.00 (huge win) or gets saved before close.
     if time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS:
         if gain_pct > 0:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
@@ -638,9 +636,9 @@ def cleanup_ghosts():
 
 
 def check_sells():
-    """Simple 50% sell-all, 1min expiry save."""
+    """No ceiling — only sell 1min before expiry if profitable. Let winners ride."""
     global sell_history
-    logger.info("check_sells() — 50% sell ALL, 1min expiry save")
+    logger.info("check_sells() — no ceiling, 1min expiry save only")
 
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -736,7 +734,7 @@ def check_sells():
         # Log position evaluation
         time_to_expiry = get_time_to_expiry(market)
         expiry_str = f"{int(time_to_expiry)}s" if time_to_expiry is not None else "unknown"
-        action_preview = "SELL" if gain_pct >= 50 else "SELL" if (time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS and gain_pct > 0) else "HOLD"
+        action_preview = "EXPIRY SAVE" if (time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS and gain_pct > 0) else "HOLD"
         logger.info(f"EVAL: {ticker} {side} x{count} | entry=${entry_price:.2f} bid=${current_bid:.2f} | gain={gain_pct:+.0f}% | expiry={expiry_str} | {action_preview}")
 
         # Near-expiry alert logging (< 2 min)
@@ -788,7 +786,7 @@ def run_cycle():
     except Exception as e:
         logger.error(f"Ghost cleanup error: {e}")
 
-    # 1. Check sells — simple 50% sell-all
+    # 1. Check sells — no ceiling, only expiry save
     try:
         check_sells()
     except Exception as e:
@@ -1157,7 +1155,7 @@ tr:hover{background:#1a1a1a !important}
   <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
   <div class="status-item">15M: <span class="dot-blocked"></span> BLOCKED</div>
   <div class="status-item">Max contracts: 10</div>
-  <div class="status-item">Sell: 50% sell ALL, 1min expiry save</div>
+  <div class="status-item">Sell: no ceiling, 1min expiry save only</div>
   <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span> protected</div>
   <div class="status-item">Ghosts: <span class="yellow" id="sb-ghosts">0</span> expired cleaned</div>
   <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
@@ -1378,7 +1376,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — GOLDEN HOUR RESET — crypto only, 50% sell, 5 contracts, fast turnover")
+    logger.info("Bot starting — GOLDEN HOUR — no ceiling sell, 5 contracts, let winners ride to $1.00")
     close_all_old_positions()
     while True:
         try:
