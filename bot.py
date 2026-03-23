@@ -338,10 +338,10 @@ def run_cycle():
 
         # Crypto first (all-in), then trending (only high volume)
         crypto_buys = sorted([b for b in buys if b['strategy'] == 'crypto'], key=lambda x: x['volume'], reverse=True)
-        trending_buys = sorted([b for b in buys if b['strategy'] == 'trending' and b['volume'] >= 1000], key=lambda x: x['volume'], reverse=True)
+        trending_buys = sorted([b for b in buys if b['strategy'] == 'trending' and b['volume'] >= 100], key=lambda x: x['volume'], reverse=True)
         ordered_buys = crypto_buys + trending_buys
 
-        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} crypto | crypto={len(crypto_buys)} trending={len(trending_buys)} (vol>1000)")
+        logger.info(f"Scan: {len(top_activity)} active + {len(series_markets)} crypto | crypto={len(crypto_buys)} trending={len(trending_buys)} (vol>100)")
 
         # Buy 1 contract each
         bought = 0
