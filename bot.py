@@ -633,7 +633,7 @@ def select_focused_trades(candidates, max_per_asset=MAX_PER_ASSET, max_total=MAX
 
 
 def run_buys(markets):
-    """Crypto buy logic — buy any qualifying contract, no per-asset cap. High volume."""
+    """Crypto buy logic — buy any qualifying contract. Simple filters, high volume."""
     total_balance, trading_balance, saved_balance = get_trading_balance()
     owned = get_owned()
     num_open = len(owned)
@@ -644,53 +644,80 @@ def run_buys(markets):
         logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
         return
 
-    # Loose filters — buy anything cheap with a bid (someone to sell to)
-    min_price = 0.05
-    max_price = 0.45
-    min_bid = 0.01   # Just needs ANY bid
-
     buys = []
+    skipped_15m = 0
+    skipped_mve = 0
+    no_price = 0
+    no_bid = 0
+    price_ok = 0
+
     for m in markets:
         ticker = m.get('ticker', '')
-        category = categorize_market(ticker)
+
+        # HARD BLOCK: no 15-minute contracts ever
+        if '15M' in ticker:
+            skipped_15m += 1
+            continue
+
+        # Skip multivariate
+        if 'KXMVE' in ticker:
+            skipped_mve += 1
+            continue
 
         if ticker in owned:
             already_owned += 1
             continue
 
+        category = categorize_market(ticker)
         volume = sf(m.get('volume', 0)) or sf(m.get('volume_24h', 0))
 
-        yes_bid = sf(m.get('yes_bid_dollars', '0'))
         yes_ask = sf(m.get('yes_ask_dollars', '0'))
-        no_bid = sf(m.get('no_bid_dollars', '0'))
+        yes_bid = sf(m.get('yes_bid_dollars', '0'))
         no_ask = sf(m.get('no_ask_dollars', '0'))
+        no_bid = sf(m.get('no_bid_dollars', '0'))
 
-        # Collect qualifying sides
+        # Also try non-dollar fields as fallback (cents)
+        if yes_ask == 0 and yes_bid == 0 and no_ask == 0 and no_bid == 0:
+            yes_ask = sf(m.get('yes_ask', 0)) / 100.0 if sf(m.get('yes_ask', 0)) > 1 else sf(m.get('yes_ask', 0))
+            yes_bid = sf(m.get('yes_bid', 0)) / 100.0 if sf(m.get('yes_bid', 0)) > 1 else sf(m.get('yes_bid', 0))
+            no_ask = sf(m.get('no_ask', 0)) / 100.0 if sf(m.get('no_ask', 0)) > 1 else sf(m.get('no_ask', 0))
+            no_bid = sf(m.get('no_bid', 0)) / 100.0 if sf(m.get('no_bid', 0)) > 1 else sf(m.get('no_bid', 0))
+
+        # Collect qualifying sides: price 5-45 cents, has ANY bid
         candidates = []
-        if yes_bid >= min_bid and yes_ask > 0 and min_price <= yes_ask <= max_price:
-            spread = yes_ask - yes_bid
-            candidates.append(('yes', yes_ask, yes_bid, spread))
-        if no_bid >= min_bid and no_ask > 0 and min_price <= no_ask <= max_price:
-            spread = no_ask - no_bid
-            candidates.append(('no', no_ask, no_bid, spread))
+        if 0.05 <= yes_ask <= 0.45 and yes_bid > 0:
+            candidates.append(('yes', yes_ask, yes_bid))
+        if 0.05 <= no_ask <= 0.45 and no_bid > 0:
+            candidates.append(('no', no_ask, no_bid))
 
         if not candidates:
+            # Track why it failed for debug
+            has_any_ask = yes_ask > 0 or no_ask > 0
+            has_any_bid = yes_bid > 0 or no_bid > 0
+            if not has_any_ask:
+                no_price += 1
+            elif not has_any_bid:
+                no_bid += 1
+            else:
+                price_ok += 1  # Has price but outside 5-45c range
             continue
 
-        # Pick side with tightest spread
-        candidates.sort(key=lambda x: x[3])
-        side, price, bid, spread = candidates[0]
+        # Pick cheapest side (more room to grow)
+        candidates.sort(key=lambda x: x[1])
+        side, price, bid = candidates[0]
 
         buys.append({
             'ticker': ticker, 'side': side, 'price': price,
-            'bid': bid, 'spread': spread, 'count': MAX_CONTRACTS_PER_TRADE,
+            'bid': bid, 'spread': price - bid, 'count': MAX_CONTRACTS_PER_TRADE,
             'volume': volume, 'strategy': category,
         })
 
-    logger.info(f"CRYPTO: found {len(markets)} markets | qualified={len(buys)} | skipped_owned={already_owned}")
+    logger.info(f"FILTER DEBUG: total={len(markets)} | 15m_blocked={skipped_15m} | mve_skip={skipped_mve} | "
+                f"owned={already_owned} | no_price={no_price} | no_bid={no_bid} | "
+                f"out_of_range={price_ok} | final_candidates={len(buys)}")
 
-    # Sort by tightest spread first (easiest to exit), then by volume
-    buys.sort(key=lambda x: (x['spread'], -x['volume']))
+    # Sort by cheapest first (most upside potential)
+    buys.sort(key=lambda x: x['price'])
 
     # Limits based on trading_balance (excludes saved/protected money)
     max_exposure = trading_balance * MAX_DEPLOYMENT_PCT
