@@ -1,7 +1,7 @@
 """
-Crypto scalper with tiered profit-taking.
-Buy cheap crypto contracts. Sell 1/3 at 100%, half at 200%, all at 300%.
-Drop protection: sell all if gain drops 20 points from peak while under 100%.
+Profit maximizer: hold for big gains, protect at 50%+, no caps, no timeouts.
+Buy cheap crypto contracts. Let winners run with no ceiling.
+Only sell when: (1) peaked above 50% and dropping back, or (2) expiry save.
 """
 
 import os, time, logging, re, requests, traceback
@@ -26,13 +26,13 @@ MAX_PRICE = 0.20
 CYCLE_SECONDS = 5
 MAX_CONTRACTS_PER_TRADE = 5
 MAX_BUYS_PER_CYCLE = 15
-MAX_DEPLOYMENT_PCT = 0.95
+MAX_DEPLOYMENT_PCT = 1.0
 MAX_SPEND_PER_TRADE_PCT = 0.15
 MAX_SPEND_PER_CYCLE = 25
 MAX_OPEN_POSITIONS = 200
 
 # === CRYPTO SERIES — the only thing we scan ===
-CRYPTO_SERIES = ['KXBTCD']
+CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -243,68 +243,37 @@ def clear_non_btcd():
 
 
 # === SELL LOGIC ===
-# Fast scalper: sell at +25% instantly, or sell any profit after 10s timeout.
+# Hold for big gains. Only sell on: (1) peak 50%+ and dropping back, (2) expiry save.
 
-entry_times = {}   # trade_id -> first_seen_timestamp
-hit_100 = {}       # trade_id -> True if gain ever hit 100%+
-hit_200_at = {}    # trade_id -> timestamp when gain first hit 200%+
-last_bid_200 = {}  # trade_id -> bid when 200%+ was first seen
+peak_gains = {}  # trade_id -> highest gain % seen
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
-    now = time.time()
 
-    if trade_id not in entry_times:
-        entry_times[trade_id] = now
-    age = now - entry_times[trade_id]
+    # Track peak gain for this position
+    if trade_id not in peak_gains or gain_pct > peak_gains[trade_id]:
+        peak_gains[trade_id] = gain_pct
 
-    # Track if it ever hit 100%
-    if gain_pct >= 100:
-        hit_100[trade_id] = True
+    peak = peak_gains[trade_id]
+    drop = peak - gain_pct
 
-    # Track if it hit 200%+ and when
-    if gain_pct >= 200:
-        if trade_id not in hit_200_at:
-            hit_200_at[trade_id] = now
-            last_bid_200[trade_id] = current_bid
-        # Update bid if it moved
-        if current_bid != last_bid_200.get(trade_id):
-            hit_200_at[trade_id] = now
-            last_bid_200[trade_id] = current_bid
+    # === PROTECT BIG GAINS ===
+    # If we EVER hit 50%+ and it drops 20 points from peak — lock it in
+    if peak >= 50 and drop >= 20 and gain_pct > 0:
+        peak_gains.pop(trade_id, None)
+        return True, count, f"PROTECT +{gain_pct:.0f}% (peak +{peak:.0f}%)"
 
-    # Above 200% and stagnant for 5s — instant sell, take the money
-    if trade_id in hit_200_at and gain_pct >= 200:
-        stale_time = now - hit_200_at[trade_id]
-        if stale_time >= 5:
-            _cleanup(trade_id)
-            return True, count, f"200+ STALE +{gain_pct:.0f}% ({stale_time:.0f}s)"
-
-    # Was above 100%, dropped back below — ride is over
-    if hit_100.get(trade_id) and gain_pct < 100:
-        _cleanup(trade_id)
-        return True, count, f"DROP FROM 100 +{gain_pct:.0f}%"
-
-    # 30 seconds + profitable — sell
-    if age >= 30 and gain_pct > 0:
-        _cleanup(trade_id)
-        return True, count, f"SELL +{gain_pct:.0f}% ({age:.0f}s)"
-
-    # Expiry save
+    # === NEVER LET PROFIT EXPIRE ===
+    # 5 minutes before expiry — sell EVERYTHING green, no exceptions
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
         if gain_pct > 0:
-            _cleanup(trade_id)
+            peak_gains.pop(trade_id, None)
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
+    # === OTHERWISE: HOLD. No ceiling. Let it run to 500%, 1000%, whatever. ===
     return False, 0, None
-
-
-def _cleanup(trade_id):
-    entry_times.pop(trade_id, None)
-    hit_100.pop(trade_id, None)
-    hit_200_at.pop(trade_id, None)
-    last_bid_200.pop(trade_id, None)
 
 
 # === BUY LOGIC ===
@@ -313,8 +282,6 @@ def find_buy_candidates(markets):
     candidates = []
     for market in markets:
         ticker = market.get('ticker', '')
-        if 'KXBTCD' not in ticker:
-            continue
         if 'KXMVE' in ticker:
             continue
 
@@ -323,12 +290,13 @@ def find_buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars', '0') or '0')
         no_bid = float(market.get('no_bid_dollars', '0') or '0')
 
-        if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid >= yes_ask * 0.60:
+        # Tight spread = active contract. Bid must be 80%+ of ask.
+        if MIN_PRICE <= yes_ask <= MAX_PRICE and yes_bid >= yes_ask * 0.80:
             candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
-        if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid >= no_ask * 0.60:
+        if MIN_PRICE <= no_ask <= MAX_PRICE and no_bid >= no_ask * 0.80:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (3-20c with bid)")
+    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (3-20c, 80% spread)")
     return candidates
 
 
@@ -578,7 +546,7 @@ def sync_with_kalshi():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — sell 25% or timeout 10s")
+    logger.info("check_sells() — protect 50%+ gains, expiry save")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -924,7 +892,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Crypto Scalper</title>
+<title>Profit Maximizer</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
@@ -977,7 +945,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 5s cycles &mdash; current hour only, sell 25% or 10s timeout</div>
+  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; hold for big gains, protect at 50%+</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1009,15 +977,14 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
-  <div class="status-item">Buy: 3-20c with bid</div>
-  <div class="status-item">Strategy: 25% or 10s timeout</div>
-  <div class="status-item">Buy: 3-20c with bid</div>
+  <div class="status-item">Buy: 3-20c, 80% spread</div>
+  <div class="status-item">Strategy: hold, protect 50%+</div>
   <div class="status-item">Expiry save: 5min</div>
-  <div class="status-item">Max: 3 contracts</div>
-  <div class="status-item">Full balance trading</div>
+  <div class="status-item">Max: 5 contracts</div>
+  <div class="status-item">All crypto series</div>
   <div class="status-item">Last: <span id="last-update">&mdash;</span></div>
 </div>
-<div class="footer">Crypto Scalper &mdash; auto-refresh 15s</div>
+<div class="footer">Profit Maximizer &mdash; auto-refresh 15s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
@@ -1158,8 +1125,9 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — SELL EVERYTHING, then KXBTCD ONLY, 5s cycles, 5 contracts")
-    sell_everything()
+    logger.info("Bot starting — profit maximizer, all crypto, 5s cycles, 5 contracts")
+    cancel_all_resting()
+    clear_dead()
     sync_with_kalshi()
     cycle_count = 0
     while True:
