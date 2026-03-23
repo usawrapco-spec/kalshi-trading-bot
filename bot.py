@@ -308,12 +308,12 @@ def find_buy_candidates(markets):
             continue
 
         # Skip contracts expiring in < 30 min
-        close_time = market.get('close_time')
+        close_time = market.get('close_time') or market.get('expected_expiration_time')
         if close_time:
             try:
                 close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                secs_left = (close_dt - datetime.now(timezone.utc)).total_seconds()
-                if secs_left < 1800:
+                mins_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 60
+                if mins_left < 30:
                     continue
             except:
                 pass
