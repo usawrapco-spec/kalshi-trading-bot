@@ -327,12 +327,6 @@ def run_buys(markets):
         if 'SOLD26' in ticker: continue
         if 'KXSOLE' in ticker: continue
 
-        # Only block contracts we KNOW are too far out or too close
-        # If expiry is None (can't parse), let it through — don't block unknown tickers
-        expiry_secs = get_time_to_expiry(ticker)
-        if expiry_secs is not None and expiry_secs > 10800: continue
-        if expiry_secs is not None and expiry_secs < 180: continue
-
         if ticker in owned:
             already_owned += 1
             continue
