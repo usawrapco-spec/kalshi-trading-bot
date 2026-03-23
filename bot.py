@@ -266,9 +266,22 @@ def scan_and_buy():
                     bought += 1
 
     # Priority 1: Crypto 15-min
+    logged_first = False
     for series in CRYPTO_SERIES:
         markets = get_series_markets(series)
         logger.info(f"Crypto {series}: {len(markets)} markets — raw prices: {[(m.get('ticker','?'), m.get('yes_ask_dollars','?'), m.get('no_ask_dollars','?')) for m in markets[:3]]}")
+        if markets and not logged_first:
+            m0 = markets[0]
+            # Dump all price-related keys to find the right field names
+            price_keys = {k: v for k, v in m0.items() if 'price' in k.lower() or 'bid' in k.lower() or 'ask' in k.lower() or 'dollar' in k.lower() or 'cent' in k.lower()}
+            logger.info(f"  FIELD DUMP first market: {price_keys}")
+            yes_raw = m0.get('yes_ask_dollars', 'MISSING')
+            no_raw = m0.get('no_ask_dollars', 'MISSING')
+            logger.info(f"  Price check: yes_ask={yes_raw} ({type(yes_raw).__name__}) no_ask={no_raw} ({type(no_raw).__name__})")
+            if yes_raw not in ('MISSING', None, ''):
+                yes_f = float(yes_raw)
+                logger.info(f"  float(yes_ask)={yes_f}, in range [{MIN_PRICE}, {MAX_PRICE}]? {MIN_PRICE <= yes_f <= MAX_PRICE}")
+            logged_first = True
         cheap = count_cheap(markets)
         logger.info(f"  {len(cheap)} cheap (3-15¢)")
         scan_markets(markets, 'crypto')
