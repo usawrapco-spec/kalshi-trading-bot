@@ -19,14 +19,18 @@ MAX_PRICE = 0.50
 CYCLE_SECONDS = 30
 
 # === AGGRESSIVE DEPLOYMENT ===
-MAX_DEPLOYMENT_PCT = 0.80       # Deploy up to 80% of balance
-MIN_CASH_RESERVE_PCT = 0.20     # Keep 20% cash
+MAX_DEPLOYMENT_PCT = 0.75       # Deploy up to 75% of balance
+MIN_CASH_RESERVE_PCT = 0.25     # 25% protected (saved profits live here)
 MAX_CONTRACTS_PER_TRADE = 10
 MIN_CONTRACTS_PER_TRADE = 3
-MAX_SPEND_PER_TRADE_PCT = 0.10  # Max 10% of balance on single trade
-MAX_SPEND_PER_CYCLE = 20        # $ max spend per cycle
+MAX_SPEND_PER_TRADE_PCT = 0.10  # Max 10% of trading_balance per trade
+MAX_SPEND_PER_CYCLE = 25
 MAX_TRADES_PER_CYCLE = 10
 MAX_OPEN_POSITIONS = 200
+
+# === PROFIT COMPOUNDING ===
+PROFIT_SAVE_PCT = 0.20          # 20% of every win gets banked permanently
+PROFIT_REINVEST_PCT = 0.80      # 80% of every win goes back to trading
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -111,6 +115,25 @@ def get_realized_pnl():
     sells = db.table('trades').select('pnl') \
         .eq('action', 'sell').not_.is_('pnl', 'null').execute()
     return sum(sf(t['pnl']) for t in (sells.data or []))
+
+
+def get_saved_balance():
+    """Saved balance = 20% of all winning sells. Computed from DB, survives restarts.
+    This money is PROTECTED — never traded with."""
+    sells = db.table('trades').select('pnl') \
+        .eq('action', 'sell').not_.is_('pnl', 'null').execute()
+    total_wins = sum(max(0.0, sf(t['pnl'])) for t in (sells.data or []))
+    return round(total_wins * PROFIT_SAVE_PCT, 4)
+
+
+def get_trading_balance():
+    """Trading balance = Kalshi balance minus saved (protected) balance.
+    Position sizing uses ONLY this, never the saved portion."""
+    total = get_balance()
+    saved = get_saved_balance()
+    trading = max(0.0, total - saved)
+    logger.info(f"Balance split: ${total:.2f} total | ${trading:.2f} trading | ${saved:.2f} SAVED (protected)")
+    return total, trading, saved
 
 
 def get_owned():
@@ -220,10 +243,10 @@ def buy_priority(ticker):
 
 
 def run_buys(markets):
-    balance = get_balance()
+    total_balance, trading_balance, saved_balance = get_trading_balance()
     owned = get_owned()
     num_open = len(owned)
-    logger.info(f"Own {num_open} tickers, balance ${balance:.2f}")
+    logger.info(f"Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f}")
 
     if num_open >= MAX_OPEN_POSITIONS:
         logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
@@ -255,7 +278,7 @@ def run_buys(markets):
         # Pick side with tightest spread
         candidates.sort(key=lambda x: x[3])
         side, price, bid, spread = candidates[0]
-        count = calculate_position_size(price, balance)
+        count = calculate_position_size(price, trading_balance)
 
         buys.append({
             'ticker': ticker, 'side': side, 'price': price,
@@ -265,10 +288,9 @@ def run_buys(markets):
     # Sort by priority (BTC daily first) then tightest spread
     buys.sort(key=lambda x: (buy_priority(x['ticker']), x['spread']))
 
-    # Aggressive deployment: 80% of balance, 10% per trade
-    max_exposure = balance * MAX_DEPLOYMENT_PCT
-    max_per_trade = balance * MAX_SPEND_PER_TRADE_PCT
-    reserve = balance * MIN_CASH_RESERVE_PCT
+    # Limits based on trading_balance (excludes saved/protected money)
+    max_exposure = trading_balance * MAX_DEPLOYMENT_PCT
+    max_per_trade = trading_balance * MAX_SPEND_PER_TRADE_PCT
 
     # Get current deployed
     open_buys = db.table('trades').select('price,count') \
@@ -294,7 +316,7 @@ def run_buys(markets):
             cost = b['price'] * b['count']
         if current_deployed + cost > max_exposure:
             continue
-        if cost > balance - reserve:
+        if cost > trading_balance - current_deployed:
             continue
 
         # Place real Kalshi order
@@ -313,14 +335,14 @@ def run_buys(markets):
                 'current_bid': float(b['bid']),
             }).execute()
             owned.add(b['ticker'])
-            balance -= cost
+            trading_balance -= cost
             current_deployed += cost
             cycle_spent += cost
             bought += 1
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
 
-    logger.info(f"Bought {bought}, spent ${cycle_spent:.2f}, balance ${balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
+    logger.info(f"Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
 
 
 # === SELL LOGIC — ADAPTIVE THRESHOLD, HANDLE SETTLEMENTS ===
@@ -406,6 +428,10 @@ def execute_sell(trade, ticker, side, entry_price, current_bid, sell_qty, total_
         return False
 
     logger.info(f"SELL: {ticker} {side} x{sell_qty} +{gain_pct:.0f}% pnl=${pnl:.4f} | {reason}")
+    if pnl > 0:
+        banked = pnl * PROFIT_SAVE_PCT
+        reinvested = pnl * PROFIT_REINVEST_PCT
+        logger.info(f"PROFIT SPLIT: ${pnl:.4f} total | ${banked:.4f} BANKED | ${reinvested:.4f} reinvested")
     try:
         db.table('trades').insert({
             'ticker': ticker, 'side': side, 'action': 'sell',
@@ -557,8 +583,8 @@ def check_sells():
 # === MAIN CYCLE ===
 
 def run_cycle():
-    balance = get_balance()
-    logger.info(f"=== CYCLE START === Balance: ${balance:.2f}")
+    total, trading, saved = get_trading_balance()
+    logger.info(f"=== CYCLE START === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
 
     try:
         check_sells()
@@ -571,8 +597,8 @@ def run_cycle():
     except Exception as e:
         logger.error(f"Buy error: {e}")
 
-    balance = get_balance()
-    logger.info(f"=== CYCLE END === Balance: ${balance:.2f}")
+    total, trading, saved = get_trading_balance()
+    logger.info(f"=== CYCLE END === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
 
 
 # === DASHBOARD ===
@@ -614,10 +640,12 @@ DASHBOARD_HTML = """
 <body>
     <div class="header">
         <h1>CRYPTO SCALP BOT</h1>
-        <div class="subtitle">LIVE Trading — 30s cycles — BTC/ETH/SOL — Tiered exits + trailing stop</div>
+        <div class="subtitle">LIVE — 30s cycles — BTC/ETH/SOL — Tiered exits + trailing stop + 20% profit banking</div>
     </div>
     <div class="stats">
         <div class="stat-box"><div class="stat-label">Balance</div><div class="stat-value green">${{balance}}</div></div>
+        <div class="stat-box"><div class="stat-label">Trading</div><div class="stat-value yellow">${{trading_bal}}</div></div>
+        <div class="stat-box"><div class="stat-label">Saved (20%)</div><div class="stat-value green">${{saved_bal}}</div></div>
         <div class="stat-box"><div class="stat-label">Realized P&L</div><div class="stat-value {{'green' if rpnl >= 0 else 'red'}}">${{rpnl_fmt}}</div></div>
         <div class="stat-box"><div class="stat-label">Open</div><div class="stat-value">{{total_open}}</div></div>
         <div class="stat-box"><div class="stat-label">Deployed</div><div class="stat-value yellow">${{deployed}}</div></div>
@@ -705,8 +733,13 @@ def dashboard():
                     'pnl': pnl_val, 'pct': pct, 'color': color})
             # Resolved buys (pnl set) — skip, sell record shows the result
 
+        saved = get_saved_balance()
+        trading = max(0.0, balance - saved)
+
         return render_template_string(DASHBOARD_HTML,
             balance=f"{balance:.2f}",
+            trading_bal=f"{trading:.2f}",
+            saved_bal=f"{saved:.2f}",
             rpnl=rpnl, rpnl_fmt=f"{rpnl:.4f}",
             total_open=total_open, deployed=f"{deployed:.2f}",
             wins=wins, losses=losses, trades=display)
@@ -718,7 +751,7 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — LIVE TRADING — crypto only — tiered exits + trailing stop")
+    logger.info("Bot starting — LIVE TRADING — crypto only — tiered exits + trailing stop + 20% profit banking")
     close_all_old_positions()
     while True:
         try:
