@@ -16,19 +16,10 @@ PORT = int(os.environ.get('PORT', 8080))
 MIN_PRICE = 0.03
 MAX_PRICE = 0.15
 TAKE_PROFIT_PCT = 30
+BUY_COUNT = 2
+MAX_BUYS_PER_CYCLE = 50
 CYCLE_SECONDS = 30
 STARTING_BALANCE = 10.00
-
-CRYPTO_SERIES = ["KXBTC15M", "KXETH15M", "KXSOL15M"]
-
-WEATHER_SERIES = [
-    "KXHIGHNY", "KXHIGHCHI", "KXHIGHMIA", "KXHIGHLAX", "KXHIGHDEN",
-    "KXHIGHAUS", "KXHIGHTPHX", "KXHIGHTSFO", "KXHIGHTATL", "KXHIGHPHIL",
-    "KXHIGHTDC", "KXHIGHTSEA", "KXHIGHTHOU", "KXHIGHTMIN", "KXHIGHTBOS",
-    "KXHIGHTLV", "KXHIGHTOKC",
-    "KXLOWTNYC", "KXLOWTCHI", "KXLOWTMIA", "KXLOWTLAX", "KXLOWTDEN",
-    "KXLOWTAUS", "KXLOWTPHIL"
-]
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -37,7 +28,6 @@ app = Flask(__name__)
 
 
 def sf(val):
-    """Safe float conversion for Supabase string numerics."""
     try:
         return float(val) if val is not None else 0.0
     except:
@@ -66,8 +56,14 @@ def get_balance():
 
     saved = round(total_profit * 0.25, 4)
     trading = round(STARTING_BALANCE - open_cost + total_profit * 0.75 - total_loss, 2)
-
     return trading, saved
+
+
+def get_owned():
+    """Get set of (ticker, side) we already own."""
+    result = db.table('trades').select('ticker,side') \
+        .eq('action', 'buy').is_('pnl', 'null').execute()
+    return {(t['ticker'], t['side']) for t in (result.data or [])}
 
 
 # === KALSHI API ===
@@ -88,21 +84,70 @@ def get_market(ticker):
         return None
 
 
-def get_series_markets(series_ticker):
-    try:
-        resp = kalshi_get(f"/markets?series_ticker={series_ticker}&status=open&limit=100")
-        return resp.get('markets', [])
-    except Exception as e:
-        logger.error(f"get_series_markets({series_ticker}) failed: {e}")
-        return []
+# === SCAN ALL MARKETS ===
+
+def scan_all_markets():
+    """Fetch ALL open markets from Kalshi, return cheap ones sorted by volume."""
+    all_markets = []
+    cursor = None
+
+    for page in range(10):  # Max 10 pages = 2000 markets
+        url = '/markets?status=open&limit=200'
+        if cursor:
+            url += f'&cursor={cursor}'
+        try:
+            resp = kalshi_get(url)
+            markets = resp.get('markets', [])
+            cursor = resp.get('cursor', None)
+            all_markets.extend(markets)
+            if not cursor or not markets:
+                break
+        except Exception as e:
+            logger.error(f"Market fetch page {page} failed: {e}")
+            break
+
+    logger.info(f"Fetched {len(all_markets)} total markets")
+
+    cheap = []
+    for m in all_markets:
+        ticker = m.get('ticker', '')
+        if 'KXMVE' in ticker:
+            continue
+
+        yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
+        no_ask = float(m.get('no_ask_dollars', '0') or '0')
+        volume = float(m.get('volume_24h_fp', '0') or '0')
+
+        # Categorize
+        if 'KXBTC' in ticker or 'KXETH' in ticker or 'KXSOL' in ticker:
+            strategy = 'crypto'
+        elif 'KXHIGH' in ticker or 'KXLOWT' in ticker:
+            strategy = 'weather'
+        else:
+            strategy = 'trending'
+
+        if MIN_PRICE <= yes_ask <= MAX_PRICE:
+            cheap.append({
+                'ticker': ticker, 'side': 'yes', 'price': yes_ask,
+                'volume': volume, 'strategy': strategy,
+                'reason': f"{strategy}: YES @ ${yes_ask:.2f}",
+            })
+        if MIN_PRICE <= no_ask <= MAX_PRICE:
+            cheap.append({
+                'ticker': ticker, 'side': 'no', 'price': no_ask,
+                'volume': volume, 'strategy': strategy,
+                'reason': f"{strategy}: NO @ ${no_ask:.2f}",
+            })
+
+    cheap.sort(key=lambda x: x['volume'], reverse=True)
+    logger.info(f"Found {len(cheap)} cheap contracts across all markets")
+    return cheap
 
 
 # === PAPER TRADING ===
 
-BUY_COUNT = 2
-
 def buy(ticker, side, price, strategy, reason):
-    """Paper buy contracts."""
+    """Paper buy BUY_COUNT contracts."""
     cost = price * BUY_COUNT
     logger.info(f"BUY: {ticker} {side} x{BUY_COUNT} @ ${price:.2f} = ${cost:.2f} | {reason}")
     try:
@@ -139,7 +184,6 @@ def sell(trade, current_bid, reason):
 
 
 def log_settlement(trade, pnl, label):
-    """Record a settled/expired contract on the original buy."""
     try:
         db.table('trades').update({
             'pnl': float(round(pnl, 4)),
@@ -153,7 +197,7 @@ def log_settlement(trade, pnl, label):
 # === POSITION MONITOR ===
 
 def check_positions():
-    """Check open buys — smart sell at 100%+ when momentum fades, record settlements."""
+    """Check open buys — sell at 30%+ when momentum fades, record settlements."""
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -195,113 +239,60 @@ def check_positions():
         pct = ((current_bid - entry_price) / entry_price) * 100
         last_seen = sf(trade.get('last_seen_bid'))
 
-        # Always update current_bid for dashboard tracking
+        # Update both current_bid and last_seen_bid for dashboard
         db.table('trades').update({
             'current_bid': float(current_bid),
+            'last_seen_bid': float(current_bid),
         }).eq('id', trade['id']).execute()
 
         if pct >= TAKE_PROFIT_PCT:
             if current_bid > last_seen and last_seen > 0:
-                # Still climbing — hold for more gains
                 logger.info(f"HOLD: {ticker} {side} +{pct:.0f}% — still climbing ({last_seen:.2f}->{current_bid:.2f})")
-                db.table('trades').update({'last_seen_bid': float(current_bid)}).eq('id', trade['id']).execute()
             else:
-                # Peaked or dropping — sell now
                 sell(trade, current_bid, f"TAKE PROFIT +{pct:.0f}% peaked ({entry_price:.2f}->{current_bid:.2f})")
-        else:
-            # Not at threshold yet, update last_seen_bid
-            db.table('trades').update({'last_seen_bid': float(current_bid)}).eq('id', trade['id']).execute()
-
-
-# === SCANNER ===
-
-def try_buy(market, side, field, strategy, owned, trading_bal):
-    """Try to buy one side of a market if cheap and not owned. Returns (bought, cost)."""
-    ticker = market.get('ticker', '')
-    ask = float(market.get(field, '0') or '0')
-    cost = ask * BUY_COUNT
-    if MIN_PRICE <= ask <= MAX_PRICE and (ticker, side) not in owned:
-        if cost <= trading_bal:
-            if buy(ticker, side, ask, strategy, f"{strategy.title()}: {side.upper()} @ ${ask:.2f}"):
-                owned.add((ticker, side))
-                return True, cost
-    return False, 0
-
-
-def count_cheap(markets):
-    """Count markets with at least one side priced 3-15¢. API already filters status=open."""
-    cheap = []
-    for m in markets:
-        if 'KXMVE' in m.get('ticker', ''):
-            continue
-        yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
-        no_ask = float(m.get('no_ask_dollars', '0') or '0')
-        if (MIN_PRICE <= yes_ask <= MAX_PRICE) or (MIN_PRICE <= no_ask <= MAX_PRICE):
-            cheap.append(m)
-    return cheap
-
-
-def scan_and_buy():
-    """Scan crypto and weather markets. Buy cheap contracts."""
-    trading_bal, _ = get_balance()
-    logger.info(f"Paper balance: ${trading_bal:.2f}")
-
-    open_positions = db.table('trades').select('ticker,side') \
-        .eq('action', 'buy').is_('pnl', 'null').execute()
-    owned = {(t['ticker'], t['side']) for t in (open_positions.data or [])}
-    logger.info(f"Already own {len(owned)} positions")
-    bought = 0
-
-    def scan_markets(markets, strategy):
-        nonlocal trading_bal, bought
-        for market in markets:
-            ticker = market.get('ticker', '')
-            if 'KXMVE' in ticker:
-                continue
-            for side, field in [('yes', 'yes_ask_dollars'), ('no', 'no_ask_dollars')]:
-                ok, cost = try_buy(market, side, field, strategy, owned, trading_bal)
-                if ok:
-                    trading_bal -= cost
-                    bought += 1
-
-    # Priority 1: Crypto 15-min
-    for series in CRYPTO_SERIES:
-        markets = get_series_markets(series)
-        cheap = count_cheap(markets)
-        logger.info(f"Crypto {series}: {len(markets)} mkts, {len(cheap)} cheap")
-        scan_markets(markets, 'crypto')
-
-    # Priority 2: Weather
-    weather_total = 0
-    weather_cheap_total = 0
-    for series in WEATHER_SERIES:
-        markets = get_series_markets(series)
-        weather_total += len(markets)
-        if not markets:
-            continue
-        cheap = count_cheap(markets)
-        weather_cheap_total += len(cheap)
-        if cheap:
-            logger.info(f"Weather {series}: {len(markets)} mkts, {len(cheap)} cheap")
-        scan_markets(markets, 'weather')
-
-    logger.info(f"Weather total: {weather_total} mkts, {weather_cheap_total} cheap")
-    logger.info(f"Scan complete: bought {bought} contracts, balance now ${trading_bal:.2f}")
+        # No stop loss — hold until pump or expiry
 
 
 # === MAIN CYCLE ===
 
 def run_cycle():
-    logger.info("=== CYCLE START ===")
+    trading_bal, _ = get_balance()
+    logger.info(f"=== CYCLE START === Balance: ${trading_bal:.2f}")
 
+    # 1. Check positions (sell winners, record settlements)
     try:
         check_positions()
     except Exception as e:
         logger.error(f"Position check error: {e}")
+
+    # 2. Refresh balance after sells
+    trading_bal, _ = get_balance()
+    owned = get_owned()
+    logger.info(f"Own {len(owned)} positions, balance ${trading_bal:.2f}")
+
+    # 3. Scan all markets and buy cheap ones
     try:
-        scan_and_buy()
+        cheap = scan_all_markets()
+        bought = 0
+        for signal in cheap:
+            cost = signal['price'] * BUY_COUNT
+            if cost > trading_bal:
+                continue
+            if bought >= MAX_BUYS_PER_CYCLE:
+                break
+            if (signal['ticker'], signal['side']) in owned:
+                continue
+
+            if buy(signal['ticker'], signal['side'], signal['price'],
+                   signal['strategy'], signal['reason']):
+                owned.add((signal['ticker'], signal['side']))
+                trading_bal -= cost
+                bought += 1
+
+        logger.info(f"Bought {bought} contracts, balance now ${trading_bal:.2f}")
     except Exception as e:
         logger.error(f"Scan error: {e}")
+
     logger.info("=== CYCLE END ===")
 
 
@@ -318,7 +309,6 @@ DASHBOARD_HTML = """
         .panel { background: #1a1a2e; border-radius: 8px; padding: 20px; margin: 10px 0; }
         .green { color: #2ecc71; }
         .red { color: #e74c3c; }
-        .yellow { color: #f1c40f; }
         h1 { color: #e63946; }
         h2 { color: #457b9d; margin: 0 0 10px 0; }
         table { width: 100%; border-collapse: collapse; margin: 10px 0; }
@@ -408,7 +398,6 @@ def dashboard():
         open_count = sum(1 for t in trades if t['action'] == 'buy' and t.get('pnl') is None)
         win_rate = round(wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
 
-        # Strategy breakdown
         strat_names = ['crypto', 'trending', 'weather']
         strategies = []
         for name in strat_names:
@@ -458,13 +447,13 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — paper trading, 30s cycles")
-    # Clean up test rows from debugging
+    logger.info("Bot starting — paper trading, 30s cycles, scan ALL markets")
+    # Clean up test rows
     try:
         db.table('trades').delete().eq('strategy', 'test').execute()
         logger.info("Cleaned up test trades")
-    except Exception as e:
-        logger.error(f"Test cleanup failed: {e}")
+    except:
+        pass
     while True:
         try:
             run_cycle()
