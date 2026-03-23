@@ -1,6 +1,6 @@
 import os, time, logging, math, requests, traceback
 from datetime import datetime, timezone
-from flask import Flask, render_template_string
+from flask import Flask, render_template_string, jsonify
 from threading import Thread
 from supabase import create_client
 from kalshi_auth import KalshiAuth
@@ -698,78 +698,19 @@ def run_cycle():
 
 # === DASHBOARD ===
 
-DASHBOARD_HTML = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Kalshi Scalp Bot</title>
-    <meta http-equiv="refresh" content="30">
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace; padding: 20px; }
-        .header { text-align: center; margin-bottom: 20px; }
-        .header h1 { color: #ffaa00; font-size: 24px; }
-        .header .subtitle { color: #666; font-size: 12px; }
-        .stats { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
-        .stat-box { background: #12121a; border: 1px solid #222; border-radius: 8px; padding: 12px; flex: 1; min-width: 100px; text-align: center; }
-        .stat-label { color: #666; font-size: 10px; text-transform: uppercase; }
-        .stat-value { font-size: 20px; font-weight: bold; margin-top: 4px; }
-        .green { color: #00ff88; }
-        .red { color: #ff4444; }
-        .yellow { color: #ffaa00; }
-        .gray { color: #555; }
-        .section { background: #12121a; border: 1px solid #222; border-radius: 8px; padding: 15px; margin-bottom: 15px; }
-        .section h2 { color: #ffaa00; font-size: 14px; margin-bottom: 10px; text-transform: uppercase; }
-        table { width: 100%; border-collapse: collapse; font-size: 12px; }
-        th { color: #666; text-align: left; padding: 6px 8px; border-bottom: 1px solid #333; text-transform: uppercase; font-size: 10px; }
-        td { padding: 6px 8px; border-bottom: 1px solid #1a1a2e; }
-        tr:hover { background: #1a1a2e; }
-        .badge { padding: 2px 8px; border-radius: 4px; font-size: 10px; font-weight: bold; }
-        .badge-buy { background: #003300; color: #00ff88; }
-        .badge-sell { background: #330000; color: #ff4444; }
-        .badge-settled { background: #222; color: #888; }
-        .badge-crypto { background: #332200; color: #ffaa00; }
-        .badge-mm { background: #220033; color: #ff6600; }
-        .badge-unknown { background: #222; color: #888; }
-    </style>
-</head>
-<body>
-    <div class="header">
-        <h1>SCALP BOT</h1>
-        <div class="subtitle">LIVE — 30s cycles — Crypto + March Madness — 50% sell + momentum riding + 5-min expiry exit + 20% banking</div>
-    </div>
-    <div class="stats">
-        <div class="stat-box"><div class="stat-label">Balance</div><div class="stat-value green">${{balance}}</div></div>
-        <div class="stat-box"><div class="stat-label">Trading</div><div class="stat-value yellow">${{trading_bal}}</div></div>
-        <div class="stat-box"><div class="stat-label">Saved (20%)</div><div class="stat-value green">${{saved_bal}}</div></div>
-        <div class="stat-box"><div class="stat-label">Realized P&L</div><div class="stat-value {{'green' if rpnl >= 0 else 'red'}}">${{rpnl_fmt}}</div></div>
-        <div class="stat-box"><div class="stat-label">Open</div><div class="stat-value">{{total_open}}</div></div>
-        <div class="stat-box"><div class="stat-label">Deployed</div><div class="stat-value yellow">${{deployed}}</div></div>
-        <div class="stat-box"><div class="stat-label">Record</div><div class="stat-value"><span class="green">{{wins}}W</span>/<span class="red">{{losses}}L</span></div></div>
-    </div>
-    <div class="section">
-        <h2>Positions & Trades</h2>
-        <table>
-            <tr><th>Time</th><th>Action</th><th>Type</th><th>Ticker</th><th>Side</th><th>Cnt</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th></tr>
-            {% for t in trades %}
-            <tr>
-                <td>{{t.time}}</td>
-                <td><span class="badge badge-{{t.cls}}">{{t.action}}</span></td>
-                <td><span class="badge badge-{{t.strat_cls}}">{{t.strat_label}}</span></td>
-                <td style="font-size:10px">{{t.ticker}}</td>
-                <td>{{t.side}}</td>
-                <td>{{t.count}}</td>
-                <td>${{"%.2f"|format(t.entry)}}</td>
-                <td>{% if t.current > 0 %}${{"%.2f"|format(t.current)}}{% else %}—{% endif %}</td>
-                <td class="{{t.color}}">{{"$%.4f"|format(t.pnl) if t.pnl != 0 else "—"}}</td>
-                <td class="{{t.color}}">{{"%.0f"|format(t.pct) if t.pct != 0 else "—"}}%</td>
-            </tr>
-            {% endfor %}
-        </table>
-    </div>
-</body>
-</html>
-"""
+def categorize_ticker(ticker):
+    if '15M' in ticker:
+        return '15-min Crypto'
+    elif 'KXBTCD' in ticker or 'KXETHD' in ticker or 'KXSOLD' in ticker:
+        return 'Hourly Direction'
+    elif any(x in ticker for x in ['KXBTC-', 'KXETH-', 'KXSOL-']):
+        return 'Hourly Bracket'
+    elif any(x in ticker for x in ['NCAA', 'KXMARMAD', 'KXCBB', 'KXMM']):
+        return 'March Madness'
+    elif 'KXHIGH' in ticker or 'KXLOWT' in ticker:
+        return 'Weather'
+    else:
+        return 'Other'
 
 
 @app.route('/')
@@ -777,78 +718,386 @@ def health():
     return 'OK'
 
 
-@app.route('/dashboard')
-def dashboard():
+@app.route('/api/status')
+def api_status():
     try:
         balance = get_balance()
-        all_trades = db.table('trades').select('*').order('created_at', desc=True).limit(1000).execute()
-        trades = all_trades.data or []
-
-        total_open = 0
-        deployed = 0.0
-        wins = 0
-        losses = 0
-        rpnl = 0.0
-
-        for t in trades:
-            if t['action'] == 'buy' and t.get('pnl') is None:
-                total_open += 1
-                deployed += sf(t.get('price')) * (t.get('count') or 1)
-            elif t['action'] == 'sell':
-                # Sell records are the ONLY source of truth for P&L
-                p = sf(t.get('pnl'))
-                rpnl += p
-                if p > 0: wins += 1
-                elif p < 0: losses += 1
-
-        display = []
-        for t in trades:
-            action = t['action']
-            if action not in ('buy', 'sell'):
-                continue
-            price = sf(t.get('price'))
-            pnl_val = sf(t.get('pnl')) if t.get('pnl') is not None else 0
-            count = int(t.get('count') or 1)
-            current = sf(t.get('current_bid')) or sf(t.get('last_seen_bid'))
-
-            strat = t.get('strategy', 'crypto')
-            strat_cls = 'mm' if strat == 'mm_scalp' else 'crypto'
-            strat_label = 'MM' if strat == 'mm_scalp' else 'CRYPTO'
-
-            if action == 'sell':
-                exit_p = price
-                entry = exit_p - (pnl_val / count) if count else exit_p
-                pct = sf(t.get('sell_gain_pct')) or ((exit_p - entry) / entry * 100 if entry > 0 else 0)
-                color = 'green' if pnl_val > 0 else 'red' if pnl_val < 0 else 'gray'
-                display.append({'time': (t.get('created_at') or '')[-8:], 'action': 'SELL',
-                    'cls': 'sell', 'strat_cls': strat_cls, 'strat_label': strat_label,
-                    'ticker': t.get('ticker',''), 'side': t.get('side',''),
-                    'count': count, 'entry': entry, 'current': exit_p,
-                    'pnl': pnl_val, 'pct': pct, 'color': color})
-            elif action == 'buy' and t.get('pnl') is None:
-                pnl_val = (current - price) * count if current > 0 else 0
-                pct = ((current - price) / price * 100) if price > 0 and current > 0 else 0
-                color = 'green' if pnl_val > 0 else 'red' if pnl_val < 0 else 'gray'
-                display.append({'time': (t.get('created_at') or '')[-8:], 'action': 'BUY',
-                    'cls': 'buy', 'strat_cls': strat_cls, 'strat_label': strat_label,
-                    'ticker': t.get('ticker',''), 'side': t.get('side',''),
-                    'count': count, 'entry': price, 'current': current,
-                    'pnl': pnl_val, 'pct': pct, 'color': color})
-            # Resolved buys (pnl set) — skip, sell record shows the result
-
         saved = get_saved_balance()
         trading = max(0.0, balance - saved)
 
-        return render_template_string(DASHBOARD_HTML,
-            balance=f"{balance:.2f}",
-            trading_bal=f"{trading:.2f}",
-            saved_bal=f"{saved:.2f}",
-            rpnl=rpnl, rpnl_fmt=f"{rpnl:.4f}",
-            total_open=total_open, deployed=f"{deployed:.2f}",
-            wins=wins, losses=losses, trades=display)
+        sells = db.table('trades').select('pnl') \
+            .eq('action', 'sell').not_.is_('pnl', 'null').execute()
+        sell_data = sells.data or []
+        net_pnl = sum(sf(t['pnl']) for t in sell_data)
+        wins = sum(1 for t in sell_data if sf(t['pnl']) > 0)
+        losses = sum(1 for t in sell_data if sf(t['pnl']) < 0)
+
+        open_buys = db.table('trades').select('id') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        open_count = len(open_buys.data or [])
+
+        return jsonify({
+            'balance': round(balance, 2),
+            'trading': round(trading, 2),
+            'saved': round(saved, 4),
+            'net_pnl': round(net_pnl, 4),
+            'wins': wins,
+            'losses': losses,
+            'open_count': open_count,
+        })
     except Exception as e:
-        logger.error(f"Dashboard error: {e}")
-        return f"Dashboard error: {e}<br><pre>{traceback.format_exc()}</pre>"
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/trades')
+def api_trades():
+    try:
+        result = db.table('trades').select('*') \
+            .order('created_at', desc=True).limit(200).execute()
+        return jsonify(result.data or [])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/categories')
+def api_categories():
+    try:
+        sells = db.table('trades').select('ticker,pnl,sell_gain_pct') \
+            .eq('action', 'sell').not_.is_('pnl', 'null').execute()
+
+        cats = {}
+        for t in (sells.data or []):
+            cat = categorize_ticker(t.get('ticker', ''))
+            if cat not in cats:
+                cats[cat] = {'wins': 0, 'losses': 0, 'pnl': 0.0, 'win_pcts': []}
+            p = sf(t['pnl'])
+            cats[cat]['pnl'] += p
+            if p > 0:
+                cats[cat]['wins'] += 1
+                cats[cat]['win_pcts'].append(sf(t.get('sell_gain_pct')))
+            elif p < 0:
+                cats[cat]['losses'] += 1
+
+        result = []
+        for name, data in cats.items():
+            avg_win = (sum(data['win_pcts']) / len(data['win_pcts'])) if data['win_pcts'] else 0
+            result.append({
+                'name': name,
+                'wins': data['wins'],
+                'losses': data['losses'],
+                'pnl': round(data['pnl'], 4),
+                'avg_win_pct': round(avg_win, 1),
+            })
+        result.sort(key=lambda x: x['pnl'], reverse=True)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/open')
+def api_open():
+    try:
+        result = db.table('trades').select('*') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        positions = []
+        for t in (result.data or []):
+            price = sf(t.get('price'))
+            current = sf(t.get('current_bid')) or sf(t.get('last_seen_bid'))
+            count = int(t.get('count') or 1)
+            if current and current > 0 and price > 0:
+                unrealized = round((current - price) * count, 4)
+                gain_pct = round(((current - price) / price) * 100, 1)
+            else:
+                unrealized = 0
+                gain_pct = 0
+            positions.append({
+                'ticker': t.get('ticker', ''),
+                'side': t.get('side', ''),
+                'count': count,
+                'entry': price,
+                'current_bid': current,
+                'unrealized': unrealized,
+                'gain_pct': gain_pct,
+                'strategy': t.get('strategy', 'crypto'),
+                'expired': current is None or current <= 0,
+            })
+        positions.sort(key=lambda x: x['gain_pct'], reverse=True)
+        return jsonify(positions)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/dashboard')
+def dashboard():
+    return DASHBOARD_HTML
+
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kalshi Scalp Bot — Command Center</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;color:#e0e0e0;font-family:'JetBrains Mono','Fira Code',monospace;padding:16px 20px;font-size:13px}
+a{color:#4488ff;text-decoration:none}
+.header{text-align:center;margin-bottom:18px;padding:12px 0;border-bottom:1px solid #222}
+.header h1{color:#ffaa00;font-size:22px;letter-spacing:3px;margin-bottom:4px}
+.header .sub{color:#555;font-size:11px}
+.header .live-dot{display:inline-block;width:8px;height:8px;background:#00ff88;border-radius:50%;margin-right:6px;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.metrics-row{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:14px}
+.metric-card{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:14px 10px;text-align:center;transition:border-color .2s}
+.metric-card:hover{border-color:#333}
+.metric-card .label{color:#666;font-size:9px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.metric-card .value{font-size:22px;font-weight:700}
+.category-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px}
+.cat-card{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:12px;transition:border-color .2s}
+.cat-card:hover{border-color:#333}
+.cat-card .cat-name{font-size:11px;font-weight:700;margin-bottom:6px;color:#4488ff}
+.cat-card .cat-record{font-size:10px;color:#888;margin-bottom:4px}
+.cat-card .cat-pnl{font-size:16px;font-weight:700}
+.cat-card .cat-avg{font-size:9px;color:#666;margin-top:2px}
+.panels-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.panel{background:#111;border:1px solid #1a1a1a;border-radius:6px;overflow:hidden}
+.panel-header{padding:10px 14px;border-bottom:1px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center}
+.panel-header h2{color:#ffaa00;font-size:12px;text-transform:uppercase;letter-spacing:1px}
+.panel-header .count{color:#555;font-size:11px}
+.panel-body{max-height:400px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{color:#555;text-align:left;padding:6px 8px;border-bottom:1px solid #222;text-transform:uppercase;font-size:9px;letter-spacing:.5px;position:sticky;top:0;background:#111}
+td{padding:5px 8px;border-bottom:1px solid #141414}
+tr.row-green{background:rgba(0,255,136,.04)}
+tr.row-red{background:rgba(255,68,68,.04)}
+tr.row-yellow{background:rgba(255,170,0,.04)}
+tr:hover{background:#1a1a1a !important}
+.green{color:#00ff88}.red{color:#ff4444}.yellow{color:#ffaa00}.blue{color:#4488ff}.gray{color:#555}
+.badge{padding:2px 6px;border-radius:3px;font-size:9px;font-weight:700}
+.badge-win{background:#002211;color:#00ff88}
+.badge-loss{background:#220000;color:#ff4444}
+.badge-expired{background:#221100;color:#ff4444;font-size:9px}
+.equity-section{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:14px}
+.equity-section h2{color:#ffaa00;font-size:12px;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
+#equity-chart{width:100%;height:120px}
+.footer{text-align:center;color:#333;font-size:9px;margin-top:12px}
+.loading{color:#555;text-align:center;padding:20px}
+.panel-body::-webkit-scrollbar{width:4px}
+.panel-body::-webkit-scrollbar-track{background:#111}
+.panel-body::-webkit-scrollbar-thumb{background:#333;border-radius:2px}
+
+@media(max-width:900px){
+.metrics-row{grid-template-columns:repeat(3,1fr)}
+.panels-row{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>KALSHI SCALP BOT</h1>
+  <div class="sub"><span class="live-dot"></span>LIVE Trading &mdash; 30s cycles &mdash; BTC/ETH/SOL + March Madness &mdash; v4</div>
+</div>
+
+<div class="metrics-row" id="metrics">
+  <div class="metric-card"><div class="label">Balance</div><div class="value" id="m-balance">...</div></div>
+  <div class="metric-card"><div class="label">Net P&amp;L</div><div class="value" id="m-pnl">...</div></div>
+  <div class="metric-card"><div class="label">Saved (Banked)</div><div class="value" id="m-saved">...</div></div>
+  <div class="metric-card"><div class="label">Open Positions</div><div class="value" id="m-open">...</div></div>
+  <div class="metric-card"><div class="label">Record</div><div class="value" id="m-record">...</div></div>
+</div>
+
+<div class="category-row" id="categories">
+  <div class="cat-card"><div class="loading">Loading categories...</div></div>
+</div>
+
+<div class="panels-row">
+  <div class="panel">
+    <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
+    <div class="panel-body"><table><thead><tr>
+      <th>Ticker</th><th>Side</th><th>Cnt</th><th>Entry</th><th>Bid</th><th>Unreal P&amp;L</th><th>Gain%</th>
+    </tr></thead><tbody id="open-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
+    <div class="panel-body"><table><thead><tr>
+      <th>Time</th><th>Ticker</th><th>Side</th><th>Cnt</th><th>Entry</th><th>P&amp;L</th><th>Gain%</th>
+    </tr></thead><tbody id="trades-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
+  </div>
+</div>
+
+<div class="equity-section">
+  <h2>Equity Curve</h2>
+  <canvas id="equity-chart"></canvas>
+</div>
+
+<div class="footer">Auto-refresh every 15s &mdash; Last update: <span id="last-update">—</span></div>
+
+<script>
+function $(id){return document.getElementById(id)}
+function fmt(v,d){return (v>=0?'':'')+'$'+Math.abs(v).toFixed(d||2)}
+function cls(v){return v>0?'green':v<0?'red':'gray'}
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
+
+async function fetchJSON(url){
+  try{var r=await fetch(url);return await r.json()}
+  catch(e){console.error(url,e);return null}
+}
+
+async function refresh(){
+  var [status,cats,open,trades]=await Promise.all([
+    fetchJSON('/api/status'),
+    fetchJSON('/api/categories'),
+    fetchJSON('/api/open'),
+    fetchJSON('/api/trades')
+  ]);
+
+  // Metrics
+  if(status&&!status.error){
+    $('m-balance').textContent='$'+status.balance.toFixed(2);
+    $('m-balance').className='value green';
+
+    var pnl=status.net_pnl;
+    $('m-pnl').textContent=(pnl>=0?'+':'')+pnl.toFixed(2);
+    $('m-pnl').className='value '+cls(pnl);
+
+    $('m-saved').textContent='$'+status.saved.toFixed(2);
+    $('m-saved').className='value green';
+
+    $('m-open').textContent=status.open_count;
+    $('m-open').className='value yellow';
+
+    $('m-record').innerHTML='<span class="green">'+status.wins+'W</span> / <span class="red">'+status.losses+'L</span>';
+  }
+
+  // Categories
+  if(cats&&!cats.error){
+    var h='';
+    cats.forEach(function(c){
+      var pc=cls(c.pnl);
+      h+='<div class="cat-card">';
+      h+='<div class="cat-name">'+esc(c.name)+'</div>';
+      h+='<div class="cat-record"><span class="green">'+c.wins+'W</span> / <span class="red">'+c.losses+'L</span></div>';
+      h+='<div class="cat-pnl '+pc+'">'+(c.pnl>=0?'+':'')+c.pnl.toFixed(2)+'</div>';
+      h+='<div class="cat-avg">Avg win: '+c.avg_win_pct.toFixed(0)+'%</div>';
+      h+='</div>';
+    });
+    $('categories').innerHTML=h||'<div class="cat-card"><div class="loading">No data</div></div>';
+  }
+
+  // Open positions
+  if(open&&!open.error){
+    $('open-count').textContent=open.length+' positions';
+    var h='';
+    open.forEach(function(p){
+      var rc=p.gain_pct>2?'row-green':p.gain_pct<-2?'row-red':'row-yellow';
+      var gc=cls(p.gain_pct);
+      h+='<tr class="'+rc+'">';
+      h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
+      h+='<td>'+esc(p.side)+'</td>';
+      h+='<td>'+p.count+'</td>';
+      h+='<td>$'+p.entry.toFixed(2)+'</td>';
+      if(p.expired){
+        h+='<td><span class="badge badge-expired">EXPIRED</span></td>';
+      }else{
+        h+='<td>$'+(p.current_bid||0).toFixed(2)+'</td>';
+      }
+      h+='<td class="'+gc+'">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(4)+'</td>';
+      h+='<td class="'+gc+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
+      h+='</tr>';
+    });
+    $('open-body').innerHTML=h||'<tr><td colspan="7" class="gray" style="text-align:center">No open positions</td></tr>';
+  }
+
+  // Recent completed trades
+  if(trades&&!trades.error){
+    var completed=trades.filter(function(t){return t.action==='sell'&&t.pnl!==null&&t.pnl!==0});
+    $('trades-count').textContent=completed.length+' trades';
+    var h='';
+    completed.slice(0,50).forEach(function(t){
+      var p=t.pnl||0;
+      var pc=cls(p);
+      var rc=p>0?'row-green':'row-red';
+      var time=(t.created_at||'').replace('T',' ').substring(5,19);
+      var price=t.price||0;
+      var count=t.count||1;
+      var entry=price-(p/count);
+      var gainPct=t.sell_gain_pct||0;
+      h+='<tr class="'+rc+'">';
+      h+='<td>'+esc(time)+'</td>';
+      h+='<td style="font-size:10px">'+esc(t.ticker||'')+'</td>';
+      h+='<td>'+esc(t.side||'')+'</td>';
+      h+='<td>'+count+'</td>';
+      h+='<td>$'+entry.toFixed(2)+'</td>';
+      h+='<td class="'+pc+'">'+(p>=0?'+':'')+p.toFixed(4)+'</td>';
+      h+='<td class="'+pc+'">'+(gainPct>=0?'+':'')+gainPct.toFixed(0)+'%</td>';
+      h+='</tr>';
+    });
+    $('trades-body').innerHTML=h||'<tr><td colspan="7" class="gray" style="text-align:center">No completed trades</td></tr>';
+
+    // Equity curve
+    drawEquity(completed);
+  }
+
+  $('last-update').textContent=new Date().toLocaleTimeString();
+}
+
+function drawEquity(trades){
+  var canvas=$('equity-chart');
+  if(!canvas)return;
+  var ctx=canvas.getContext('2d');
+  var W=canvas.parentElement.clientWidth-28;
+  var H=120;
+  canvas.width=W;canvas.height=H;
+  ctx.clearRect(0,0,W,H);
+
+  // Build cumulative P&L (trades are newest-first, reverse)
+  var sorted=trades.slice().reverse();
+  var cumulative=[0];
+  var running=0;
+  sorted.forEach(function(t){running+=(t.pnl||0);cumulative.push(running)});
+
+  if(cumulative.length<2)return;
+
+  var min=Math.min.apply(null,cumulative);
+  var max=Math.max.apply(null,cumulative);
+  var range=max-min||1;
+  var pad=10;
+
+  // Zero line
+  var zeroY=H-pad-((0-min)/range)*(H-2*pad);
+  ctx.strokeStyle='#222';ctx.lineWidth=1;
+  ctx.beginPath();ctx.moveTo(0,zeroY);ctx.lineTo(W,zeroY);ctx.stroke();
+
+  // Equity line
+  ctx.strokeStyle=running>=0?'#00ff88':'#ff4444';
+  ctx.lineWidth=1.5;
+  ctx.beginPath();
+  for(var i=0;i<cumulative.length;i++){
+    var x=(i/(cumulative.length-1))*W;
+    var y=H-pad-((cumulative[i]-min)/range)*(H-2*pad);
+    if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+  }
+  ctx.stroke();
+
+  // Fill under curve
+  ctx.lineTo(W,H);ctx.lineTo(0,H);ctx.closePath();
+  ctx.fillStyle=running>=0?'rgba(0,255,136,.06)':'rgba(255,68,68,.06)';
+  ctx.fill();
+
+  // Labels
+  ctx.fillStyle='#555';ctx.font='9px JetBrains Mono,monospace';
+  ctx.fillText('$'+max.toFixed(2),4,pad+6);
+  ctx.fillText('$'+min.toFixed(2),4,H-4);
+  ctx.fillText('$'+running.toFixed(2)+' net',W-80,pad+6);
+}
+
+refresh();
+setInterval(refresh,15000);
+</script>
+</body>
+</html>"""
 
 
 # === MAIN ===
