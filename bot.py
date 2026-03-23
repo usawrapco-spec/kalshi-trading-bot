@@ -329,9 +329,13 @@ def find_buy_candidates(markets):
             elif yes_bid <= 0 and no_bid <= 0:
                 no_bid += 1
 
-    candidates.sort(key=lambda x: x['volume'], reverse=True)
+    # Crypto first (proven 19W/0L), then others — each pool sorted by volume
+    crypto_pats = ['KXBTC', 'KXETH', 'KXSOL']
+    crypto = sorted([c for c in candidates if any(p in c['ticker'] for p in crypto_pats)], key=lambda x: x['volume'], reverse=True)
+    other = sorted([c for c in candidates if not any(p in c['ticker'] for p in crypto_pats)], key=lambda x: x['volume'], reverse=True)
+    candidates = crypto + other
     total = len(markets)
-    logger.info(f"FILTER: {total} total | {blocked} blocked | {wrong_price} price out | {no_bid} no bid | {len(candidates)} candidates")
+    logger.info(f"FILTER: {total} total | {blocked} blocked | {wrong_price} price out | {no_bid} no bid | {len(candidates)} candidates ({len(crypto)} crypto, {len(other)} other)")
 
     # Log first 10 candidates
     for c in candidates[:10]:
@@ -466,6 +470,7 @@ def check_sells():
         logger.info("No open positions")
         return
 
+    logger.info(f"Checking {len(open_buys.data)} open positions:")
     sold = 0
     settled = 0
 
@@ -554,6 +559,7 @@ def check_sells():
             continue
 
         gain_pct = ((current_bid - entry_price) / entry_price) * 100
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
         # Update current price in DB
         try:
