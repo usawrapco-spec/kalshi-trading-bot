@@ -1,4 +1,4 @@
-import os, time, logging, requests, traceback
+import os, time, logging, math, requests, traceback
 from flask import Flask, render_template_string
 from threading import Thread
 from supabase import create_client
@@ -241,11 +241,19 @@ def buy(ticker, side, price, strategy, reason):
         return False
 
 
+def kalshi_fee(price):
+    """Taker fee per contract: ceil(0.07 * price * (1-price) * 100) / 100"""
+    return math.ceil(0.07 * price * (1 - price) * 100) / 100
+
+
 def sell(trade, current_bid, reason):
     entry_price = sf(trade['price'])
-    pnl = round((current_bid - entry_price) * (trade['count'] or 1), 4)
+    count = trade['count'] or 1
+    buy_fee = kalshi_fee(entry_price)
+    sell_fee = kalshi_fee(current_bid)
+    pnl = round((current_bid - entry_price - buy_fee - sell_fee) * count, 4)
 
-    logger.info(f"SELL: {trade['ticker']} {trade['side']} @ ${current_bid:.2f} | P&L: ${pnl:.4f} | {reason}")
+    logger.info(f"SELL: {trade['ticker']} {trade['side']} @ ${current_bid:.2f} | fees: ${buy_fee:.2f}+${sell_fee:.2f} | P&L: ${pnl:.4f} | {reason}")
     try:
         db.table('trades').insert({
             'ticker': trade['ticker'], 'side': trade['side'], 'action': 'sell',
