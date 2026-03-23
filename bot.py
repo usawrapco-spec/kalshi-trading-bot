@@ -246,6 +246,8 @@ def clear_non_btcd():
 # Fast scalper: sell at +25% instantly, or sell any profit after 10s timeout.
 
 entry_times = {}  # trade_id -> first_seen_timestamp
+last_bids = {}    # trade_id -> last seen bid (to detect price movement)
+price_moved = {}  # trade_id -> True if bid changed before 10s
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
     if current_bid <= 0 or entry_price <= 0:
@@ -256,20 +258,35 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_i
     # Track when we first saw this position
     if trade_id not in entry_times:
         entry_times[trade_id] = now
+        last_bids[trade_id] = current_bid
 
     age = now - entry_times[trade_id]
 
+    # Detect price movement before 10s
+    if age < 10 and current_bid != last_bids.get(trade_id):
+        price_moved[trade_id] = True
+    last_bids[trade_id] = current_bid
+
     # Up 25%+ at any time — sell, great trade
     if gain_pct >= 25:
-        if trade_id in entry_times:
-            del entry_times[trade_id]
+        entry_times.pop(trade_id, None)
+        last_bids.pop(trade_id, None)
+        price_moved.pop(trade_id, None)
         return True, count, f"WIN +{gain_pct:.0f}%"
 
     # 10 seconds old + profitable but under 25% — sell, move on
-    if age >= 10 and gain_pct > 0:
-        if trade_id in entry_times:
-            del entry_times[trade_id]
+    if age >= 10 and gain_pct > 0 and not price_moved.get(trade_id):
+        entry_times.pop(trade_id, None)
+        last_bids.pop(trade_id, None)
+        price_moved.pop(trade_id, None)
         return True, count, f"TIMEOUT +{gain_pct:.0f}% ({age:.0f}s)"
+
+    # Price moved before 10s — let it ride but hard cap at 30s
+    if price_moved.get(trade_id) and age >= 30 and gain_pct > 0:
+        entry_times.pop(trade_id, None)
+        last_bids.pop(trade_id, None)
+        price_moved.pop(trade_id, None)
+        return True, count, f"MOVED CAP +{gain_pct:.0f}% ({age:.0f}s)"
 
     # Expiry save
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
