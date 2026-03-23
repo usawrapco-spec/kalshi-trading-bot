@@ -307,6 +307,17 @@ def find_buy_candidates(markets):
             blocked += 1
             continue
 
+        # Skip contracts expiring in < 30 min
+        close_time = market.get('close_time')
+        if close_time:
+            try:
+                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                secs_left = (close_dt - datetime.now(timezone.utc)).total_seconds()
+                if secs_left < 1800:
+                    continue
+            except:
+                pass
+
         yes_ask = sf(market.get('yes_ask_dollars', '0'))
         yes_bid = sf(market.get('yes_bid_dollars', '0'))
         no_ask = sf(market.get('no_ask_dollars', '0'))
