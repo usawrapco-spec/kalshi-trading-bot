@@ -305,12 +305,12 @@ def find_buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars', '0') or '0')
         no_bid = float(market.get('no_bid_dollars', '0') or '0')
 
-        if 0.03 <= yes_ask <= 0.20 and yes_bid >= yes_ask * 0.70:
+        if 0.03 <= yes_ask <= 0.20 and yes_bid >= yes_ask * 0.90:
             candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid})
-        if 0.03 <= no_ask <= 0.20 and no_bid >= no_ask * 0.70:
+        if 0.03 <= no_ask <= 0.20 and no_bid >= no_ask * 0.90:
             candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid})
 
-    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (block monthly/weekly, 3-20c, 70% spread)")
+    logger.info(f"Filter: {len(markets)} markets -> {len(candidates)} candidates (block monthly/weekly, 3-20c, 90% spread)")
     return candidates
 
 
@@ -991,7 +991,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
-  <div class="status-item">Buy: 3-20c, 70% spread</div>
+  <div class="status-item">Buy: 3-20c, 90% spread</div>
   <div class="status-item">Strategy: random exit 30%+</div>
   <div class="status-item">Expiry exit: 5min</div>
   <div class="status-item">Max: 5 contracts</div>
