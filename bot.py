@@ -22,7 +22,7 @@ PORT = int(os.environ.get('PORT', 8080))
 # === SETTINGS ===
 MIN_PRICE = 0.03
 MAX_PRICE = 0.20
-CYCLE_SECONDS = 30
+CYCLE_SECONDS = 10
 MAX_CONTRACTS_PER_TRADE = 5
 MAX_BUYS_PER_CYCLE = 15
 MAX_DEPLOYMENT_PCT = 0.95
@@ -624,7 +624,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 30s cycles &mdash; buy 3-20c, sliding expiry save</div>
+  <div class="sub"><span class="live-dot"></span>CRYPTO SCALPER &mdash; 10s cycles &mdash; buy 3-20c, sliding expiry save</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
