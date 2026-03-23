@@ -79,18 +79,19 @@ def close_all_old_positions():
             if resolved:
                 logger.info(f"Fixed both-sides: resolved {resolved} duplicates")
 
-        # Resolve any non-crypto positions (trending/weather leftovers)
+        # Resolve any non-supported positions (trending/weather leftovers)
         all_open = db.table('trades').select('id,ticker,strategy') \
             .eq('action', 'buy').is_('pnl', 'null').execute()
         if all_open.data:
-            non_crypto = [t for t in all_open.data if t.get('strategy') != 'crypto']
-            for t in non_crypto:
+            valid_strategies = {'crypto', 'mm_scalp'}
+            stale = [t for t in all_open.data if t.get('strategy') not in valid_strategies]
+            for t in stale:
                 db.table('trades').update({
                     'pnl': 0.0,
-                    'reason': 'RESOLVED — crypto-only reset',
+                    'reason': 'RESOLVED — unsupported strategy reset',
                 }).eq('id', t['id']).execute()
-            if non_crypto:
-                logger.info(f"Resolved {len(non_crypto)} non-crypto positions")
+            if stale:
+                logger.info(f"Resolved {len(stale)} non-supported positions")
 
         logger.info("Startup cleanup complete")
     except Exception as e:
@@ -196,61 +197,153 @@ def place_order(ticker, side, action, price, count):
 # === CRYPTO ONLY ===
 
 CRYPTO_SERIES = [
-    # BTC first — the proven winners
-    'KXBTCD', 'KXBTC', 'KXBTC1H', 'KXBTC15M',
+    # BTC first — the proven winners (hourly only, 15M dropped — data says they lose)
+    'KXBTCD', 'KXBTC', 'KXBTC1H',
     # ETH — brackets work well
-    'KXETHD', 'KXETH', 'KXETH1H', 'KXETH15M',
+    'KXETHD', 'KXETH', 'KXETH1H',
     # SOL — weakest but keep for diversification
-    'KXSOLD', 'KXSOL', 'KXSOL1H', 'KXSOL15M',
+    'KXSOLD', 'KXSOL', 'KXSOL1H',
+]
+
+# === MARCH MADNESS ===
+
+MARCH_MADNESS_SERIES = [
+    'KXMARMAD', 'KXNCAAMB', 'KXNCAA', 'KXCBB', 'KXMM', 'KXMARCH',
+]
+
+BASKETBALL_KEYWORDS = [
+    'NCAA', 'March Madness', 'championship', 'tournament',
+    'Sweet 16', 'Elite Eight', 'Final Four',
+    'Duke', 'Michigan', 'Arizona', 'Florida', 'Auburn',
+    'Houston', 'Iowa State', 'UConn', 'Tennessee', 'Alabama',
+    'Purdue', 'Kansas', 'Kentucky', 'Arkansas',
+    'Gonzaga', "St. John", 'Illinois',
 ]
 
 
 def fetch_all_crypto():
-    """Fetch all crypto markets — ~12 API calls, one per series."""
+    """Fetch all crypto markets — hourly only, 15M dropped."""
     markets = []
     for series in CRYPTO_SERIES:
         try:
             resp = kalshi_get(f"/markets?series_ticker={series}&status=open&limit=100")
-            markets.extend(resp.get('markets', []))
+            for m in resp.get('markets', []):
+                ticker = m.get('ticker', '')
+                if '15M' in ticker:
+                    continue  # 15-min contracts lose money — data proven
+                markets.append(m)
         except:
             pass
-    logger.info(f"Fetched {len(markets)} crypto markets from {len(CRYPTO_SERIES)} series")
+    logger.info(f"Fetched {len(markets)} crypto markets (hourly only)")
     return markets
+
+
+def fetch_march_madness():
+    """Find all March Madness markets via series tickers, keyword search, and events."""
+    mm_markets = []
+
+    # Method 1: Try known series tickers
+    for series in MARCH_MADNESS_SERIES:
+        try:
+            resp = kalshi_get(f"/markets?series_ticker={series}&status=open&limit=200")
+            found = resp.get('markets', [])
+            mm_markets.extend(found)
+            if found:
+                logger.info(f"Found {len(found)} markets in series {series}")
+        except:
+            continue
+
+    # Method 2: Keyword search across all open markets
+    if not mm_markets:
+        try:
+            resp = kalshi_get('/markets?status=open&limit=1000')
+            for m in resp.get('markets', []):
+                title = (m.get('title', '') + ' ' + m.get('subtitle', '')).lower()
+                if any(kw.lower() in title for kw in BASKETBALL_KEYWORDS):
+                    mm_markets.append(m)
+            if mm_markets:
+                logger.info(f"Found {len(mm_markets)} March Madness markets via keyword search")
+        except:
+            pass
+
+    # Method 3: Try events API
+    if not mm_markets:
+        try:
+            resp = kalshi_get('/events?status=open&with_nested_markets=true&limit=100')
+            for event in resp.get('events', []):
+                title = event.get('title', '').lower()
+                if any(kw.lower() in title for kw in ['ncaa', 'march madness', 'basketball', 'tournament', 'champion']):
+                    for m in event.get('markets', []):
+                        mm_markets.append(m)
+            if mm_markets:
+                logger.info(f"Found {len(mm_markets)} March Madness markets via events")
+        except:
+            pass
+
+    # Deduplicate by ticker
+    seen = set()
+    unique = []
+    for m in mm_markets:
+        t = m.get('ticker', '')
+        if t not in seen:
+            seen.add(t)
+            unique.append(m)
+    mm_markets = unique
+
+    # Log what we found for debugging
+    if mm_markets:
+        series_found = set(m.get('series_ticker', 'unknown') for m in mm_markets)
+        logger.info(f"MM series tickers: {series_found}")
+        logger.info(f"MM sample tickers: {[m['ticker'] for m in mm_markets[:10]]}")
+    else:
+        logger.info("No March Madness markets found")
+
+    return mm_markets
 
 
 # === BUY LOGIC ===
 
-def calculate_position_size(contract_price, available_balance):
+def calculate_position_size(contract_price, available_balance, volume=0, strategy='crypto'):
     """Deploy more capital per trade. Target 8% of balance per trade.
-    Cheap contracts = more contracts. Floor 3, cap 10."""
+    Cheap contracts = more contracts. Floor 3, cap 10.
+    For MM: cap at 5 if moderate volume (<500)."""
     target_spend = available_balance * 0.08
     if contract_price <= 0:
         return MIN_CONTRACTS_PER_TRADE
     max_contracts = int(target_spend / contract_price)
-    return max(MIN_CONTRACTS_PER_TRADE, min(max_contracts, MAX_CONTRACTS_PER_TRADE))
+    contracts = max(MIN_CONTRACTS_PER_TRADE, min(max_contracts, MAX_CONTRACTS_PER_TRADE))
+    if strategy == 'mm_scalp' and volume < 500:
+        contracts = min(contracts, 5)
+    return contracts
 
 
-def buy_priority(ticker):
-    """Lower = buy first. BTC daily is the money maker."""
+def buy_priority(ticker, strategy='crypto'):
+    """Lower = buy first. BTC daily is the money maker, MM is secondary."""
+    if strategy == 'mm_scalp':
+        return 8  # After all crypto
     if 'KXBTCD' in ticker: return 0
     if ticker.startswith('KXBTC-'): return 1
     if ticker.startswith('KXETH-'): return 2
-    if 'KXBTC15M' in ticker: return 3
-    if 'KXETHD' in ticker: return 4
-    if 'KXETH15M' in ticker: return 5
-    if 'KXSOL' in ticker: return 6
-    return 7
+    if 'KXETHD' in ticker: return 3
+    if 'KXSOL' in ticker: return 4
+    return 5
 
 
-def run_buys(markets):
+def run_buys(markets, strategy='crypto'):
     total_balance, trading_balance, saved_balance = get_trading_balance()
     owned = get_owned()
     num_open = len(owned)
-    logger.info(f"Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f}")
+    logger.info(f"[{strategy}] Own {num_open} tickers | trading=${trading_balance:.2f} saved=${saved_balance:.2f}")
 
     if num_open >= MAX_OPEN_POSITIONS:
         logger.info(f"At max open positions ({MAX_OPEN_POSITIONS}), skipping buys")
         return
+
+    # MM-specific: price range is wider (5-45c) and requires volume filter
+    min_price = 0.05 if strategy == 'mm_scalp' else MIN_PRICE
+    max_price = 0.45 if strategy == 'mm_scalp' else MAX_PRICE
+    max_spread = 0.12 if strategy == 'mm_scalp' else 1.0  # MM needs tight spreads
+    min_volume = 50 if strategy == 'mm_scalp' else 0
 
     buys = []
     for m in markets:
@@ -260,6 +353,11 @@ def run_buys(markets):
         if 'KXMVE' in ticker:
             continue
 
+        # Volume filter for MM
+        volume = sf(m.get('volume', 0)) or sf(m.get('volume_24h', 0))
+        if strategy == 'mm_scalp' and volume < min_volume:
+            continue
+
         yes_bid = float(m.get('yes_bid_dollars', '0') or '0')
         yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
         no_bid = float(m.get('no_bid_dollars', '0') or '0')
@@ -267,10 +365,14 @@ def run_buys(markets):
 
         # Collect liquid sides
         candidates = []
-        if yes_bid > 0 and yes_ask > 0 and MIN_PRICE <= yes_ask <= MAX_PRICE:
-            candidates.append(('yes', yes_ask, yes_bid, yes_ask - yes_bid))
-        if no_bid > 0 and no_ask > 0 and MIN_PRICE <= no_ask <= MAX_PRICE:
-            candidates.append(('no', no_ask, no_bid, no_ask - no_bid))
+        if yes_bid > 0 and yes_ask > 0 and min_price <= yes_ask <= max_price:
+            spread = yes_ask - yes_bid
+            if spread <= max_spread:
+                candidates.append(('yes', yes_ask, yes_bid, spread))
+        if no_bid > 0 and no_ask > 0 and min_price <= no_ask <= max_price:
+            spread = no_ask - no_bid
+            if spread <= max_spread:
+                candidates.append(('no', no_ask, no_bid, spread))
 
         if not candidates:
             continue
@@ -278,15 +380,16 @@ def run_buys(markets):
         # Pick side with tightest spread
         candidates.sort(key=lambda x: x[3])
         side, price, bid, spread = candidates[0]
-        count = calculate_position_size(price, trading_balance)
+        count = calculate_position_size(price, trading_balance, volume, strategy)
 
         buys.append({
             'ticker': ticker, 'side': side, 'price': price,
             'bid': bid, 'spread': spread, 'count': count,
+            'volume': volume, 'strategy': strategy,
         })
 
-    # Sort by priority (BTC daily first) then tightest spread
-    buys.sort(key=lambda x: (buy_priority(x['ticker']), x['spread']))
+    # Sort by priority then tightest spread
+    buys.sort(key=lambda x: (buy_priority(x['ticker'], x['strategy']), x['spread']))
 
     # Limits based on trading_balance (excludes saved/protected money)
     max_exposure = trading_balance * MAX_DEPLOYMENT_PCT
@@ -308,7 +411,6 @@ def run_buys(markets):
             break
         cost = b['price'] * b['count']
         if cost > max_per_trade:
-            # Try fewer contracts instead of skipping entirely
             affordable = int(max_per_trade / b['price'])
             if affordable < MIN_CONTRACTS_PER_TRADE:
                 continue
@@ -324,13 +426,14 @@ def run_buys(markets):
         if not order_id:
             continue
 
-        logger.info(f"BUY: {b['ticker']} {b['side']} x{b['count']} @ ${b['price']:.2f} (bid=${b['bid']:.2f} spread=${b['spread']:.2f})")
+        strat_label = 'MM' if strategy == 'mm_scalp' else 'CRYPTO'
+        logger.info(f"BUY [{strat_label}]: {b['ticker']} {b['side']} x{b['count']} @ ${b['price']:.2f} (bid=${b['bid']:.2f} spread=${b['spread']:.2f})")
         try:
             db.table('trades').insert({
                 'ticker': b['ticker'], 'side': b['side'], 'action': 'buy',
                 'price': float(b['price']), 'count': b['count'],
-                'strategy': 'crypto',
-                'reason': f"crypto: {b['side'].upper()} @ ${b['price']:.2f} bid=${b['bid']:.2f}",
+                'strategy': strategy,
+                'reason': f"{strat_label}: {b['side'].upper()} @ ${b['price']:.2f} bid=${b['bid']:.2f}",
                 'last_seen_bid': float(b['bid']),
                 'current_bid': float(b['bid']),
             }).execute()
@@ -342,7 +445,7 @@ def run_buys(markets):
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
 
-    logger.info(f"Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
+    logger.info(f"[{strategy}] Bought {bought}, spent ${cycle_spent:.2f}, trading=${trading_balance:.2f}, deployed ${current_deployed:.2f}/{max_exposure:.2f}")
 
 
 # === SELL LOGIC — ADAPTIVE THRESHOLD, HANDLE SETTLEMENTS ===
@@ -436,7 +539,7 @@ def execute_sell(trade, ticker, side, entry_price, current_bid, sell_qty, total_
         db.table('trades').insert({
             'ticker': ticker, 'side': side, 'action': 'sell',
             'price': float(current_bid), 'count': sell_qty,
-            'pnl': float(pnl), 'strategy': 'crypto',
+            'pnl': float(pnl), 'strategy': trade.get('strategy', 'crypto'),
             'reason': reason,
             'sell_gain_pct': float(round(gain_pct, 1)),
         }).execute()
@@ -520,7 +623,7 @@ def check_sells():
                 db.table('trades').insert({
                     'ticker': ticker, 'side': side, 'action': 'sell',
                     'price': float(settle_price), 'count': count,
-                    'pnl': float(pnl), 'strategy': 'crypto',
+                    'pnl': float(pnl), 'strategy': trade.get('strategy', 'crypto'),
                     'reason': reason,
                     'sell_gain_pct': float(round(((settle_price - entry_price) / entry_price) * 100, 1)),
                 }).execute()
@@ -586,16 +689,26 @@ def run_cycle():
     total, trading, saved = get_trading_balance()
     logger.info(f"=== CYCLE START === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
 
+    # 1. Check sells (both crypto and MM positions)
     try:
         check_sells()
     except Exception as e:
         logger.error(f"Sell check error: {e}")
 
+    # 2. Scan crypto (hourly only, 15M dropped)
     try:
-        markets = fetch_all_crypto()
-        run_buys(markets)
+        crypto_markets = fetch_all_crypto()
+        run_buys(crypto_markets, strategy='crypto')
     except Exception as e:
-        logger.error(f"Buy error: {e}")
+        logger.error(f"Crypto buy error: {e}")
+
+    # 3. Scan March Madness
+    try:
+        mm_markets = fetch_march_madness()
+        if mm_markets:
+            run_buys(mm_markets, strategy='mm_scalp')
+    except Exception as e:
+        logger.error(f"MM buy error: {e}")
 
     total, trading, saved = get_trading_balance()
     logger.info(f"=== CYCLE END === Total: ${total:.2f} | Trading: ${trading:.2f} | Saved: ${saved:.2f}")
@@ -607,7 +720,7 @@ DASHBOARD_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Kalshi Crypto Scalp Bot</title>
+    <title>Kalshi Scalp Bot</title>
     <meta http-equiv="refresh" content="30">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -634,13 +747,14 @@ DASHBOARD_HTML = """
         .badge-sell { background: #330000; color: #ff4444; }
         .badge-settled { background: #222; color: #888; }
         .badge-crypto { background: #332200; color: #ffaa00; }
+        .badge-mm { background: #220033; color: #ff6600; }
         .badge-unknown { background: #222; color: #888; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>CRYPTO SCALP BOT</h1>
-        <div class="subtitle">LIVE — 30s cycles — BTC/ETH/SOL — Tiered exits + trailing stop + 20% profit banking</div>
+        <h1>SCALP BOT</h1>
+        <div class="subtitle">LIVE — 30s cycles — Crypto + March Madness — Tiered exits + trailing stop + 20% profit banking</div>
     </div>
     <div class="stats">
         <div class="stat-box"><div class="stat-label">Balance</div><div class="stat-value green">${{balance}}</div></div>
@@ -654,11 +768,12 @@ DASHBOARD_HTML = """
     <div class="section">
         <h2>Positions & Trades</h2>
         <table>
-            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Cnt</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th></tr>
+            <tr><th>Time</th><th>Action</th><th>Type</th><th>Ticker</th><th>Side</th><th>Cnt</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th></tr>
             {% for t in trades %}
             <tr>
                 <td>{{t.time}}</td>
                 <td><span class="badge badge-{{t.cls}}">{{t.action}}</span></td>
+                <td><span class="badge badge-{{t.strat_cls}}">{{t.strat_label}}</span></td>
                 <td style="font-size:10px">{{t.ticker}}</td>
                 <td>{{t.side}}</td>
                 <td>{{t.count}}</td>
@@ -714,13 +829,18 @@ def dashboard():
             count = int(t.get('count') or 1)
             current = sf(t.get('current_bid')) or sf(t.get('last_seen_bid'))
 
+            strat = t.get('strategy', 'crypto')
+            strat_cls = 'mm' if strat == 'mm_scalp' else 'crypto'
+            strat_label = 'MM' if strat == 'mm_scalp' else 'CRYPTO'
+
             if action == 'sell':
                 exit_p = price
                 entry = exit_p - (pnl_val / count) if count else exit_p
                 pct = sf(t.get('sell_gain_pct')) or ((exit_p - entry) / entry * 100 if entry > 0 else 0)
                 color = 'green' if pnl_val > 0 else 'red' if pnl_val < 0 else 'gray'
                 display.append({'time': (t.get('created_at') or '')[-8:], 'action': 'SELL',
-                    'cls': 'sell', 'ticker': t.get('ticker',''), 'side': t.get('side',''),
+                    'cls': 'sell', 'strat_cls': strat_cls, 'strat_label': strat_label,
+                    'ticker': t.get('ticker',''), 'side': t.get('side',''),
                     'count': count, 'entry': entry, 'current': exit_p,
                     'pnl': pnl_val, 'pct': pct, 'color': color})
             elif action == 'buy' and t.get('pnl') is None:
@@ -728,7 +848,8 @@ def dashboard():
                 pct = ((current - price) / price * 100) if price > 0 and current > 0 else 0
                 color = 'green' if pnl_val > 0 else 'red' if pnl_val < 0 else 'gray'
                 display.append({'time': (t.get('created_at') or '')[-8:], 'action': 'BUY',
-                    'cls': 'buy', 'ticker': t.get('ticker',''), 'side': t.get('side',''),
+                    'cls': 'buy', 'strat_cls': strat_cls, 'strat_label': strat_label,
+                    'ticker': t.get('ticker',''), 'side': t.get('side',''),
                     'count': count, 'entry': price, 'current': current,
                     'pnl': pnl_val, 'pct': pct, 'color': color})
             # Resolved buys (pnl set) — skip, sell record shows the result
@@ -751,7 +872,7 @@ def dashboard():
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — LIVE TRADING — crypto only — tiered exits + trailing stop + 20% profit banking")
+    logger.info("Bot starting — LIVE TRADING — crypto + March Madness — tiered exits + trailing stop + 20% profit banking")
     close_all_old_positions()
     while True:
         try:
