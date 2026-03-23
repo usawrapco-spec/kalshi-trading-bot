@@ -14,8 +14,8 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 
 MIN_PRICE = 0.02
-MAX_PRICE = 0.85
-MAX_BUYS_PER_CYCLE = 50
+MAX_PRICE = 0.95
+MAX_BUYS_PER_CYCLE = 100
 CYCLE_SECONDS = 30
 STARTING_BALANCE = 50.00
 RESERVE_BALANCE = 3.00
@@ -172,7 +172,7 @@ def fetch_series_markets():
 def fetch_events():
     """Source 3: upcoming events with nested markets (NBA, NHL, etc)."""
     try:
-        resp = kalshi_get('/events?status=open&with_nested_markets=true&limit=20')
+        resp = kalshi_get('/events?status=open&with_nested_markets=true&limit=50')
         events = resp.get('events', [])
         markets = []
         for event in events:
