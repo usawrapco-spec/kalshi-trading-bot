@@ -18,18 +18,18 @@ MIN_PRICE = 0.02
 MAX_PRICE = 0.50
 CYCLE_SECONDS = 30
 
-# === CONSERVATIVE DEPLOYMENT (reverted — 10-contract trades caused $21 swing) ===
+# === FAST TURNOVER DEPLOYMENT — sell fast, recycle capital, repeat ===
 MAX_DEPLOYMENT_PCT = 0.75       # Deploy up to 75% of balance
 MIN_CASH_RESERVE_PCT = 0.25     # 25% protected (saved profits live here)
-MAX_CONTRACTS_PER_TRADE = 3     # Hard cap 3 (was 10 — one bad expiry wiped 10 wins)
-MIN_CONTRACTS_PER_TRADE = 1     # Allow 1-contract trades
+MAX_CONTRACTS_PER_TRADE = 5     # Max 5 contracts (was 3 — sells work now)
+MIN_CONTRACTS_PER_TRADE = 2     # Minimum 2 contracts per trade
 MAX_SPEND_PER_TRADE_PCT = 0.10  # Max 10% of trading_balance per trade
 MAX_SPEND_PER_CYCLE = 25
 MAX_TRADES_PER_CYCLE = 10
 MAX_OPEN_POSITIONS = 200
 
 # === SELL THRESHOLDS ===
-BASE_SELL_PCT = 50              # Sell at 50% gain (proven profitable)
+BASE_SELL_PCT = 25              # Sell at 25% gain — fast turnover beats big holds
 EXPIRY_SELL_SECONDS = 300       # Sell anything profitable with <5 min to expiry
 
 # === PROFIT COMPOUNDING ===
@@ -181,9 +181,9 @@ def place_order(ticker, side, action, price, count):
     if '15M' in ticker:
         logger.warning(f"BLOCKED at order gate: {ticker} — 15-min contracts disabled")
         return None
-    # HARD SAFETY: cap buy orders at 3 contracts max (sells can be any size)
+    # HARD SAFETY: cap buy orders at 5 contracts max (sells can be any size)
     if action == 'buy':
-        count = min(count, 3)
+        count = min(count, 5)
     price_cents = int(round(price * 100))
     try:
         logger.info(f"ORDER: {action.upper()} {ticker} {side} x{count} @ ${price:.2f} ({price_cents}c)")
@@ -315,14 +315,14 @@ def fetch_march_madness():
 # === BUY LOGIC ===
 
 def calculate_position_size(contract_price, available_balance, volume=0, strategy='crypto'):
-    """Conservative sizing: default 2 contracts, HARD MAX 3. Never exceed 3."""
+    """Default 3 contracts, max 5. Fast turnover — moderate size, quick exits."""
     if contract_price <= 0:
-        return 2
-    target_spend = available_balance * 0.05  # 5% of balance
+        return 3
+    target_spend = available_balance * 0.06  # 6% of balance
     calculated = int(target_spend / contract_price)
     result = max(MIN_CONTRACTS_PER_TRADE, min(calculated, MAX_CONTRACTS_PER_TRADE))
-    # HARD SAFETY: absolutely never exceed 3
-    return min(result, 3)
+    # HARD SAFETY: absolutely never exceed 5
+    return min(result, 5)
 
 
 def buy_priority(ticker, strategy='crypto'):
@@ -433,8 +433,8 @@ def run_buys(markets, strategy='crypto'):
         if cost > trading_balance - current_deployed:
             continue
 
-        # FINAL SAFETY: hard cap at 3 contracts before ANY order
-        b['count'] = min(b['count'], 3)
+        # FINAL SAFETY: hard cap at 5 contracts before ANY order
+        b['count'] = min(b['count'], 5)
         cost = b['price'] * b['count']
 
         # Place real Kalshi order
@@ -719,7 +719,7 @@ def check_sells():
                     sell_history = sell_history[-20:]
             else:
                 logger.error(f"SELL EXECUTION FAILED: {ticker} — order did not go through")
-        elif gain_pct >= 50:
+        elif gain_pct >= 25:
             logger.warning(f"NOT SELLING despite {gain_pct:+.0f}% gain: {ticker} | should_sell={should_sell} sell_qty={sell_qty} reason={reason}")
 
     avg_win = (sum(sell_history) / len(sell_history)) if sell_history else 0
@@ -1165,7 +1165,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — LIVE TRADING — crypto + March Madness — 50% sell + momentum riding + 5-min expiry exit")
+    logger.info("Bot starting — LIVE TRADING — crypto + March Madness — 25% fast sell + 5-min expiry exit + max 5 contracts")
     close_all_old_positions()
     while True:
         try:
