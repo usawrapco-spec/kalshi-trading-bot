@@ -77,9 +77,10 @@ def get_balance():
 
 
 def get_owned():
-    result = db.table('trades').select('ticker,side') \
+    """Returns set of TICKER STRINGS (not tuples) — one side per market only."""
+    result = db.table('trades').select('ticker') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
-    return {(t['ticker'], t['side']) for t in (result.data or [])}
+    return {t['ticker'] for t in (result.data or [])}
 
 
 # === KALSHI API ===
@@ -171,10 +172,12 @@ def kalshi_fee(price):
 
 def check_positions():
     """Check ALL positions. Crypto keeps existing thresholds, trending sells at 3%."""
+    logger.info("check_positions() called")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
     if not open_buys.data:
+        logger.info("No open positions to check")
         return
 
     checked = 0
@@ -295,19 +298,23 @@ def check_positions():
 
             logger.info(f"SELL: {ticker} {side} +{gain_pct:.0f}% | ${pnl:.4f} profit ({strategy})")
             try:
-                db.table('trades').insert({
+                logger.info(f"INSERTING SELL: {ticker} {side} pnl={pnl} gain={gain_pct:.1f}%")
+                sell_result = db.table('trades').insert({
                     'ticker': ticker, 'side': side, 'action': 'sell',
                     'price': float(current_bid), 'count': count,
                     'pnl': float(pnl), 'strategy': strategy,
                     'reason': reason, 'sell_gain_pct': float(round(gain_pct, 1)),
                 }).execute()
-                db.table('trades').update({
+                logger.info(f"SELL SAVED: {len(sell_result.data) if sell_result.data else 0} rows")
+                update_result = db.table('trades').update({
                     'pnl': float(pnl),
                     'sell_gain_pct': float(round(gain_pct, 1)),
                 }).eq('id', trade['id']).execute()
+                logger.info(f"BUY UPDATED: id={trade['id']} pnl={pnl}")
                 sold += 1
             except Exception as e:
                 logger.error(f"Sell DB error: {e}")
+                logger.error(f"Sell DB traceback: {traceback.format_exc()}")
 
     total = len(open_buys.data)
     if sold:
@@ -355,6 +362,8 @@ def run_cycle():
             ticker = m.get('ticker', '')
             if 'KXMVE' in ticker:
                 continue
+            if ticker in owned:
+                continue  # Already own a side of this ticker — skip entirely
 
             yes_bid = float(m.get('yes_bid_dollars', '0') or '0')
             yes_ask = float(m.get('yes_ask_dollars', '0') or '0')
@@ -366,23 +375,36 @@ def run_cycle():
             strategy = 'crypto' if crypto else 'trending'
             target = crypto_buys if crypto else trending_buys
 
-            # YES side — bid must exist (liquidity check)
-            if yes_bid > 0 and yes_ask > 0 and MIN_PRICE <= yes_ask <= MAX_PRICE:
-                if (ticker, 'yes') not in owned:
+            # Pick the CHEAPER side only — never buy both sides
+            yes_ok = yes_bid > 0 and yes_ask > 0 and MIN_PRICE <= yes_ask <= MAX_PRICE
+            no_ok = no_bid > 0 and no_ask > 0 and MIN_PRICE <= no_ask <= MAX_PRICE
+
+            if yes_ok and no_ok:
+                # Both sides liquid — buy the cheaper one
+                if yes_ask <= no_ask:
                     spread = yes_ask - yes_bid
                     target.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
                                    'bid': yes_bid, 'spread': spread,
                                    'strategy': strategy, 'volume': vol,
                                    'reason': f"{strategy}: {title[:35]} YES@${yes_ask:.2f} bid=${yes_bid:.2f}"})
-
-            # NO side — bid must exist
-            if no_bid > 0 and no_ask > 0 and MIN_PRICE <= no_ask <= MAX_PRICE:
-                if (ticker, 'no') not in owned:
+                else:
                     spread = no_ask - no_bid
                     target.append({'ticker': ticker, 'side': 'no', 'price': no_ask,
                                    'bid': no_bid, 'spread': spread,
                                    'strategy': strategy, 'volume': vol,
                                    'reason': f"{strategy}: {title[:35]} NO@${no_ask:.2f} bid=${no_bid:.2f}"})
+            elif yes_ok:
+                spread = yes_ask - yes_bid
+                target.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask,
+                               'bid': yes_bid, 'spread': spread,
+                               'strategy': strategy, 'volume': vol,
+                               'reason': f"{strategy}: {title[:35]} YES@${yes_ask:.2f} bid=${yes_bid:.2f}"})
+            elif no_ok:
+                spread = no_ask - no_bid
+                target.append({'ticker': ticker, 'side': 'no', 'price': no_ask,
+                               'bid': no_bid, 'spread': spread,
+                               'strategy': strategy, 'volume': vol,
+                               'reason': f"{strategy}: {title[:35]} NO@${no_ask:.2f} bid=${no_bid:.2f}"})
 
         # Sort each by spread (tightest first = easiest scalp)
         crypto_buys.sort(key=lambda x: (x['spread'], -x['volume']))
@@ -391,7 +413,7 @@ def run_cycle():
         # Crypto first, then trending
         ordered = crypto_buys + trending_buys
 
-        logger.info(f"Scan: {len(top_activity)} active + {len(crypto_markets)} crypto | buyable: crypto={len(crypto_buys)} trending={len(trending_buys)}")
+        logger.info(f"Scan: {len(top_activity)} active + {len(crypto_markets)} crypto | owned={len(owned)} | buyable: crypto={len(crypto_buys)} trending={len(trending_buys)}")
 
         bought = 0
         for signal in ordered:
@@ -399,12 +421,15 @@ def run_cycle():
                 break
             if trading_bal < RESERVE_BALANCE:
                 break
+            if signal['ticker'] in owned:
+                logger.info(f"SKIP: {signal['ticker']} — already own")
+                continue
             cost = signal['price'] * get_buy_count(signal['ticker'])
             if cost > trading_bal - RESERVE_BALANCE:
                 continue
             if buy(signal['ticker'], signal['side'], signal['price'], signal['bid'],
                    signal['strategy'], signal['reason']):
-                owned.add((signal['ticker'], signal['side']))
+                owned.add(signal['ticker'])
                 trading_bal -= cost
                 bought += 1
         logger.info(f"Bought {bought}, balance ${trading_bal:.2f}")
