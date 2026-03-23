@@ -32,6 +32,8 @@ MAX_BUYS_PER_CYCLE = 10
 
 CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
 
+BOT_START_TIME = '2026-03-23T22:34:00Z'  # clean slate deploy time
+
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 auth = KalshiAuth()
@@ -109,12 +111,10 @@ def place_order(ticker, side, action, price, count):
 
 def get_paper_balance():
     try:
-        # Sum all buy costs
-        buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
+        buys = db.table('trades').select('price,count').eq('action', 'buy').gte('created_at', BOT_START_TIME).execute()
         buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
 
-        # Sum all sell revenue
-        sells = db.table('trades').select('price,count').eq('action', 'sell').execute()
+        sells = db.table('trades').select('price,count').eq('action', 'sell').gte('created_at', BOT_START_TIME).execute()
         sell_revenue = sum(sf(t['price']) * (t.get('count') or 1) for t in (sells.data or []))
 
         return max(0, PAPER_STARTING_BALANCE - buy_cost + sell_revenue)
@@ -125,7 +125,7 @@ def get_paper_balance():
 
 def get_open_positions():
     try:
-        result = db.table('trades').select('*').eq('action', 'buy').is_('pnl', 'null').execute()
+        result = db.table('trades').select('*').eq('action', 'buy').is_('pnl', 'null').gte('created_at', BOT_START_TIME).execute()
         return result.data or []
     except Exception as e:
         logger.error(f"get_open_positions failed: {e}")
@@ -375,6 +375,23 @@ def update_hot_markets(markets):
     ]
 
 
+def close_old_positions():
+    """Close out any open buys from before BOT_START_TIME so they don't show up."""
+    try:
+        old = db.table('trades').select('id,ticker,price,count') \
+            .eq('action', 'buy').is_('pnl', 'null') \
+            .lt('created_at', BOT_START_TIME).execute()
+        if not old.data:
+            return
+        for t in old.data:
+            loss = round(-sf(t['price']) * (t.get('count') or 1), 4)
+            db.table('trades').update({'pnl': loss}).eq('id', t['id']).execute()
+            logger.info(f"CLOSED OLD: {t['ticker']} pnl=${loss:.4f}")
+        logger.info(f"Closed {len(old.data)} old positions from previous bot versions")
+    except Exception as e:
+        logger.error(f"close_old_positions failed: {e}")
+
+
 # === MAIN CYCLE ===
 
 def run_cycle():
@@ -406,7 +423,7 @@ def api_status():
     try:
         balance = get_paper_balance()
 
-        sells = db.table('trades').select('pnl').eq('action', 'sell').not_.is_('pnl', 'null').execute()
+        sells = db.table('trades').select('pnl').eq('action', 'sell').not_.is_('pnl', 'null').gte('created_at', BOT_START_TIME).execute()
         sell_data = sells.data or []
         net_pnl = sum(sf(t['pnl']) for t in sell_data)
         wins = sum(1 for t in sell_data if sf(t['pnl']) > 0)
@@ -433,7 +450,7 @@ def api_status():
 @app.route('/api/trades')
 def api_trades():
     try:
-        result = db.table('trades').select('*').order('created_at', desc=True).limit(50).execute()
+        result = db.table('trades').select('*').gte('created_at', BOT_START_TIME).order('created_at', desc=True).limit(50).execute()
         return jsonify(result.data or [])
     except Exception as e:
         logger.error(f"API trades error: {e}")
@@ -749,6 +766,8 @@ def bot_loop():
     logger.info(f"Bot starting [{mode}] -- simple scalper: ${BUY_MIN}-${BUY_MAX}, sell at {SELL_THRESHOLD*100:.0f}%, {CYCLE_SECONDS}s cycles")
     logger.info(f"Series: {CRYPTO_SERIES}")
     logger.info(f"Sizing: {CONTRACTS_PER_TRADE} contracts per trade")
+
+    close_old_positions()
 
     while True:
         try:
