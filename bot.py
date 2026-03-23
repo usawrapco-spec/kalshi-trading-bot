@@ -24,7 +24,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === SETTINGS ===
 BUY_MIN = 0.03
 BUY_MAX = 0.50
-CYCLE_SECONDS = 30
+CYCLE_SECONDS = 10
 MAX_CONTRACTS_PER_TRADE = 3
 MIN_CONTRACTS_PER_TRADE = 1
 MAX_DEPLOYMENT_PCT = 0.60
@@ -271,7 +271,21 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds):
 
 # === BUY LOGIC ===
 
+def _get_volume(market):
+    for key in ('volume', 'volume_24h', 'volume_24h_fp', 'volume_fp'):
+        val = market.get(key)
+        if val is not None and val != '' and val != 0:
+            try:
+                return int(float(val))
+            except:
+                pass
+    return 0
+
+
 def find_buy_candidates(markets):
+    if markets:
+        logger.info(f"MARKET FIELDS: {list(markets[0].keys())}")
+
     candidates = []
     blocked = wrong_price = no_bid = 0
 
@@ -286,7 +300,7 @@ def find_buy_candidates(markets):
         yes_bid = sf(market.get('yes_bid_dollars', '0'))
         no_ask = sf(market.get('no_ask_dollars', '0'))
         no_bid = sf(market.get('no_bid_dollars', '0'))
-        volume = int(market.get('volume_24h', 0) or 0)
+        volume = _get_volume(market)
         added = False
 
         # YES side: price in range + bid exists
