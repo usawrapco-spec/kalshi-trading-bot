@@ -22,6 +22,7 @@ STOP_LOSS_PCT = -50     # Sell when down 50%
 MAX_LIVE_SPEND = 3.00   # Max $3 per cycle on live trades
 MAX_POSITIONS = 30      # Max open positions total
 CYCLE_SECONDS = 60      # Check every 60 seconds
+PAPER_STARTING_BALANCE = 10.00
 
 # Weather series to scan
 WEATHER_SERIES = [
@@ -65,6 +66,37 @@ STATIONS = {
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 auth = KalshiAuth()
 app = Flask(__name__)
+
+
+def sf(val):
+    """Safe float conversion for Supabase string numerics"""
+    try:
+        return float(val) if val is not None else 0
+    except:
+        return 0
+
+def get_paper_balance():
+    """Paper balance = $10 - cost of open buys + P&L from sells"""
+    open_buys = db.table('trades').select('price,count') \
+        .eq('action', 'buy').eq('is_live', False).is_('pnl', 'null').execute()
+    open_cost = sum(sf(t['price']) * t['count'] for t in (open_buys.data or []))
+
+    sells = db.table('trades').select('pnl') \
+        .eq('action', 'sell').eq('is_live', False).not_.is_('pnl', 'null').execute()
+    realized_pnl = sum(sf(t['pnl']) for t in (sells.data or []))
+
+    return round(PAPER_STARTING_BALANCE - open_cost + realized_pnl, 2)
+
+def recently_stop_lossed(ticker, hours=2):
+    """Check if we stop-lossed this ticker recently"""
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    recent = db.table('trades').select('id') \
+        .eq('ticker', ticker).eq('action', 'sell') \
+        .like('reason', '%STOP LOSS%') \
+        .gte('created_at', cutoff) \
+        .limit(1).execute()
+    return bool(recent.data)
 
 
 # ============================================================
@@ -479,6 +511,10 @@ def run_cycle():
                 if open_count >= MAX_POSITIONS:
                     break
 
+                if recently_stop_lossed(signal['ticker']):
+                    logger.info(f"  Skip {signal['ticker']}: recently stop-lossed, cooling down")
+                    continue
+
                 existing = db.table('trades').select('id') \
                     .eq('ticker', signal['ticker']).eq('side', signal['side']) \
                     .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -511,11 +547,16 @@ def run_cycle():
         try:
             scalp_signals = scalp_strategy()
             paper_count = 0
+            paper_bal = get_paper_balance()
             for signal in scalp_signals[:10]:
                 if open_count >= MAX_POSITIONS:
                     break
                 if paper_count >= 5:
                     break
+
+                if recently_stop_lossed(signal['ticker']):
+                    logger.info(f"  Skip {signal['ticker']}: recently stop-lossed, cooling down")
+                    continue
 
                 existing = db.table('trades').select('id') \
                     .eq('ticker', signal['ticker']).eq('side', signal['side']) \
@@ -525,9 +566,19 @@ def run_cycle():
 
                 count = max(1, int(0.50 / signal['price']))
                 count = min(count, 5)
+                cost = signal['price'] * count
+
+                # Check paper balance
+                if cost > paper_bal * 0.20:
+                    count = max(1, int((paper_bal * 0.20) / signal['price']))
+                    cost = signal['price'] * count
+                if cost > paper_bal or count < 1:
+                    logger.info(f"  Skip {signal['ticker']}: paper balance too low (${paper_bal:.2f})")
+                    continue
 
                 buy(signal['ticker'], signal['side'], count, signal['price'],
                     is_live=False, strategy='scalp', reason=signal['reason'])
+                paper_bal -= cost
                 paper_count += 1
                 open_count += 1
         except Exception as e:
@@ -575,8 +626,9 @@ DASHBOARD_HTML = """
         </div>
         <div class="col panel paper">
             <h2>PAPER TRADING</h2>
+            <div>Balance: <span class="stat {{'green' if paper_balance|float >= 10 else 'red'}}">${{paper_balance}}</span> <span style="color:#888">(started at $10)</span></div>
             <div>Open: {{paper_open}} | Wins: <span class="green">{{paper_wins}}</span> | Losses: <span class="red">{{paper_losses}}</span></div>
-            <div>P&L: <span class="{{'green' if paper_pnl|float >= 0 else 'red'}}">${{paper_pnl}}</span></div>
+            <div>P&L: <span class="{{'green' if paper_pnl|float >= 0 else 'red'}}">${{paper_pnl}}</span> <span style="color:#888">({{paper_roi}}%)</span></div>
         </div>
     </div>
     <div class="panel">
@@ -607,12 +659,6 @@ def health():
 
 @app.route('/dashboard')
 def dashboard():
-    def safe_float(val):
-        try:
-            return float(val) if val is not None else 0
-        except:
-            return 0
-
     try:
         all_trades = db.table('trades').select('*').order('created_at', desc=True).limit(100).execute()
         trades = all_trades.data or []
@@ -620,30 +666,33 @@ def dashboard():
         live_trades = [t for t in trades if t.get('is_live')]
         paper_trades = [t for t in trades if not t.get('is_live')]
 
-        live_sells = [t for t in live_trades if t['action'] == 'sell' and safe_float(t.get('pnl')) != 0]
-        paper_sells = [t for t in paper_trades if t['action'] == 'sell' and safe_float(t.get('pnl')) != 0]
+        live_sells = [t for t in live_trades if t['action'] == 'sell' and sf(t.get('pnl')) != 0]
+        paper_sells = [t for t in paper_trades if t['action'] == 'sell' and sf(t.get('pnl')) != 0]
 
-        live_pnl_total = sum(safe_float(t['pnl']) for t in live_sells)
-        paper_pnl_total = sum(safe_float(t['pnl']) for t in paper_sells)
+        live_pnl_total = sum(sf(t['pnl']) for t in live_sells)
+        paper_pnl_total = sum(sf(t['pnl']) for t in paper_sells)
+        paper_roi = (paper_pnl_total / PAPER_STARTING_BALANCE) * 100
 
         # Convert numeric fields for Jinja template
         trades_display = []
         for t in trades[:30]:
-            t['pnl'] = safe_float(t.get('pnl')) if t.get('pnl') is not None else None
-            t['price'] = safe_float(t.get('price'))
-            t['cost'] = safe_float(t.get('cost'))
+            t['pnl'] = sf(t.get('pnl')) if t.get('pnl') is not None else None
+            t['price'] = sf(t.get('price'))
+            t['cost'] = sf(t.get('cost'))
             trades_display.append(t)
 
         return render_template_string(DASHBOARD_HTML,
             live_balance=f"{get_balance():.2f}",
             live_open=sum(1 for t in live_trades if t['action'] == 'buy' and t.get('pnl') is None),
-            live_wins=sum(1 for t in live_sells if safe_float(t['pnl']) > 0),
-            live_losses=sum(1 for t in live_sells if safe_float(t['pnl']) <= 0),
+            live_wins=sum(1 for t in live_sells if sf(t['pnl']) > 0),
+            live_losses=sum(1 for t in live_sells if sf(t['pnl']) <= 0),
             live_pnl=f"{live_pnl_total:.2f}",
+            paper_balance=f"{get_paper_balance():.2f}",
             paper_open=sum(1 for t in paper_trades if t['action'] == 'buy' and t.get('pnl') is None),
-            paper_wins=sum(1 for t in paper_sells if safe_float(t['pnl']) > 0),
-            paper_losses=sum(1 for t in paper_sells if safe_float(t['pnl']) <= 0),
+            paper_wins=sum(1 for t in paper_sells if sf(t['pnl']) > 0),
+            paper_losses=sum(1 for t in paper_sells if sf(t['pnl']) <= 0),
             paper_pnl=f"{paper_pnl_total:.2f}",
+            paper_roi=f"{paper_roi:+.1f}",
             trades=trades_display,
         )
     except Exception as e:
