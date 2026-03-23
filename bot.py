@@ -90,20 +90,10 @@ def get_market(ticker):
 
 def get_series_markets(series_ticker):
     try:
-        resp = kalshi_get(f"/markets?series_ticker={series_ticker}&status=open")
+        resp = kalshi_get(f"/markets?series_ticker={series_ticker}&status=open&limit=100")
         return resp.get('markets', [])
     except Exception as e:
         logger.error(f"get_series_markets({series_ticker}) failed: {e}")
-        return []
-
-
-def get_trending_markets():
-    """Get top 200 open markets (sorted by volume on Kalshi's end)."""
-    try:
-        resp = kalshi_get("/markets?status=open&limit=200")
-        return resp.get('markets', [])
-    except Exception as e:
-        logger.error(f"get_trending_markets failed: {e}")
         return []
 
 
@@ -243,7 +233,7 @@ def count_cheap(markets):
 
 
 def scan_and_buy():
-    """Scan crypto, trending, and weather markets. Buy cheap contracts."""
+    """Scan crypto and weather markets. Buy cheap contracts."""
     trading_bal, _ = get_balance()
     logger.info(f"Paper balance: ${trading_bal:.2f}")
 
@@ -265,50 +255,49 @@ def scan_and_buy():
                     trading_bal -= cost
                     bought += 1
 
-    # Priority 1: Crypto 15-min
-    logged_first = False
+    # Priority 1: Crypto 15-min (with &limit=100 for more brackets)
     for series in CRYPTO_SERIES:
         markets = get_series_markets(series)
-        logger.info(f"Crypto {series}: {len(markets)} markets — raw prices: {[(m.get('ticker','?'), m.get('yes_ask_dollars','?'), m.get('no_ask_dollars','?')) for m in markets[:3]]}")
-        if markets and not logged_first:
-            m0 = markets[0]
-            # Dump all price-related keys to find the right field names
-            price_keys = {k: v for k, v in m0.items() if 'price' in k.lower() or 'bid' in k.lower() or 'ask' in k.lower() or 'dollar' in k.lower() or 'cent' in k.lower()}
-            logger.info(f"  FIELD DUMP first market: {price_keys}")
-            yes_raw = m0.get('yes_ask_dollars', 'MISSING')
-            no_raw = m0.get('no_ask_dollars', 'MISSING')
-            logger.info(f"  Price check: yes_ask={yes_raw} ({type(yes_raw).__name__}) no_ask={no_raw} ({type(no_raw).__name__})")
-            if yes_raw not in ('MISSING', None, ''):
-                yes_f = float(yes_raw)
-                logger.info(f"  float(yes_ask)={yes_f}, in range [{MIN_PRICE}, {MAX_PRICE}]? {MIN_PRICE <= yes_f <= MAX_PRICE}")
-            logged_first = True
         cheap = count_cheap(markets)
-        logger.info(f"  {len(cheap)} cheap (3-15¢)")
+        logger.info(f"Crypto {series}: {len(markets)} mkts, {len(cheap)} cheap")
+        if markets:
+            m0 = markets[0]
+            price_keys = {k: v for k, v in m0.items() if any(w in k.lower() for w in ('price', 'bid', 'ask', 'dollar', 'cent'))}
+            logger.info(f"  FIELDS: {price_keys}")
         scan_markets(markets, 'crypto')
 
-    # Priority 2: Trending/high-volume
-    trending = get_trending_markets()
-    trending.sort(key=lambda m: float(m.get('volume_24h_fp', '0') or '0'), reverse=True)
-    logger.info(f"Trending: {len(trending)} markets — raw prices: {[(m.get('ticker','?'), m.get('yes_ask_dollars','?'), m.get('no_ask_dollars','?')) for m in trending[:3]]}")
-    cheap = count_cheap(trending)
-    logger.info(f"  {len(cheap)} cheap (3-15¢)")
-    scan_markets(trending, 'trending')
-
-    # Priority 3: Weather
+    # Priority 2: Weather — verbose per-market price logging
     weather_total = 0
     weather_cheap = 0
+    logged_check = False
     for series in WEATHER_SERIES:
         markets = get_series_markets(series)
-        if markets:
-            logger.info(f"Weather {series}: {len(markets)} markets — raw prices: {[(m.get('ticker','?'), m.get('yes_ask_dollars','?'), m.get('no_ask_dollars','?')) for m in markets[:3]]}")
-        else:
-            logger.info(f"Weather {series}: 0 markets returned")
-        cheap = count_cheap(markets)
         weather_total += len(markets)
-        weather_cheap += len(cheap)
-        scan_markets(markets, 'weather')
-    logger.info(f"Weather total: {weather_total} markets, {weather_cheap} cheap (3-15¢)")
+        if not markets:
+            continue
 
+        for m in markets:
+            ticker = m.get('ticker', '')
+            if 'KXMVE' in ticker or m.get('status') != 'open':
+                continue
+            yes_price = float(m.get('yes_ask_dollars', '0') or '0')
+            no_price = float(m.get('no_ask_dollars', '0') or '0')
+            yes_cheap = MIN_PRICE <= yes_price <= MAX_PRICE
+            no_cheap = MIN_PRICE <= no_price <= MAX_PRICE
+            if (yes_cheap or no_cheap):
+                weather_cheap += 1
+            # Log the first few markets with any price in 0.02-0.20 range for diagnostics
+            if not logged_check and (0.02 <= yes_price <= 0.20 or 0.02 <= no_price <= 0.20):
+                logger.info(f"  CHECK {ticker}: yes={yes_price} ({type(yes_price).__name__}) no={no_price} ({type(no_price).__name__}) yes_cheap={yes_cheap} no_cheap={no_cheap}")
+                logger.info(f"    MIN_PRICE={MIN_PRICE} MAX_PRICE={MAX_PRICE} comparison: {MIN_PRICE}<={yes_price}<={MAX_PRICE} = {MIN_PRICE <= yes_price <= MAX_PRICE}")
+                logger.info(f"    raw yes_ask_dollars={m.get('yes_ask_dollars', 'MISSING')!r} raw no_ask_dollars={m.get('no_ask_dollars', 'MISSING')!r}")
+                logged_check = True
+
+        cheap = count_cheap(markets)
+        logger.info(f"Weather {series}: {len(markets)} mkts, {len(cheap)} cheap")
+        scan_markets(markets, 'weather')
+
+    logger.info(f"Weather total: {weather_total} mkts, {weather_cheap} cheap (3-15¢)")
     logger.info(f"Scan complete: bought {bought} contracts, balance now ${trading_bal:.2f}")
 
 
