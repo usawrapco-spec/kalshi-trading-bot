@@ -23,7 +23,7 @@ PORT = int(os.environ.get('PORT', 8080))
 MIN_PRICE = 0.03
 MAX_PRICE = 0.20
 CYCLE_SECONDS = 5
-MAX_CONTRACTS_PER_TRADE = 5
+MAX_CONTRACTS_PER_TRADE = 1
 MAX_BUYS_PER_CYCLE = 15
 MAX_DEPLOYMENT_PCT = 1.0
 MAX_SPEND_PER_TRADE_PCT = 0.15
@@ -245,23 +245,42 @@ def clear_non_btcd():
 
 
 # === SELL LOGIC ===
-# Random exit above 30%: dice roll each cycle, higher gain = higher chance
+# 15s timeout above 30%, instant sell 100%+, random catch in between
+
+entry_times = {}
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker='', side=''):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
+    now = time.time()
 
-    # Above 30% — roll the dice each cycle
+    key = f"{ticker}_{side}"
+    if key not in entry_times:
+        entry_times[key] = now
+    age = now - entry_times[key]
+
+    # 100%+ — instant sell
+    if gain_pct >= 100:
+        entry_times.pop(key, None)
+        return True, count, f"BIG WIN +{gain_pct:.0f}%"
+
+    # 15 seconds old + above 30% — sell it, stop waiting
+    if age >= 15 and gain_pct >= 30:
+        entry_times.pop(key, None)
+        return True, count, f"TIMEOUT +{gain_pct:.0f}% ({age:.0f}s)"
+
+    # Under 15s and 30-99% — random chance to catch spikes
     if gain_pct >= 30:
-        # 30% = 10%, 50% = 20%, 100% = 45%, 150%+ = 80%
         sell_chance = min(0.80, 0.10 + (gain_pct - 30) * 0.005)
         if random.random() < sell_chance:
+            entry_times.pop(key, None)
             return True, count, f"TAKE PROFIT +{gain_pct:.0f}%"
 
-    # 5 min before expiry — sell everything at whatever price
+    # Expiry exit
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
         if current_bid > 0:
+            entry_times.pop(key, None)
             return True, count, f"EXPIRY EXIT {gain_pct:+.0f}%"
 
     return False, 0, None
