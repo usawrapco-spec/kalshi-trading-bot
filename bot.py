@@ -222,31 +222,42 @@ def try_buy(market, side, field, strategy, owned, trading_bal):
 def count_cheap(markets, verbose=False):
     """Count markets with at least one side priced 3-15¢."""
     cheap = []
-    logged_first_type = False
+    logged_first = False
+    skipped_kxmve = 0
+    skipped_status = 0
     for m in markets:
         ticker = m.get('ticker', '')
-        if 'KXMVE' in ticker or m.get('status') != 'open':
+        status = m.get('status', '')
+        if 'KXMVE' in ticker:
+            skipped_kxmve += 1
             continue
+        if status != 'open':
+            skipped_status += 1
+            if verbose and not logged_first:
+                logger.info(f"  SKIPPED status={status!r} for {ticker} (expected 'open')")
+            continue
+
         yes_raw = m.get('yes_ask_dollars', '0') or '0'
         no_raw = m.get('no_ask_dollars', '0') or '0'
         yes_ask = float(yes_raw)
         no_ask = float(no_raw)
 
-        if verbose and not logged_first_type:
-            logger.info(f"  TYPE CHECK: yes_raw={yes_raw!r} type={type(yes_raw).__name__} -> float={yes_ask}")
-            logger.info(f"  TYPE CHECK: no_raw={no_raw!r} type={type(no_raw).__name__} -> float={no_ask}")
-            # Also check if cents fields exist
-            yes_cents = m.get('yes_ask', 'MISSING')
-            no_cents = m.get('no_ask', 'MISSING')
-            logger.info(f"  CENTS FIELDS: yes_ask={yes_cents!r} no_ask={no_cents!r}")
-            logged_first_type = True
+        if verbose and not logged_first:
+            logger.info(f"  FIRST MARKET: {ticker} status={status!r}")
+            logger.info(f"  yes_ask_dollars={yes_raw!r} -> {yes_ask} | no_ask_dollars={no_raw!r} -> {no_ask}")
+            logger.info(f"  yes in range: {MIN_PRICE} <= {yes_ask} <= {MAX_PRICE} = {MIN_PRICE <= yes_ask <= MAX_PRICE}")
+            logger.info(f"  no in range: {MIN_PRICE} <= {no_ask} <= {MAX_PRICE} = {MIN_PRICE <= no_ask <= MAX_PRICE}")
+            logged_first = True
 
         is_yes_cheap = MIN_PRICE <= yes_ask <= MAX_PRICE
         is_no_cheap = MIN_PRICE <= no_ask <= MAX_PRICE
         if is_yes_cheap or is_no_cheap:
             if verbose:
-                logger.info(f"  CHEAP FOUND: {ticker} yes={yes_ask} no={no_ask} yes_cheap={is_yes_cheap} no_cheap={is_no_cheap}")
+                logger.info(f"  CHEAP FOUND: {ticker} yes={yes_ask} no={no_ask}")
             cheap.append(m)
+
+    if verbose:
+        logger.info(f"  count_cheap result: {len(cheap)} cheap, {skipped_kxmve} KXMVE skipped, {skipped_status} non-open skipped, {len(markets)} total")
     return cheap
 
 
@@ -311,24 +322,20 @@ def scan_and_buy():
 def run_cycle():
     logger.info("=== CYCLE START ===")
 
-    # TEMP TEST - remove after confirming it works
-    logger.info("FORCE TEST BUY")
+    # TEMP: force a test buy if trades table is empty, to prove DB works
     try:
-        market = kalshi_get('/markets/KXHIGHCHI-26MAR23-T47')
-        m = market.get('market', market)
-        price = float(m.get('yes_ask_dollars', '0') or '0')
-        logger.info(f"TEST: KXHIGHCHI-26MAR23-T47 yes_ask={price} type={type(price)} cheap={0.03 <= price <= 0.15}")
-        if 0.03 <= price <= 0.15:
+        existing = db.table('trades').select('id').limit(1).execute()
+        if not existing.data:
             db.table('trades').insert({
-                'ticker': 'KXHIGHCHI-26MAR23-T47', 'side': 'yes', 'action': 'buy',
-                'price': price, 'count': 1, 'strategy': 'test', 'reason': 'FORCE TEST'
+                'ticker': 'TEST-MARKET', 'side': 'yes', 'action': 'buy',
+                'price': 0.05, 'count': 1, 'strategy': 'test', 'reason': 'FORCE TEST'
             }).execute()
-            logger.info(f"TEST BUY SUCCESS at {price}")
+            logger.info("FORCE TEST BUY INSERTED")
         else:
-            logger.info(f"TEST: price {price} not in range - WHY?")
+            logger.info(f"DB has {len(existing.data)}+ rows, skipping test insert")
     except Exception as e:
-        logger.error(f"TEST FAILED: {e}")
-    # END TEMP TEST
+        logger.error(f"FORCE TEST FAILED: {e}")
+    # END TEMP
 
     try:
         check_positions()
