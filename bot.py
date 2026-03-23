@@ -577,7 +577,7 @@ def get_live_bid(ticker, side):
 
 
 def cleanup_ghosts():
-    """Mark expired positions that Kalshi already settled but bot missed."""
+    """Purge ghost positions: bid=0 OR expired ticker. Fast, no API calls per position."""
     open_buys = db.table('trades').select('id,ticker,side,price,count,current_bid') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -587,48 +587,23 @@ def cleanup_ghosts():
         ticker = pos['ticker']
         entry = sf(pos['price'])
         count = pos.get('count') or 1
+        expiry = get_time_to_expiry(ticker)
 
-        if bid > 0:
+        # Ghost if: bid is 0 OR expiry has passed
+        is_ghost = (bid <= 0) or (expiry is not None and expiry <= 0)
+        if not is_ghost:
             continue
 
-        # Bid is 0 — check if market is settled on Kalshi
+        loss = round(-entry * count, 4)
         try:
-            market = get_market(ticker)
-            if not market:
-                continue
-            status = market.get('status', '')
-            result_val = market.get('result', '')
-
-            if status in ('closed', 'settled', 'finalized') or result_val:
-                side = pos['side']
-                if result_val == side:
-                    pnl = round((1.0 - entry) * count, 4)
-                    reason = f"GHOST CLEANUP: WIN settled (entry ${entry:.2f})"
-                    settle_price = 1.0
-                elif result_val:
-                    pnl = round(-entry * count, 4)
-                    reason = f"GHOST CLEANUP: LOSS expired (entry ${entry:.2f})"
-                    settle_price = 0.0
-                else:
-                    continue
-
-                # Record the sell
-                db.table('trades').insert({
-                    'ticker': ticker, 'side': side, 'action': 'sell',
-                    'price': float(settle_price), 'count': count,
-                    'pnl': float(pnl),
-                    'strategy': pos.get('strategy', 'crypto') if 'strategy' in pos else 'crypto',
-                    'reason': reason,
-                    'sell_gain_pct': round(((settle_price - entry) / entry) * 100, 1) if entry > 0 else 0,
-                }).execute()
-                # Resolve the buy
-                db.table('trades').update({
-                    'pnl': 0.0,
-                    'current_bid': float(settle_price),
-                }).eq('id', pos['id']).execute()
-                cleaned += 1
+            db.table('trades').update({
+                'pnl': round(loss, 4),
+                'sell_gain_pct': -100,
+                'current_bid': 0,
+            }).eq('id', pos['id']).execute()
+            cleaned += 1
         except Exception as e:
-            logger.warning(f"Ghost check failed for {ticker}: {e}")
+            logger.warning(f"Ghost cleanup failed for {ticker}: {e}")
 
     if cleaned > 0:
         logger.info(f"Cleaned {cleaned} ghost positions (expired contracts)")
