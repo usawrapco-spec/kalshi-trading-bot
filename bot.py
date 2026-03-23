@@ -1,9 +1,9 @@
 """
-Expiry only sell, block monthly/weekly, fast capital cycling.
-Buy cheap crypto contracts. Sell only at expiry.
+Random exit above 30%, block monthly/weekly, expiry exit all.
+Buy cheap crypto contracts. Above 30% gain, dice roll each cycle to take profit.
 """
 
-import os, time, logging, re, requests, traceback
+import os, time, logging, re, requests, traceback, random
 from datetime import datetime, timezone
 from flask import Flask, render_template_string, jsonify
 from threading import Thread
@@ -245,15 +245,25 @@ def clear_non_btcd():
 
 
 # === SELL LOGIC ===
-# Expiry only: sell everything 5 min before expiry
+# Random exit above 30%: dice roll each cycle, higher gain = higher chance
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, ticker='', side=''):
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
+    gain_pct = ((current_bid - entry_price) / entry_price) * 100
+
+    # Above 30% — roll the dice each cycle
+    if gain_pct >= 30:
+        # 30% gain = 5% chance, 100% = 12%, 200% = 22%, 500% = 52% (capped 50%)
+        sell_chance = min(0.50, 0.05 + (gain_pct - 30) * 0.001)
+        if random.random() < sell_chance:
+            return True, count, f"TAKE PROFIT +{gain_pct:.0f}%"
+
+    # 5 min before expiry — sell everything at whatever price
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
         if current_bid > 0:
-            gain_pct = ((current_bid - entry_price) / entry_price) * 100
             return True, count, f"EXPIRY EXIT {gain_pct:+.0f}%"
+
     return False, 0, None
 
 
@@ -528,7 +538,7 @@ def sync_with_kalshi():
 # === CHECK SELLS ===
 
 def check_sells():
-    logger.info("check_sells() — expiry only sell")
+    logger.info("check_sells() — random exit above 30%, expiry exit")
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
 
@@ -927,7 +937,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; expiry only sell, block monthly/weekly, fast cycles</div>
+  <div class="sub"><span class="live-dot"></span>PROFIT MAXIMIZER &mdash; 5s cycles &mdash; random exit above 30%, block monthly, expiry exit all</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -959,7 +969,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> LIVE</div>
   <div class="status-item">Buy: 3-20c, 70% spread</div>
-  <div class="status-item">Strategy: expiry only sell</div>
+  <div class="status-item">Strategy: random exit 30%+</div>
   <div class="status-item">Expiry exit: 5min</div>
   <div class="status-item">Max: 5 contracts</div>
   <div class="status-item">All crypto series</div>
@@ -1104,7 +1114,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — expiry only sell, block monthly/weekly, fast cycles")
+    logger.info("Bot starting — random exit above 30%, block monthly, expiry exit all")
     cancel_all_resting()
     clear_dead()
     sync_with_kalshi()
