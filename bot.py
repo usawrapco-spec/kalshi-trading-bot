@@ -15,7 +15,7 @@ PORT = int(os.environ.get('PORT', 8080))
 
 MIN_PRICE = 0.03
 MAX_PRICE = 0.15
-TAKE_PROFIT_PCT = 100
+TAKE_PROFIT_PCT = 30
 CYCLE_SECONDS = 30
 STARTING_BALANCE = 10.00
 
@@ -99,13 +99,16 @@ def get_series_markets(series_ticker):
 
 # === PAPER TRADING ===
 
+BUY_COUNT = 2
+
 def buy(ticker, side, price, strategy, reason):
-    """Paper buy 1 contract."""
-    logger.info(f"BUY: {ticker} {side} @ ${price:.2f} | {reason}")
+    """Paper buy contracts."""
+    cost = price * BUY_COUNT
+    logger.info(f"BUY: {ticker} {side} x{BUY_COUNT} @ ${price:.2f} = ${cost:.2f} | {reason}")
     try:
         db.table('trades').insert({
             'ticker': ticker, 'side': side, 'action': 'buy',
-            'price': float(price), 'count': 1,
+            'price': float(price), 'count': BUY_COUNT,
             'strategy': strategy, 'reason': reason,
             'last_seen_bid': float(price),
         }).execute()
@@ -192,6 +195,11 @@ def check_positions():
         pct = ((current_bid - entry_price) / entry_price) * 100
         last_seen = sf(trade.get('last_seen_bid'))
 
+        # Always update current_bid for dashboard tracking
+        db.table('trades').update({
+            'current_bid': float(current_bid),
+        }).eq('id', trade['id']).execute()
+
         if pct >= TAKE_PROFIT_PCT:
             if current_bid > last_seen and last_seen > 0:
                 # Still climbing — hold for more gains
@@ -201,7 +209,7 @@ def check_positions():
                 # Peaked or dropping — sell now
                 sell(trade, current_bid, f"TAKE PROFIT +{pct:.0f}% peaked ({entry_price:.2f}->{current_bid:.2f})")
         else:
-            # Not at 100% yet, just update last_seen_bid
+            # Not at threshold yet, update last_seen_bid
             db.table('trades').update({'last_seen_bid': float(current_bid)}).eq('id', trade['id']).execute()
 
 
@@ -211,11 +219,12 @@ def try_buy(market, side, field, strategy, owned, trading_bal):
     """Try to buy one side of a market if cheap and not owned. Returns (bought, cost)."""
     ticker = market.get('ticker', '')
     ask = float(market.get(field, '0') or '0')
+    cost = ask * BUY_COUNT
     if MIN_PRICE <= ask <= MAX_PRICE and (ticker, side) not in owned:
-        if ask <= trading_bal:
+        if cost <= trading_bal:
             if buy(ticker, side, ask, strategy, f"{strategy.title()}: {side.upper()} @ ${ask:.2f}"):
                 owned.add((ticker, side))
-                return True, ask
+                return True, cost
     return False, 0
 
 
@@ -355,7 +364,7 @@ DASHBOARD_HTML = """
     <div class="panel">
         <h2>RECENT TRADES</h2>
         <table>
-            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Price</th><th>P&L</th><th>Strategy</th></tr>
+            <tr><th>Time</th><th>Action</th><th>Ticker</th><th>Side</th><th>Entry</th><th>Current</th><th>Gain</th><th>P&L</th><th>Strategy</th></tr>
             {% for t in trades %}
             <tr>
                 <td>{{ t.time }}</td>
@@ -363,7 +372,9 @@ DASHBOARD_HTML = """
                 <td>{{ t.ticker }}</td>
                 <td>{{ t.side }}</td>
                 <td>${{ t.price }}</td>
-                <td class="{{ 'green' if t.pnl and t.pnl > 0 else 'red' if t.pnl and t.pnl < 0 else '' }}">{{ ("$%.4f"|format(t.pnl)) if t.pnl else "---" }}</td>
+                <td>{{ ("$%.2f"|format(t.current)) if t.current else "—" }}</td>
+                <td class="{{ 'green' if t.gain and t.gain > 0 else 'red' if t.gain and t.gain < 0 else '' }}">{{ ("%+.0f%%"|format(t.gain)) if t.gain is not none else "—" }}</td>
+                <td class="{{ 'green' if t.pnl and t.pnl > 0 else 'red' if t.pnl and t.pnl < 0 else '' }}">{{ ("$%.4f"|format(t.pnl)) if t.pnl else "—" }}</td>
                 <td><span class="badge badge-{{ t.strategy }}">{{ t.strategy }}</span></td>
             </tr>
             {% endfor %}
@@ -411,12 +422,20 @@ def dashboard():
 
         trades_display = []
         for t in trades[:40]:
+            entry = sf(t['price'])
+            current = sf(t.get('current_bid')) if t.get('current_bid') is not None else None
+            is_open_buy = t['action'] == 'buy' and t.get('pnl') is None
+            gain = None
+            if is_open_buy and current and entry > 0:
+                gain = ((current - entry) / entry) * 100
             trades_display.append({
                 'time': (t.get('created_at') or '')[:19],
                 'action': t['action'].upper(),
                 'ticker': t['ticker'],
                 'side': t['side'],
-                'price': f"{sf(t['price']):.2f}",
+                'price': f"{entry:.2f}",
+                'current': current if is_open_buy else None,
+                'gain': gain,
                 'pnl': sf(t['pnl']) if t.get('pnl') is not None else None,
                 'strategy': t.get('strategy') or '',
             })
@@ -440,6 +459,12 @@ def dashboard():
 
 def bot_loop():
     logger.info("Bot starting — paper trading, 30s cycles")
+    # Clean up test rows from debugging
+    try:
+        db.table('trades').delete().eq('strategy', 'test').execute()
+        logger.info("Cleaned up test trades")
+    except Exception as e:
+        logger.error(f"Test cleanup failed: {e}")
     while True:
         try:
             run_cycle()
