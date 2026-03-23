@@ -49,6 +49,7 @@ app = Flask(__name__)
 
 # === STATE ===
 banked_profit = 0.0
+current_hot_markets = []
 
 
 def sf(val):
@@ -284,7 +285,9 @@ def _get_volume(market):
 
 def find_buy_candidates(markets):
     if markets:
-        logger.info(f"MARKET FIELDS: {list(markets[0].keys())}")
+        sample = markets[0]
+        logger.info(f"MARKET FIELDS: {list(sample.keys())}")
+        logger.info(f"VOL FIELDS: {[k for k in sample.keys() if 'vol' in k.lower()]} = {[sample.get(k) for k in sample.keys() if 'vol' in k.lower()]}")
 
     candidates = []
     blocked = wrong_price = no_bid = 0
@@ -350,6 +353,25 @@ def fetch_all_markets():
             logger.error(f"Fetch {series} failed: {e}")
     logger.info(f"Fetched {len(all_markets)} markets from {len(ALL_SERIES)} series")
     return all_markets
+
+
+def _update_hot_markets(markets):
+    global current_hot_markets
+    owned = get_owned()
+    by_vol = sorted(markets, key=lambda m: _get_volume(m), reverse=True)[:20]
+    current_hot_markets = [
+        {
+            'ticker': m.get('ticker', ''),
+            'title': m.get('title', m.get('subtitle', '')),
+            'yes_ask': sf(m.get('yes_ask_dollars', '0')),
+            'no_ask': sf(m.get('no_ask_dollars', '0')),
+            'yes_bid': sf(m.get('yes_bid_dollars', '0')),
+            'no_bid': sf(m.get('no_bid_dollars', '0')),
+            'volume': _get_volume(m),
+            'owned': m.get('ticker', '') in owned,
+        }
+        for m in by_vol
+    ]
 
 
 # === CANCEL ALL RESTING ORDERS ===
@@ -706,6 +728,7 @@ def run_cycle():
 
     try:
         markets = fetch_all_markets()
+        _update_hot_markets(markets)
         run_buys(markets)
     except Exception as e:
         logger.error(f"Buy error: {e}")
@@ -815,6 +838,11 @@ def api_open():
         return jsonify([])
 
 
+@app.route('/api/hot')
+def api_hot():
+    return jsonify(current_hot_markets)
+
+
 @app.route('/dashboard')
 def dashboard():
     return DASHBOARD_HTML
@@ -879,7 +907,7 @@ tr:hover{background:#1a1a1a !important}
 <body>
 
 <div class="portfolio">
-  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; 30s cycles &mdash; half at 100%, full at 200%, expiry save 25%+</div>
+  <div class="sub"><span class="live-dot dot-paper" id="mode-dot"></span><span id="mode-label">PAPER MODE</span> &mdash; 10s cycles &mdash; half at 100%, full at 200%, expiry save 25%+</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -888,6 +916,13 @@ tr:hover{background:#1a1a1a !important}
     <div class="item"><div class="label">Record</div><div class="val" id="p-record">...</div></div>
     <div class="item"><div class="label">Banked</div><div class="val green" id="p-banked">...</div></div>
   </div>
+</div>
+
+<div class="panel">
+  <div class="panel-header"><h2>Hot Markets</h2><div class="count" id="hot-count"></div></div>
+  <div class="panel-body"><table><thead><tr>
+    <th>Ticker</th><th>Title</th><th>Volume</th><th>Yes</th><th>No</th><th></th>
+  </tr></thead><tbody id="hot-body"><tr><td colspan="6" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
@@ -929,11 +964,14 @@ async function fetchJSON(url){
   catch(e){console.error(url,e);return null}
 }
 
+function fmtVol(v){if(v>=1e6)return(v/1e6).toFixed(1)+'M';if(v>=1e3)return(v/1e3).toFixed(1)+'K';return v.toString()}
+
 async function refresh(){
-  var [status,open,trades]=await Promise.all([
+  var [status,open,trades,hot]=await Promise.all([
     fetchJSON('/api/status'),
     fetchJSON('/api/open'),
-    fetchJSON('/api/trades')
+    fetchJSON('/api/trades'),
+    fetchJSON('/api/hot')
   ]);
 
   if(status&&!status.error){
@@ -1006,6 +1044,24 @@ async function refresh(){
     drawEquity(completed);
   }
 
+  if(hot&&!hot.error){
+    $('hot-count').textContent='Top '+hot.length+' by volume';
+    var h='';
+    hot.forEach(function(m){
+      var owned=m.owned?'row-green':'';
+      var title=(m.title||'').substring(0,40);
+      h+='<tr class="'+owned+'">';
+      h+='<td style="font-size:10px">'+esc(m.ticker)+'</td>';
+      h+='<td style="font-size:10px;color:#888">'+esc(title)+'</td>';
+      h+='<td style="color:#ffaa00;font-weight:700">'+fmtVol(m.volume)+'</td>';
+      h+='<td>$'+(m.yes_ask||0).toFixed(2)+'<span class="gray">/</span>$'+(m.yes_bid||0).toFixed(2)+'</td>';
+      h+='<td>$'+(m.no_ask||0).toFixed(2)+'<span class="gray">/</span>$'+(m.no_bid||0).toFixed(2)+'</td>';
+      h+='<td>'+(m.owned?'<span class="green">OWNED</span>':'')+'</td>';
+      h+='</tr>';
+    });
+    $('hot-body').innerHTML=h||'<tr><td colspan="6" class="gray" style="text-align:center">No data yet</td></tr>';
+  }
+
   $('last-update').textContent=new Date().toLocaleTimeString();
 }
 
@@ -1065,7 +1121,7 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- half at 100%, full at 200%, 30s cycles, crypto + sports")
+    logger.info(f"Bot starting [{mode}] -- half at 100%, full at 200%, 10s cycles, crypto + sports")
     logger.info(f"Series: {ALL_SERIES}")
     logger.info(f"Settings: price=${BUY_MIN}-${BUY_MAX}, filter=price+bid only")
     logger.info(f"Sizing: {MAX_CONTRACTS_PER_TRADE} contracts, {MAX_DEPLOYMENT_PCT:.0%} max deploy, {MIN_CASH_RESERVE:.0%} cash reserve, {MAX_POSITIONS} max positions")
