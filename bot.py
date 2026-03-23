@@ -355,6 +355,33 @@ def cancel_all_resting():
         logger.error(f"Cancel all resting error: {e}")
 
 
+# === CLEAR DEAD — mark low-bid positions as dead on startup ===
+
+def clear_dead():
+    """Mark all positions with current_bid <= $0.02 as dead losses."""
+    try:
+        open_buys = db.table('trades').select('*') \
+            .eq('action', 'buy').is_('pnl', 'null').execute()
+        if not open_buys.data:
+            return
+        dead = 0
+        for pos in open_buys.data:
+            bid = sf(pos.get('current_bid'))
+            if bid <= 0.02:
+                entry_price = sf(pos['price'])
+                count = pos.get('count') or 1
+                loss = round(-entry_price * count, 4)
+                db.table('trades').update({
+                    'pnl': loss,
+                    'current_bid': 0,
+                }).eq('id', pos['id']).execute()
+                logger.info(f"DEAD: {pos['ticker']} bid=${bid:.2f}")
+                dead += 1
+        logger.info(f"Clear dead: marked {dead} positions")
+    except Exception as e:
+        logger.error(f"Clear dead error: {e}")
+
+
 # === STARTUP PURGE ===
 
 def startup_purge():
@@ -1074,6 +1101,7 @@ setInterval(refresh,15000);
 def bot_loop():
     logger.info("Bot starting — KXBTCD ONLY, 5s cycles, 5 contracts, executed orders only")
     cancel_all_resting()
+    clear_dead()
     startup_purge()
     resync_positions()
     clear_non_btcd()
