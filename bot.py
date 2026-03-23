@@ -328,7 +328,7 @@ def check_positions():
 
         pct = ((current_bid - entry_price) / entry_price) * 100
 
-        # ONLY SELL IF UP 100%+ (doubled your money)
+        # ONLY SELL IF UP 35%+
         if pct >= TAKE_PROFIT_PCT:
             sell(trade, current_bid, f"TAKE PROFIT +{pct:.0f}% ({entry_price:.2f}->{current_bid:.2f})")
 
@@ -588,6 +588,7 @@ def run_cycle():
     if open_count < MAX_POSITIONS:
         try:
             weather_signals = weather_edge_strategy()
+            logger.info(f"Weather edge: {len(weather_signals)} signals found")
             live_spent = 0
             available = balance * 0.75  # Keep 25% reserve
             for signal in weather_signals:
@@ -619,9 +620,12 @@ def run_cycle():
         try:
             all_weather_markets = []
             for series in WEATHER_SERIES:
-                all_weather_markets.extend(get_series_markets(series))
+                mkts = get_series_markets(series)
+                logger.info(f"Weather series {series}: {len(mkts)} open markets")
+                all_weather_markets.extend(mkts)
             weather_spread_signals = weather_buy_everything(all_weather_markets)
             paper_bal = get_paper_balance()
+            logger.info(f"Weather spread: {len(weather_spread_signals)} signals, paper balance=${paper_bal:.2f}")
             for signal in weather_spread_signals:
                 if open_count >= MAX_POSITIONS:
                     break
@@ -649,6 +653,7 @@ def run_cycle():
             crypto_signals = crypto_scalp_strategy()
             crypto_count = 0
             paper_bal = get_paper_balance()
+            logger.info(f"Crypto scalp: {len(crypto_signals)} signals, paper balance=${paper_bal:.2f}")
             for signal in crypto_signals:
                 if open_count >= MAX_POSITIONS:
                     break
