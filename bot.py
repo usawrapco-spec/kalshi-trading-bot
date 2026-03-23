@@ -268,14 +268,6 @@ def buy_candidates(markets):
         if ticker in owned:
             continue
 
-        # Skip if less than 5 minutes to expiry
-        close_time = market.get('close_time') or market.get('expected_expiration_time')
-        if close_time:
-            close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-            mins_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 60
-            if mins_left < 5:
-                continue
-
         yes_ask = float(market.get('yes_ask_dollars') or '999')
         yes_bid = float(market.get('yes_bid_dollars') or '0')
         no_ask = float(market.get('no_ask_dollars') or '999')
@@ -563,7 +555,7 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: 15M crypto (5 series) | 5min minimum | No stop loss</span>
+  <span>Series: 15M crypto (5 series) | No filters | No stop loss</span>
   <span>Buy: 3-45c | Sell: 30% | 5 contracts | 10s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
