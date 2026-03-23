@@ -29,8 +29,6 @@ MIN_CONTRACTS_PER_TRADE = 1
 MAX_DEPLOYMENT_PCT = 0.60
 MIN_CASH_RESERVE = 0.30
 MAX_POSITIONS = 50
-MAX_EXPIRY = 14400   # 4 hours
-MIN_EXPIRY = 60      # 1 minute
 PROFIT_BANK_PCT = 0.20
 PAPER_STARTING_BALANCE = 20.00
 PAPER_RESET_TIME = '2026-03-23T20:40:00Z'
@@ -289,27 +287,15 @@ def find_buy_candidates(markets):
         sample = markets[0]
         logger.info(f"MARKET FIELDS: {list(sample.keys())}")
         logger.info(f"VOL FIELDS: {[k for k in sample.keys() if 'vol' in k.lower()]} = {[sample.get(k) for k in sample.keys() if 'vol' in k.lower()]}")
-        for m in markets[:3]:
-            ct = m.get('close_time')
-            et = m.get('expiration_time')
-            eet = m.get('expected_expiration_time')
-            parsed = get_time_to_expiry(m.get('ticker', ''), market=m)
-            logger.info(f"EXPIRY DEBUG: {m.get('ticker','')} close_time={ct} expiration_time={et} expected={eet} parsed_secs={parsed}")
 
     candidates = []
-    blocked = wrong_price = no_bid = bad_expiry = 0
+    blocked = wrong_price = no_bid = 0
 
     for market in markets:
         ticker = market.get('ticker', '')
 
         if any(pat in ticker for pat in BLOCKED_PATTERNS):
             blocked += 1
-            continue
-
-        # Expiry filter: must be 1 min to 4 hours out
-        tte = get_time_to_expiry(ticker, market=market)
-        if tte is None or tte < MIN_EXPIRY or tte > MAX_EXPIRY:
-            bad_expiry += 1
             continue
 
         yes_ask = sf(market.get('yes_ask_dollars', '0'))
@@ -345,7 +331,7 @@ def find_buy_candidates(markets):
 
     candidates.sort(key=lambda x: x['volume'], reverse=True)
     total = len(markets)
-    logger.info(f"FILTER: {total} total | {blocked} blocked | {bad_expiry} wrong expiry | {wrong_price} price out | {no_bid} no bid | {len(candidates)} candidates")
+    logger.info(f"FILTER: {total} total | {blocked} blocked | {wrong_price} price out | {no_bid} no bid | {len(candidates)} candidates")
 
     # Log first 10 candidates
     for c in candidates[:10]:
@@ -1035,7 +1021,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <div class="status-item"><span class="live-dot dot-paper" id="status-dot"></span> <span id="status-mode">PAPER</span></div>
-  <div class="status-item">Buy: 3-15c, bid &gt; 0, expiry 1m-4h</div>
+  <div class="status-item">Buy: 3-15c, bid &gt; 0</div>
   <div class="status-item">Sell: 100% all, expiry save 25%</div>
   <div class="status-item">Max: 3 contracts, cash limited</div>
   <div class="status-item">Series: Crypto + Index + Oil brackets</div>
