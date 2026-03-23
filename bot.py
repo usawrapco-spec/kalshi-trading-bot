@@ -245,9 +245,10 @@ def clear_non_btcd():
 # === SELL LOGIC ===
 # Fast scalper: sell at +25% instantly, or sell any profit after 10s timeout.
 
-entry_times = {}  # trade_id -> first_seen_timestamp
-last_bids = {}    # trade_id -> last seen bid (to detect price movement)
-price_moved = {}  # trade_id -> True if bid changed before 10s
+entry_times = {}   # trade_id -> first_seen_timestamp
+hit_100 = {}       # trade_id -> True if gain ever hit 100%+
+hit_200_at = {}    # trade_id -> timestamp when gain first hit 200%+
+last_bid_200 = {}  # trade_id -> bid when 200%+ was first seen
 
 def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_id):
     if current_bid <= 0 or entry_price <= 0:
@@ -255,45 +256,55 @@ def should_sell(entry_price, current_bid, count, time_to_expiry_seconds, trade_i
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
     now = time.time()
 
-    # Track when we first saw this position
     if trade_id not in entry_times:
         entry_times[trade_id] = now
-        last_bids[trade_id] = current_bid
-
     age = now - entry_times[trade_id]
 
-    # Detect price movement before 10s
-    if age < 10 and current_bid != last_bids.get(trade_id):
-        price_moved[trade_id] = True
-    last_bids[trade_id] = current_bid
+    # Track if it ever hit 100%
+    if gain_pct >= 100:
+        hit_100[trade_id] = True
 
-    # Up 25%+ at any time — sell, great trade
-    if gain_pct >= 25:
-        entry_times.pop(trade_id, None)
-        last_bids.pop(trade_id, None)
-        price_moved.pop(trade_id, None)
-        return True, count, f"WIN +{gain_pct:.0f}%"
+    # Track if it hit 200%+ and when
+    if gain_pct >= 200:
+        if trade_id not in hit_200_at:
+            hit_200_at[trade_id] = now
+            last_bid_200[trade_id] = current_bid
+        # Update bid if it moved
+        if current_bid != last_bid_200.get(trade_id):
+            hit_200_at[trade_id] = now
+            last_bid_200[trade_id] = current_bid
 
-    # 10 seconds old + profitable but under 25% — sell, move on
-    if age >= 10 and gain_pct > 0 and not price_moved.get(trade_id):
-        entry_times.pop(trade_id, None)
-        last_bids.pop(trade_id, None)
-        price_moved.pop(trade_id, None)
-        return True, count, f"TIMEOUT +{gain_pct:.0f}% ({age:.0f}s)"
+    # Above 200% and stagnant for 5s — instant sell, take the money
+    if trade_id in hit_200_at and gain_pct >= 200:
+        stale_time = now - hit_200_at[trade_id]
+        if stale_time >= 5:
+            _cleanup(trade_id)
+            return True, count, f"200+ STALE +{gain_pct:.0f}% ({stale_time:.0f}s)"
 
-    # Price moved before 10s — let it ride but hard cap at 30s
-    if price_moved.get(trade_id) and age >= 30 and gain_pct > 0:
-        entry_times.pop(trade_id, None)
-        last_bids.pop(trade_id, None)
-        price_moved.pop(trade_id, None)
-        return True, count, f"MOVED CAP +{gain_pct:.0f}% ({age:.0f}s)"
+    # Was above 100%, dropped back below — ride is over
+    if hit_100.get(trade_id) and gain_pct < 100:
+        _cleanup(trade_id)
+        return True, count, f"DROP FROM 100 +{gain_pct:.0f}%"
+
+    # 30 seconds + profitable — sell
+    if age >= 30 and gain_pct > 0:
+        _cleanup(trade_id)
+        return True, count, f"SELL +{gain_pct:.0f}% ({age:.0f}s)"
 
     # Expiry save
     if time_to_expiry_seconds is not None and time_to_expiry_seconds < 300:
         if gain_pct > 0:
+            _cleanup(trade_id)
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
     return False, 0, None
+
+
+def _cleanup(trade_id):
+    entry_times.pop(trade_id, None)
+    hit_100.pop(trade_id, None)
+    hit_200_at.pop(trade_id, None)
+    last_bid_200.pop(trade_id, None)
 
 
 # === BUY LOGIC ===
