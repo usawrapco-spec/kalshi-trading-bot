@@ -14,8 +14,8 @@ SUPABASE_URL = os.environ.get('SUPABASE_URL')
 SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 
-MIN_PRICE = 0.02
-MAX_PRICE = 0.50
+MIN_PRICE = 0.03
+MAX_PRICE = 0.20
 CYCLE_SECONDS = 30
 
 # === GOLDEN HOUR SETTINGS — simple, fast turnover ===
@@ -28,7 +28,7 @@ MAX_BUYS_PER_CYCLE = 15         # High volume: golden hour did ~2.7/cycle at 30s
 MAX_OPEN_POSITIONS = 200
 
 # === SELL THRESHOLDS ===
-# No ceiling — only sell 1min before expiry if profitable. Let winners ride to $1.00.
+# 15M contracts: scalp at 15%. Hourly+: scalp at 50%. Never let profit expire.
 
 # === PROFIT COMPOUNDING ===
 PROFIT_SAVE_PCT = 0.20          # 20% of every win gets banked permanently
@@ -184,11 +184,7 @@ def get_market(ticker):
 
 def place_order(ticker, side, action, price, count):
     """Place a real Kalshi order. Returns order_id or None."""
-    # HARD SAFETY: block 15M contracts at the gate
-    if '15M' in ticker:
-        logger.warning(f"BLOCKED at order gate: {ticker} — 15-min contracts disabled")
-        return None
-    # HARD SAFETY: cap buy orders at 5 contracts max (golden hour setting)
+    # HARD SAFETY: cap buy orders at 5 contracts max
     if action == 'buy':
         count = min(count, 5)
     price_cents = int(round(price * 100))
@@ -216,7 +212,7 @@ def place_order(ticker, side, action, price, count):
 
 def categorize_market(ticker):
     """Categorize any Kalshi market by ticker pattern."""
-    if '15M' in ticker: return '15-min crypto (BLOCKED)'
+    if '15M' in ticker: return '15-min crypto'
     elif any(x in ticker for x in ['KXBTCD', 'KXETHD', 'KXSOLD']): return 'crypto direction'
     elif any(x in ticker for x in ['KXBTC-', 'KXETH-', 'KXSOL-']): return 'crypto bracket'
     elif 'KXNCAAMBGAME' in ticker or 'KXNCAAMB' in ticker or 'KXCBB' in ticker: return 'NCAA basketball'
@@ -232,6 +228,7 @@ def categorize_market(ticker):
 
 
 CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
+SPORTS_SERIES = ['KXNCAAMBGAME', 'KXMARMAD']
 
 
 
@@ -239,18 +236,16 @@ CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXBTCD', 'KXETHD', 'KXSOLD']
 
 
 def fetch_crypto_markets():
-    """Fetch crypto markets by series ticker — the way that was working during golden hour."""
+    """Fetch crypto + March Madness markets by series ticker."""
     all_markets = []
-    for series in CRYPTO_SERIES:
+    for series in CRYPTO_SERIES + SPORTS_SERIES:
         try:
             resp = kalshi_get(f'/markets?series_ticker={series}&status=open&limit=200')
             all_markets.extend(resp.get('markets', []))
         except Exception as e:
             logger.error(f"Fetch {series} failed: {e}")
 
-    # Filter out 15M
-    all_markets = [m for m in all_markets if '15M' not in m.get('ticker', '')]
-    logger.info(f"Fetched {len(all_markets)} crypto markets (hourly only)")
+    logger.info(f"Fetched {len(all_markets)} markets (crypto + March Madness, including 15M)")
 
     # Categorize for dashboard
     categories = {}
@@ -290,42 +285,23 @@ def run_buys(markets):
         return
 
     buys = []
-    skipped_15m = 0
     skipped_mve = 0
     no_price = 0
     no_bid = 0
     price_ok = 0
 
-    # TEMPORARY DEBUG — log first 5 tickers and what expiry parsing returns
-    for m in markets[:5]:
-        t = m.get('ticker', '')
-        exp = get_time_to_expiry(t)
-        logger.info(f"DEBUG EXPIRY: {t} → {exp}")
-
     for m in markets:
         ticker = m.get('ticker', '')
+        status = m.get('status', '')
 
-        # HARD BLOCK: no 15-minute contracts ever
-        if '15M' in ticker:
-            skipped_15m += 1
+        # Skip closed/settled markets
+        if status != 'open':
             continue
 
-        # Skip multivariate
+        # Skip multivariate parlays
         if 'KXMVE' in ticker:
             skipped_mve += 1
             continue
-
-        # HARD BLOCKS: yearly, monthly, long-dated junk
-        if 'KXBTCY' in ticker: continue
-        if 'KXETHY' in ticker: continue
-        if 'KXSOLY' in ticker: continue
-        if 'MAXMON' in ticker: continue
-        if 'MINMON' in ticker: continue
-        if '27JAN' in ticker: continue
-        if '2026250' in ticker: continue
-        if 'SOL26500' in ticker: continue
-        if 'SOLD26' in ticker: continue
-        if 'KXSOLE' in ticker: continue
 
         if ticker in owned:
             already_owned += 1
@@ -346,11 +322,11 @@ def run_buys(markets):
             no_ask = sf(m.get('no_ask', 0)) / 100.0 if sf(m.get('no_ask', 0)) > 1 else sf(m.get('no_ask', 0))
             no_bid = sf(m.get('no_bid', 0)) / 100.0 if sf(m.get('no_bid', 0)) > 1 else sf(m.get('no_bid', 0))
 
-        # Collect qualifying sides: price 3-50 cents, has ANY bid
+        # SWEET SPOT: 3-20 cents — where all big wins came from
         side_candidates = []
-        if 0.03 <= yes_ask <= 0.50 and yes_bid > 0:
+        if 0.03 <= yes_ask <= 0.20 and yes_bid > 0:
             side_candidates.append(('yes', yes_ask, yes_bid))
-        if 0.03 <= no_ask <= 0.50 and no_bid > 0:
+        if 0.03 <= no_ask <= 0.20 and no_bid > 0:
             side_candidates.append(('no', no_ask, no_bid))
 
         if not side_candidates:
@@ -373,7 +349,7 @@ def run_buys(markets):
                 'volume': volume, 'strategy': category,
             })
 
-    logger.info(f"FILTER DEBUG: total={len(markets)} | 15m_blocked={skipped_15m} | mve_skip={skipped_mve} | "
+    logger.info(f"FILTER DEBUG: total={len(markets)} | mve_skip={skipped_mve} | "
                 f"owned={already_owned} | no_price={no_price} | no_bid={no_bid} | "
                 f"out_of_range={price_ok} | final_candidates={len(buys)}")
 
@@ -453,8 +429,6 @@ def run_buys(markets):
 
 sell_history = []  # Rolling last 20 sell gain percentages
 
-EXPIRY_WINDOW_SECONDS = 60  # 1 minute — sell anything green before close
-
 
 def get_time_to_expiry(market_or_ticker):
     """Returns seconds until market closes, or None if unknown.
@@ -506,22 +480,36 @@ def get_time_to_expiry(market_or_ticker):
     return None
 
 
-def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id):
-    """No ceiling — only sell 1min before expiry if profitable. Let winners ride to $1.00.
+def decide_sell(entry_price, current_bid, count, time_to_expiry, trade_id, ticker=''):
+    """Tiered sell logic: 15M scalp fast at 15%, hourly+ at 50%. Never let profit expire.
     Returns (should_sell, sell_qty, reason)."""
     if current_bid <= 0 or entry_price <= 0:
         return False, 0, None
 
     gain_pct = ((current_bid - entry_price) / entry_price) * 100
+    is_15m = '15M' in ticker
 
-    # ONLY sell 1 minute before expiry if profitable. That's it.
-    # Let everything else ride — 50%, 100%, 340%, doesn't matter.
-    # The contract either settles at $1.00 (huge win) or gets saved before close.
-    if time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS:
+    # === 15-MINUTE CONTRACTS: scalp fast, lower target ===
+    if is_15m:
+        # Take profit at 15%+
+        if gain_pct >= 15:
+            return True, count, f"15M SCALP +{gain_pct:.0f}%"
+        # 2 minutes before expiry — sell anything green
+        if time_to_expiry is not None and time_to_expiry < 120:
+            if gain_pct > 0:
+                return True, count, f"15M SAVE +{gain_pct:.0f}%"
+        return False, 0, None
+
+    # === HOURLY+ CONTRACTS: hold for bigger gains ===
+    # Take profit at 50%+
+    if gain_pct >= 50:
+        return True, count, f"SCALP +{gain_pct:.0f}%"
+
+    # 5 minutes before expiry — sell anything green
+    if time_to_expiry is not None and time_to_expiry < 300:
         if gain_pct > 0:
             return True, count, f"EXPIRY SAVE +{gain_pct:.0f}%"
 
-    # Otherwise hold
     return False, 0, None
 
 
@@ -631,9 +619,9 @@ def cleanup_ghosts():
 
 
 def check_sells():
-    """No ceiling — only sell 1min before expiry if profitable. Let winners ride."""
+    """Tiered sell: 15M at 15%, hourly at 50%, never let profit expire."""
     global sell_history
-    logger.info("check_sells() — no ceiling, 1min expiry save only")
+    logger.info("check_sells() — 15M scalp 15%, hourly scalp 50%, expiry saves")
 
     open_buys = db.table('trades').select('*') \
         .eq('action', 'buy').is_('pnl', 'null').execute()
@@ -729,7 +717,17 @@ def check_sells():
         # Log position evaluation
         time_to_expiry = get_time_to_expiry(market)
         expiry_str = f"{int(time_to_expiry)}s" if time_to_expiry is not None else "unknown"
-        action_preview = "EXPIRY SAVE" if (time_to_expiry is not None and time_to_expiry < EXPIRY_WINDOW_SECONDS and gain_pct > 0) else "HOLD"
+        is_15m = '15M' in ticker
+        if is_15m and gain_pct >= 15:
+            action_preview = "15M SCALP"
+        elif is_15m and time_to_expiry is not None and time_to_expiry < 120 and gain_pct > 0:
+            action_preview = "15M SAVE"
+        elif not is_15m and gain_pct >= 50:
+            action_preview = "SCALP"
+        elif not is_15m and time_to_expiry is not None and time_to_expiry < 300 and gain_pct > 0:
+            action_preview = "EXPIRY SAVE"
+        else:
+            action_preview = "HOLD"
         logger.info(f"EVAL: {ticker} {side} x{count} | entry=${entry_price:.2f} bid=${current_bid:.2f} | gain={gain_pct:+.0f}% | expiry={expiry_str} | {action_preview}")
 
         # Near-expiry alert logging (< 2 min)
@@ -748,7 +746,7 @@ def check_sells():
 
         # === DECIDE SELL ===
         should_sell, sell_qty, reason = decide_sell(
-            entry_price, current_bid, count, time_to_expiry, trade.get('id')
+            entry_price, current_bid, count, time_to_expiry, trade.get('id'), ticker=ticker
         )
 
         if should_sell and sell_qty > 0:
@@ -781,13 +779,13 @@ def run_cycle():
     except Exception as e:
         logger.error(f"Ghost cleanup error: {e}")
 
-    # 1. Check sells — no ceiling, only expiry save
+    # 1. Check sells — 15% on 15M, 50% on hourly, expiry saves
     try:
         check_sells()
     except Exception as e:
         logger.error(f"Sell check error: {e}")
 
-    # 2. Scan crypto markets for new buys
+    # 2. Scan crypto + March Madness markets for new buys
     try:
         crypto_markets = fetch_crypto_markets()
         run_buys(crypto_markets)
@@ -1009,7 +1007,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Kalshi Scalp Bot &mdash; Golden Hour</title>
+<title>Kalshi Scalp Bot &mdash; Scalper v2</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
@@ -1101,7 +1099,7 @@ tr:hover{background:#1a1a1a !important}
 
 <!-- Portfolio Hero -->
 <div class="portfolio">
-  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; Crypto Scanner &mdash; Expiry Save Only</div>
+  <div class="sub"><span class="live-dot"></span>LIVE TRADING &mdash; 30s cycles &mdash; Scalper v2 &mdash; 3-20c entries, 15M+hourly</div>
   <div class="portfolio-value" id="p-total">...</div>
   <div class="portfolio-pnl" id="p-pnl">...</div>
   <div class="portfolio-breakdown">
@@ -1119,7 +1117,7 @@ tr:hover{background:#1a1a1a !important}
 
 <!-- Scanner Status -->
 <div class="scanner-bar" id="scanner-bar">
-  <div class="scanner-title">Crypto Scanner</div>
+  <div class="scanner-title">Market Scanner (Crypto + March Madness)</div>
   <div class="scanner-cats" id="scanner-cats">Waiting for first scan...</div>
 </div>
 
@@ -1146,14 +1144,14 @@ tr:hover{background:#1a1a1a !important}
 <!-- Status Bar -->
 <div class="status-bar">
   <div class="status-item"><span class="dot-live"></span> Status: LIVE</div>
-  <div class="status-item">15M: <span class="dot-blocked"></span> BLOCKED</div>
+  <div class="status-item">15M: <span class="dot-live"></span> ENABLED (15% scalp)</div>
   <div class="status-item">Max contracts: 5</div>
-  <div class="status-item">Sell: no ceiling, 1min expiry save only</div>
+  <div class="status-item">Sell: 15% on 15M, 50% on hourly, expiry saves</div>
   <div class="status-item">Saved: <span class="green" id="sb-saved">$0</span> protected</div>
   <div class="status-item">Ghosts: <span class="yellow" id="sb-ghosts">0</span> expired cleaned</div>
   <div class="status-item">Last update: <span id="last-update">&mdash;</span></div>
 </div>
-<div class="footer">Kalshi Scalp Bot v8 &mdash; Master Reset &mdash; auto-refresh 15s</div>
+<div class="footer">Kalshi Scalp Bot v9 &mdash; Scalper v2 &mdash; auto-refresh 15s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
@@ -1225,8 +1223,7 @@ async function refresh(){
       var hasActivity=(c.wins+c.losses)>0;
       var hasOpen=(c.open||0)>0;
       var stLabel,stClass;
-      if(c.name==='15-min Crypto'){stLabel='DISABLED';stClass='badge-disabled';}
-      else if(hasOpen){stLabel='ACTIVE';stClass='badge-active';}
+      if(hasOpen){stLabel='ACTIVE';stClass='badge-active';}
       else if(hasActivity){stLabel='IDLE';stClass='badge-idle';}
       else{stLabel='SCANNING';stClass='badge-waiting';}
       h+='<div class="cat-card">';
@@ -1369,7 +1366,7 @@ setInterval(refresh,15000);
 # === MAIN ===
 
 def bot_loop():
-    logger.info("Bot starting — MASTER RESET — expiry save only, 5 contracts, let winners ride to $1.00")
+    logger.info("Bot starting — Scalper v2 — 3-20c entries, 15% on 15M, 50% on hourly, never let profit expire")
     close_all_old_positions()
     cleanup_ghosts()
     while True:
