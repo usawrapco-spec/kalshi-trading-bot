@@ -29,14 +29,14 @@ SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat
 STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
 TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
 MOMENTUM_THRESHOLD = 0.02   # 2% price change = momentum signal (was 5%, too strict)
-MAX_ADDS = 10               # keep adding to GREEN positions — ride the winners hard
+MAX_ADDS = 0                # one big buy per ticker, no adds
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10          # 10 sec cycles — don't overtrade
 STARTING_BALANCE = 1000.00
 CASH_RESERVE = 0.20         # keep 20% cash reserve ($20 buffer)
 MAX_BUYS_PER_CYCLE = 999    # unlimited buys per cycle
-CONTRACTS = 3
+CONTRACTS = 20              # big position when we see a signal
 MAX_DAILY_LOSS = float(os.environ.get('MAX_DAILY_LOSS', '10.00'))  # stop buying after $10 daily loss
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
