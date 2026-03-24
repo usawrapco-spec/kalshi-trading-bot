@@ -1,6 +1,7 @@
 """
 Crypto scalper. Buy cheap 15M contracts settling within 20min.
-Sell at +45% (beats fees), stop loss at -25%. Keep it simple.
+Sell at +30% (beats fees), stop loss at -40%, trailing stop -15% from peak.
+Directional filter: only buy with momentum. $100 balance, 20% reserve.
 """
 
 import os, time, logging, traceback
@@ -24,16 +25,19 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY: CHEAP ENTRIES, SELL ALL AT TARGET ===
 BUY_MIN = 0.03
 BUY_MAX = 0.20
-SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts
-# No stop loss — let cheap entries ride to settlement
+SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat Kalshi fees)
+STOP_LOSS_PCT = -0.40       # -40%: cut losses before full wipeout
+TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
+MOMENTUM_THRESHOLD = 0.05   # 5% price change = momentum signal
 MAX_ADDS = 2                # can add to a GREEN position twice (max 15 contracts)
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
-STARTING_BALANCE = 20.00
-CASH_RESERVE = 0.00
-MAX_BUYS_PER_CYCLE = 5
+STARTING_BALANCE = 100.00
+CASH_RESERVE = 0.20         # keep 20% cash reserve ($20 buffer)
+MAX_BUYS_PER_CYCLE = 3      # slower entry pace, less overexposure
 CONTRACTS = 3
+MAX_DAILY_LOSS = float(os.environ.get('MAX_DAILY_LOSS', '10.00'))  # stop buying after $10 daily loss
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
@@ -45,6 +49,8 @@ app = Flask(__name__)
 current_hot_markets = []
 last_cycle_prices = {}   # ticker -> yes_ask, for momentum detection
 peak_bids = {}           # trade_id -> highest bid seen
+daily_loss = 0.0         # cumulative realized losses today
+daily_loss_date = None   # reset daily
 
 
 def sf(val):
@@ -163,6 +169,7 @@ def get_owned_tickers():
 # === SELL LOGIC ===
 
 def check_sells():
+    global daily_loss
     logger.info("--- SELL CHECK ---")
     open_positions = get_open_positions()
 
@@ -199,6 +206,8 @@ def check_sells():
                 pnl = round(-entry_price * count, 4)
                 reason = "LOSS settled"
             logger.info(f"SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
+            if pnl < 0:
+                daily_loss += abs(pnl)
             try:
                 db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
             except Exception as e:
@@ -241,7 +250,14 @@ def check_sells():
         gain = (current_bid - entry_price) / entry_price
         gain_pct = gain * 100
 
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% x{count}")
+        # Track peak bid for trailing stop
+        trade_id = trade['id']
+        if trade_id not in peak_bids or current_bid > peak_bids[trade_id]:
+            peak_bids[trade_id] = current_bid
+        peak = peak_bids[trade_id]
+        drop_from_peak = (current_bid - peak) / peak if peak > 0 else 0
+
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% peak=${peak:.2f} x{count}")
 
         should_sell = False
         reason = ''
@@ -251,7 +267,15 @@ def check_sells():
             should_sell = True
             reason = f"+{gain_pct:.0f}% PROFIT"
 
-        # No stop loss — ride to settlement
+        # Stop loss at -40%
+        elif gain <= STOP_LOSS_PCT:
+            should_sell = True
+            reason = f"{gain_pct:.0f}% STOP LOSS"
+
+        # Trailing stop: if we were up but dropped 15% from peak
+        elif peak > entry_price and drop_from_peak <= -TRAIL_DROP_PCT:
+            should_sell = True
+            reason = f"TRAIL STOP (peak=${peak:.2f}, dropped {drop_from_peak*100:.0f}%)"
 
         if not should_sell:
             continue
@@ -272,6 +296,9 @@ def check_sells():
             pnl = round((current_bid - entry_price) * filled, 4)
 
         logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | pnl=${pnl:.4f}")
+        if pnl < 0:
+            daily_loss += abs(pnl)
+            logger.info(f"Daily loss now: ${daily_loss:.2f} (limit: ${MAX_DAILY_LOSS:.2f})")
         try:
             if filled >= count:
                 db.table('trades').update({
@@ -352,9 +379,22 @@ def get_recent_losers():
 
 
 def buy_candidates(markets):
+    global daily_loss, daily_loss_date
+
+    # Reset daily loss counter at midnight UTC
+    today = datetime.now(timezone.utc).date()
+    if daily_loss_date != today:
+        daily_loss = 0.0
+        daily_loss_date = today
+
+    # Check daily loss limit
+    if daily_loss >= MAX_DAILY_LOSS:
+        logger.info(f"DAILY LOSS LIMIT HIT: ${daily_loss:.2f} >= ${MAX_DAILY_LOSS:.2f} -- no new buys")
+        return
+
     balance = get_balance()
     open_positions = get_open_positions()
-    logger.info(f"Balance: ${balance:.2f} | {len(open_positions)} positions open")
+    logger.info(f"Balance: ${balance:.2f} | {len(open_positions)} positions open | Daily loss: ${daily_loss:.2f}")
 
     deployable = balance * (1.0 - CASH_RESERVE)
     if deployable <= 1.0:
@@ -387,15 +427,55 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # Buy the CHEAPEST side, $0.03-$0.12
+        # Directional filter: check if price is trending
+        strategy = None
+        old_yes = last_cycle_prices.get(ticker)
+        if old_yes and old_yes > 0:
+            price_change = (yes_ask - old_yes) / old_yes
+        else:
+            price_change = 0
+
+        # Buy the CHEAPEST side with directional confirmation
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            side, price, bid = 'yes', yes_ask, yes_bid
+            if price_change >= MOMENTUM_THRESHOLD:
+                side, price, bid = 'yes', yes_ask, yes_bid
+                strategy = 'cheap_yes_trend_up'
+            elif price_change <= -MOMENTUM_THRESHOLD:
+                # Price dropping = NO side getting stronger
+                if BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+                    side, price, bid = 'no', no_ask, no_bid
+                    strategy = 'cheap_no_trend_down'
+                else:
+                    continue
+            elif old_yes is None:
+                # First cycle, no history yet — buy cheapest side
+                side, price, bid = 'yes', yes_ask, yes_bid
+                strategy = 'cheap_yes_first_scan'
+            else:
+                continue  # no clear direction, skip
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
-            side, price, bid = 'no', no_ask, no_bid
+            if price_change <= -MOMENTUM_THRESHOLD:
+                side, price, bid = 'no', no_ask, no_bid
+                strategy = 'cheap_no_trend_down'
+            elif old_yes is None:
+                side, price, bid = 'no', no_ask, no_bid
+                strategy = 'cheap_no_first_scan'
+            else:
+                continue  # no directional confirmation
         elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            side, price, bid = 'yes', yes_ask, yes_bid
+            if price_change >= MOMENTUM_THRESHOLD:
+                side, price, bid = 'yes', yes_ask, yes_bid
+                strategy = 'cheap_yes_trend_up'
+            elif old_yes is None:
+                side, price, bid = 'yes', yes_ask, yes_bid
+                strategy = 'cheap_yes_first_scan'
+            else:
+                continue
         else:
             continue
+
+        # Update price history for next cycle's momentum detection
+        last_cycle_prices[ticker] = yes_ask
 
         # Dedup: check if we already own this ticker
         ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
@@ -409,7 +489,7 @@ def buy_candidates(markets):
                 continue  # red or maxed out, skip
             logger.info(f"  DOUBLE DOWN: {ticker} {pos_side} entry=${pos_entry:.2f} live_bid=${live_bid:.2f} GREEN, adding")
 
-        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
+        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'strategy': strategy})
 
     candidates.sort(key=lambda x: x['price'])
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
@@ -441,6 +521,7 @@ def buy_candidates(markets):
                 'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
                 'price': float(c['price']), 'count': filled,
                 'current_bid': float(c['bid']),
+                'strategy': c.get('strategy'),
             }).execute()
             open_positions.append({'ticker': c['ticker'], 'price': c['price']})
             deployable -= actual_cost
@@ -660,7 +741,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-12c &mdash; sell all +30% / stop -25%
+  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-20c &mdash; sell +30% / stop -40% / trail -15%
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -693,8 +774,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Buy cheap 3-12c | Sell ALL at +30% | Stop ALL at -25%</span>
-  <span>20min max | 3 contracts | 50% reserve</span>
+  <span>Buy cheap 3-20c w/ momentum | Sell +30% | Stop -40% | Trail -15%</span>
+  <span>20min max | 3 contracts | 20% reserve | $100 balance</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
