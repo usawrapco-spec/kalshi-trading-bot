@@ -301,37 +301,7 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # No take profit — ride to settlement
-
-        # Smart stop loss — check momentum before cutting
-        if raw_gain <= STOP_LOSS_PCT:
-            # Check how close to settlement
-            close_time = market.get('close_time') or market.get('expected_expiration_time')
-            mins_to_settle = 999
-            if close_time:
-                try:
-                    close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                    mins_to_settle = (close_dt - datetime.now(timezone.utc)).total_seconds() / 60
-                except:
-                    pass
-
-            # Near 2-min mark: check if momentum is shifting our way
-            if mins_to_settle <= 2:
-                prev_bid = peak_bids.get(f"{trade_id}_prev", current_bid)
-                if current_bid > prev_bid:
-                    # Price recovering — hold, momentum shifting our way
-                    logger.info(f"  HOLD: {ticker} net {net_pct:.0f}% but recovering (${prev_bid:.2f} -> ${current_bid:.2f}), {mins_to_settle:.1f}min left")
-                else:
-                    # Still dropping near expiry — cut it
-                    should_sell = True
-                    reason = f"NET {net_pct:.0f}% STOP LOSS (not recovering, {mins_to_settle:.1f}min left)"
-            else:
-                # Not near settlement yet — hard stop loss
-                should_sell = True
-                reason = f"NET {net_pct:.0f}% STOP LOSS"
-
-            # Track previous bid for momentum detection
-            peak_bids[f"{trade_id}_prev"] = current_bid
+        # No take profit, no stop loss — ride everything to settlement
 
         if not should_sell:
             continue
