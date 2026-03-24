@@ -156,8 +156,9 @@ def get_balance():
             return real
     try:
         # Only subtract cost of OPEN positions (closed ones returned their money)
-        open_buys = db.table('trades').select('price,count').eq('action', 'buy').is_('pnl', 'null').execute()
-        open_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
+        # Include buy fees — they're paid immediately
+        open_buys = db.table('trades').select('price,count,buy_fee').eq('action', 'buy').is_('pnl', 'null').execute()
+        open_cost = sum(sf(t['price']) * (t.get('count') or 1) + sf(t.get('buy_fee', 0)) for t in (open_buys.data or []))
         # Add realized P&L from closed positions
         pnls = db.table('trades').select('pnl').not_.is_('pnl', 'null').execute()
         total_pnl = sum(sf(t['pnl']) for t in (pnls.data or []))
