@@ -214,24 +214,28 @@ def check_sells():
         gain_pct = gain * 100
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        # Check if less than 60 seconds to expiry — sell to recover something
-        should_expiry_save = False
-        close_time = market.get('close_time') or market.get('expected_expiration_time')
-        if close_time:
-            close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-            secs_left = (close_dt - datetime.now(timezone.utc)).total_seconds()
-            if secs_left < 60 and current_bid > 0:
-                should_expiry_save = True
-
-        # 30% gain = take profit, or expiry save
-        if gain >= SELL_THRESHOLD:
+        # Tiered take profit: 20% for entries >= $0.20, 30% for cheaper
+        threshold = 0.20 if entry_price >= 0.20 else 0.30
+        if gain >= threshold:
             pnl = round((current_bid - entry_price) * count, 4)
-            reason = f"+{gain_pct:.0f}% PROFIT"
-        elif should_expiry_save:
-            pnl = round((current_bid - entry_price) * count, 4)
-            reason = f"EXPIRY SAVE {gain_pct:+.0f}%"
+            reason = f"+{gain_pct:.0f}% PROFIT (threshold {threshold*100:.0f}%)"
         else:
-            continue
+            # Expiry save — sell 1min before expiry if bid > 0
+            close_time = market.get('close_time') or market.get('expected_expiration_time')
+            if close_time:
+                try:
+                    close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                    secs_left = (close_dt - datetime.now(timezone.utc)).total_seconds()
+                    logger.info(f"  EXPIRY: {ticker} close={close_time} secs={secs_left:.0f}")
+                    if secs_left < 60 and current_bid > 0:
+                        pnl = round((current_bid - entry_price) * count, 4)
+                        reason = f"EXPIRY SAVE {gain_pct:+.0f}%"
+                    else:
+                        continue
+                except:
+                    continue
+            else:
+                continue
 
         result = place_order(ticker, side, 'sell', current_bid, count)
         if not result:
