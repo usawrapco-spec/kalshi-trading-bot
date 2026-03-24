@@ -135,7 +135,7 @@ def get_balance():
 
 def get_open_positions():
     try:
-        result = db.table('trades').select('*').eq('action', 'buy').is_('pnl', 'null').gte('created_at', BOT_START_TIME).execute()
+        result = db.table('trades').select('*').eq('action', 'buy').is_('pnl', 'null').execute()
         return result.data or []
     except Exception as e:
         logger.error(f"get_open_positions failed: {e}")
