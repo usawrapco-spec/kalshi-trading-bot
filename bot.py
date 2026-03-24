@@ -249,8 +249,8 @@ def check_sells():
         gain_pct = gain * 100
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        # Flat 30% take profit
-        if gain >= 0.30:
+        # Take profit
+        if gain >= SELL_THRESHOLD:
             pnl = round((current_bid - entry_price) * count, 4)
             reason = f"+{gain_pct:.0f}% PROFIT"
         else:
