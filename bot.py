@@ -1,6 +1,6 @@
 """
 Live scalper. Buy cheap crypto, sell at 30%, take loss on expiry.
-15M series only, $0.03-$0.35, 20/5 adaptive contracts, 10s cycles.
+15M series only, $0.03-$0.35, 10/5 tiered contracts, 10s cycles.
 """
 
 import os, time, logging, traceback, re
@@ -31,10 +31,8 @@ MAX_BUYS_PER_CYCLE = 10
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
-def get_contracts():
-    recent = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(5).execute()
-    recent_wins = sum(1 for t in recent.data if t['pnl'] > 0)
-    return 20 if recent_wins >= 3 else 5
+def get_contracts(price):
+    return 20 if price < 0.20 else 5
 
 # Set dynamically at startup
 BOT_START_TIME = None
@@ -339,7 +337,7 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        # Buy cheapest side in range
+        # Pick whichever side is cheaper, $0.03-$0.20
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
@@ -361,7 +359,7 @@ def buy_candidates(markets):
         if bought >= MAX_BUYS_PER_CYCLE:
             break
 
-        contracts = get_contracts()
+        contracts = get_contracts(c['price'])
         cost = c['price'] * contracts
         if cost > balance:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${balance:.2f}")
@@ -618,7 +616,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <span>Series: 15M crypto (5 series) | No filters | No stop loss</span>
-  <span>Buy: 3-35c | Sell: 30% | 20/5 adaptive contracts | 10s cycles</span>
+  <span>Buy: 3-35c | Sell: 30% | 10/5 contracts | 10s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
@@ -754,7 +752,7 @@ setInterval(updateCountdown,1000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- scalper: ${BUY_MIN}-${BUY_MAX}, sell at {SELL_THRESHOLD*100:.0f}%, 20/5 adaptive contracts, {CYCLE_SECONDS}s cycles")
+    logger.info(f"Bot starting [{mode}] -- scalper: ${BUY_MIN}-${BUY_MAX}, sell at {SELL_THRESHOLD*100:.0f}%, 10/5 contracts, {CYCLE_SECONDS}s cycles")
     logger.info(f"Series: {CRYPTO_SERIES}")
 
     init_bot()
