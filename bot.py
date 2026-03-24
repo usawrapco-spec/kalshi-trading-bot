@@ -324,7 +324,7 @@ def buy_candidates(markets):
     owned = get_owned_tickers()
     logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
 
-    reserve = balance * 0.50
+    reserve = balance * 0.20
     deployable = balance - reserve
     if deployable <= 1.0:
         logger.info(f"Balance ${balance:.2f}, reserve ${reserve:.2f}, deployable too low — skipping buys")
