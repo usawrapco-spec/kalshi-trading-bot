@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
 BUY_MIN = 0.03
-BUY_MAX = 0.50
+BUY_MAX = 0.15
 SELL_THRESHOLD = 0.50       # +50% take profit (beats fees)
 FEE_PER_CONTRACT = 0.07    # ~$0.035/side x2 = $0.07 round trip per contract
 STOP_LOSS = -0.25           # -25% stop loss
@@ -357,8 +357,8 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        # Pick whichever side is MORE expensive (bet opposite)
-        if yes_ask >= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        # Pick whichever side is CHEAPER
+        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
@@ -611,7 +611,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-50c &mdash; sell +50% / stop -25%
+  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-15c &mdash; sell +50% / stop -25%
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -645,7 +645,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <span>Series: 15M crypto (5 series) | 20min max | Stop -25% | Fees: ~$0.07/contract</span>
-  <span>Buy: 3-50c | Sell: +50% | 5/20 contracts | 10s cycles | 50% reserve</span>
+  <span>Buy: 3-15c | Sell: +50% | 5/20 contracts | 10s cycles | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
