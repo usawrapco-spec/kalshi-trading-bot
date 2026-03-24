@@ -275,24 +275,18 @@ def check_sells():
         reason = ''
 
         if strat == 'fav':
-            # FAVORITE: take profit at +12%, protect at +5%, stop at -10%
+            # FAVORITE: take profit at +12%, protect at +5%, NO stop (ride to settlement)
             if gain >= FAV_SELL:
                 should_sell = True
                 reason = f"FAV +{gain_pct:.0f}% PROFIT"
             elif current_peak >= 0.12 and gain <= FAV_PROTECT:
                 should_sell = True
                 reason = f"FAV PROTECT +{gain_pct:.0f}% (was +{current_peak*100:.0f}%)"
-            elif gain <= FAV_STOP:
-                should_sell = True
-                reason = f"FAV {gain_pct:+.0f}% STOP"
         else:
-            # LONGSHOT: NO take profit (ride to settlement), protect big gains, stop at -25%
+            # LONGSHOT: NO take profit, NO stop loss — ride to settlement at $1.00 or $0.00
             if current_peak >= LONG_PROTECT_PEAK and gain <= LONG_PROTECT_FLOOR:
                 should_sell = True
                 reason = f"LONG PROTECT +{gain_pct:.0f}% (was +{current_peak*100:.0f}%)"
-            elif gain <= LONG_STOP:
-                should_sell = True
-                reason = f"LONG {gain_pct:+.0f}% STOP"
 
         if not should_sell:
             continue
@@ -388,10 +382,6 @@ def buy_candidates(markets):
     owned = get_owned_tickers()
     logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
 
-    if not detect_momentum(markets):
-        logger.info("NO MOMENTUM -- skipping buys, waiting for price movement")
-        return
-
     deployable = balance * (1.0 - CASH_RESERVE)
     if deployable <= 1.0:
         logger.info(f"Balance ${balance:.2f}, deployable ${deployable:.2f} too low -- skipping buys")
@@ -399,14 +389,9 @@ def buy_candidates(markets):
 
     candidates = []
     now = datetime.now(timezone.utc)
-    recent_losers = get_recent_losers()
 
     for market in markets:
         ticker = market.get('ticker', '')
-
-        # Skip tickers that just lost — don't throw money at dead markets
-        if ticker in recent_losers:
-            continue
 
         # Only buy contracts settling within 20 minutes
         close_time = market.get('close_time') or market.get('expected_expiration_time')
