@@ -48,6 +48,9 @@ app = Flask(__name__)
 
 current_hot_markets = []
 last_cycle_prices = {}   # ticker -> yes_ask, for momentum detection
+price_history = {}       # ticker -> list of last N yes_bid prices (for trend detection)
+TREND_CYCLES = 4         # need 4 cycles of data before buying (40 seconds at 10s cycles)
+TREND_MIN_MOVE = 0.01    # price must move at least $0.01 total in one direction
 peak_bids = {}           # trade_id -> highest bid seen
 daily_loss = 0.0         # cumulative realized losses today
 daily_loss_date = None   # reset daily
@@ -462,18 +465,46 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f}")
+        # Track price history for trend detection
+        if ticker not in price_history:
+            price_history[ticker] = []
+        price_history[ticker].append(yes_bid)
+        # Keep only last TREND_CYCLES + 1 prices
+        if len(price_history[ticker]) > TREND_CYCLES + 1:
+            price_history[ticker] = price_history[ticker][-(TREND_CYCLES + 1):]
 
-        # Buy the CHEAPEST side
-        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        history = price_history[ticker]
+
+        # Need enough data to detect a trend
+        if len(history) < TREND_CYCLES:
+            logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} — collecting data ({len(history)}/{TREND_CYCLES})")
+            continue
+
+        # Detect trend: count how many cycles price went up vs down
+        ups = 0
+        downs = 0
+        for i in range(1, len(history)):
+            if history[i] > history[i-1]:
+                ups += 1
+            elif history[i] < history[i-1]:
+                downs += 1
+        total_move = history[-1] - history[0]
+
+        trend = 'none'
+        if ups >= 3 and total_move >= TREND_MIN_MOVE:
+            trend = 'up'
+        elif downs >= 3 and total_move <= -TREND_MIN_MOVE:
+            trend = 'down'
+
+        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} trend={trend} (ups={ups} downs={downs} move=${total_move:+.2f})")
+
+        # Only buy with a confirmed trend
+        if trend == 'up' and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'cheap_yes'
-        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            strategy = 'trend_up_yes'
+        elif trend == 'down' and BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
-            strategy = 'cheap_no'
-        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'cheap_yes'
+            strategy = 'trend_down_no'
         else:
             continue
 
