@@ -23,10 +23,12 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
 BUY_MIN = 0.03
-BUY_MAX = 0.50
-SELL_THRESHOLD = 0.50       # +50% take profit (beats fees)
+BUY_MAX = 0.15
+SELL_THRESHOLD = 0.50       # +50% take profit
+SELL_PROTECT = 0.10         # +10% minimum sell (covers fees, preserves capital)
 TAKER_FEE_RATE = 0.07      # Kalshi taker fee: ceil(0.07 * contracts * P * (1-P)), max $0.02/contract
 STOP_LOSS = -0.25           # -25% stop loss
+MOMENTUM_THRESHOLD = 0.05  # 5% price change between cycles = momentum
 MAX_MINS_TO_EXPIRY = 20     # only buy contracts settling within 20 min
 CYCLE_SECONDS = 10
 STARTING_BALANCE = 100.00
@@ -44,6 +46,8 @@ auth = KalshiAuth()
 app = Flask(__name__)
 
 current_hot_markets = []
+last_cycle_prices = {}   # ticker -> yes_ask, for momentum detection
+peak_gains = {}          # trade_id -> highest gain seen, for profit protection
 
 
 def sf(val):
@@ -210,6 +214,7 @@ def check_sells():
                 db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
             except Exception as e:
                 logger.error(f"Settle DB error: {e}")
+            peak_gains.pop(trade['id'], None)
             expired += 1
             continue
 
@@ -246,18 +251,31 @@ def check_sells():
 
         gain = (current_bid - entry_price) / entry_price
         gain_pct = gain * 100
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
+
+        # Track peak gain for profit protection
+        trade_id = trade['id']
+        prev_peak = peak_gains.get(trade_id, 0)
+        if gain > prev_peak:
+            peak_gains[trade_id] = gain
+        current_peak = peak_gains.get(trade_id, 0)
+
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% (peak {current_peak*100:+.0f}%)")
 
         should_sell = False
         reason = ''
 
-        # Take profit at +45%
+        # Take profit at +50%
         if gain >= SELL_THRESHOLD:
             should_sell = True
             reason = f"+{gain_pct:.0f}% PROFIT"
 
+        # Profit protection: if it ever hit +20% but dropped back to +10%, sell to preserve
+        if not should_sell and current_peak >= 0.20 and gain <= SELL_PROTECT:
+            should_sell = True
+            reason = f"PROTECT +{gain_pct:.0f}% (was +{current_peak*100:.0f}%)"
+
         # Stop loss at -25%
-        if gain <= STOP_LOSS:
+        if not should_sell and gain <= STOP_LOSS:
             should_sell = True
             reason = f"{gain_pct:+.0f}% STOP LOSS"
 
@@ -300,6 +318,7 @@ def check_sells():
                 }).execute()
         except Exception as e:
             logger.error(f"Sell DB error: {e}")
+        peak_gains.pop(trade_id, None)
         sold += 1
 
     logger.info(f"SELL SUMMARY: sold={sold} expired={expired}")
@@ -320,10 +339,34 @@ def fetch_all_markets():
     return all_markets
 
 
+def detect_momentum(markets):
+    """Compare current prices to last cycle. Returns True if any market moved significantly."""
+    global last_cycle_prices
+    momentum = False
+    for market in markets:
+        ticker = market.get('ticker', '')
+        yes_ask = float(market.get('yes_ask_dollars') or '0')
+        if yes_ask <= 0 or yes_ask >= 0.99:
+            continue
+        if ticker in last_cycle_prices:
+            old_price = last_cycle_prices[ticker]
+            if old_price > 0:
+                change = abs(yes_ask - old_price) / old_price
+                if change >= MOMENTUM_THRESHOLD:
+                    logger.info(f"MOMENTUM: {ticker} moved {change*100:.1f}% ({old_price:.2f} -> {yes_ask:.2f})")
+                    momentum = True
+        last_cycle_prices[ticker] = yes_ask
+    return momentum
+
+
 def buy_candidates(markets):
     balance = get_balance()
     owned = get_owned_tickers()
     logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
+
+    if not detect_momentum(markets):
+        logger.info("NO MOMENTUM -- skipping buys, waiting for price movement")
+        return
 
     deployable = balance * (1.0 - CASH_RESERVE)
     if deployable <= 1.0:
@@ -617,7 +660,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-50c &mdash; sell +50% / stop -25%
+  <span id="mode-label">PAPER MODE</span> &mdash; momentum scalper &mdash; 15M &mdash; 3-15c &mdash; sell +50% / protect +10% / stop -25%
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -650,8 +693,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: 15M crypto (5 series) | 20min max | Stop -25% | Fees: ~$0.07/contract</span>
-  <span>Buy: 3-50c | Sell: +50% | 5/20 contracts | 10s cycles | 50% reserve</span>
+  <span>Series: 15M crypto (5 series) | 20min max | Momentum gated | Stop -25%</span>
+  <span>Buy: 3-15c | Sell: +50% | Protect: +10% | 5/20 contracts | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
