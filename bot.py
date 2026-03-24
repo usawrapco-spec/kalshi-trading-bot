@@ -24,7 +24,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY ===
 BUY_MIN = 0.03
 BUY_MAX = 0.15
-SELL_THRESHOLD = 0.45       # +45% take profit (beats fees)
+SELL_THRESHOLD = 0.50       # +50% take profit (beats fees)
 FEE_PER_CONTRACT = 0.07    # ~$0.035/side x2 = $0.07 round trip per contract
 STOP_LOSS = -0.25           # -25% stop loss
 MAX_MINS_TO_EXPIRY = 20     # only buy contracts settling within 20 min
@@ -126,9 +126,10 @@ def get_kalshi_balance():
 
 
 def get_balance():
-    real = get_kalshi_balance()
-    if real is not None:
-        return real
+    if ENABLE_TRADING:
+        real = get_kalshi_balance()
+        if real is not None:
+            return real
     try:
         buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
         buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
