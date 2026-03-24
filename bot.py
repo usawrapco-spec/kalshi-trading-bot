@@ -948,7 +948,7 @@ setInterval(updateCountdown,1000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- buy cheap ${BUY_MIN}-${BUY_MAX}, sell +{SELL_THRESHOLD*100:.0f}%, {CONTRACTS} contracts, {CASH_RESERVE*100:.0f}% reserve")
+    logger.info(f"Bot starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, take profit bid>=${TAKE_PROFIT_BID}, {CONTRACTS} contracts, {CASH_RESERVE*100:.0f}% reserve, majority vote")
     logger.info(f"Series: {CRYPTO_SERIES}")
 
     while True:
