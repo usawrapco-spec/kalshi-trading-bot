@@ -299,12 +299,23 @@ def check_sells():
             peak_bids[trade_id] = current_bid
         peak = peak_bids[trade_id]
 
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} raw={raw_gain_pct:+.0f}% NET={net_pct:+.1f}% fees=${fees:.3f} x{count}")
+        # Smart sell: calculate breakeven including buy fee already paid
+        b_fee = kalshi_fee(entry_price, count)
+        s_fee = kalshi_fee(current_bid, count)
+        real_profit = (current_bid - entry_price) * count - b_fee - s_fee
+        breakeven_price = entry_price + (b_fee + kalshi_fee(entry_price * 1.1, count)) / count  # approximate
+
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} NET={net_pct:+.1f}% profit=${real_profit:.4f} breakeven~${breakeven_price:.2f} x{count}")
 
         should_sell = False
         reason = ''
 
-        # No take profit, no stop loss — ride everything to settlement
+        # SMART SELL: only sell if we're net positive after ALL fees (buy + sell)
+        # Buy fee is already paid — factor it in so we don't sell at a real loss
+        if real_profit > 0 and net >= 0.10:
+            # We're 10%+ net profitable after all fees — take it
+            should_sell = True
+            reason = f"SMART SELL: net profit ${real_profit:.4f} ({net_pct:+.1f}% after fees)"
 
         if not should_sell:
             continue
@@ -465,46 +476,18 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        # Track price history for trend detection
-        if ticker not in price_history:
-            price_history[ticker] = []
-        price_history[ticker].append(yes_bid)
-        # Keep only last TREND_CYCLES + 1 prices
-        if len(price_history[ticker]) > TREND_CYCLES + 1:
-            price_history[ticker] = price_history[ticker][-(TREND_CYCLES + 1):]
+        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f}")
 
-        history = price_history[ticker]
-
-        # Need enough data to detect a trend
-        if len(history) < TREND_CYCLES:
-            logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} — collecting data ({len(history)}/{TREND_CYCLES})")
-            continue
-
-        # Detect trend: count how many cycles price went up vs down
-        ups = 0
-        downs = 0
-        for i in range(1, len(history)):
-            if history[i] > history[i-1]:
-                ups += 1
-            elif history[i] < history[i-1]:
-                downs += 1
-        total_move = history[-1] - history[0]
-
-        trend = 'none'
-        if ups >= 3 and total_move >= TREND_MIN_MOVE:
-            trend = 'up'
-        elif downs >= 3 and total_move <= -TREND_MIN_MOVE:
-            trend = 'down'
-
-        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} trend={trend} (ups={ups} downs={downs} move=${total_move:+.2f})")
-
-        # Only buy with a confirmed trend
-        if trend == 'up' and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        # Buy the CHEAPEST side
+        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'trend_up_yes'
-        elif trend == 'down' and BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            strategy = 'cheap_yes'
+        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
-            strategy = 'trend_down_no'
+            strategy = 'cheap_no'
+        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            side, price, bid = 'yes', yes_ask, yes_bid
+            strategy = 'cheap_yes'
         else:
             continue
 
@@ -669,11 +652,14 @@ def api_open():
             price = sf(t.get('price'))
             current = sf(t.get('current_bid'))
             count = int(t.get('count') or 1)
+            b_fee = sf(t.get('buy_fee')) or kalshi_fee(price, count)
+            real_cost = round(price * count + b_fee, 4)
             if price > 0 and current > 0:
-                unrealized = round((current - price) * count, 4)
-                gain_pct = round(((current - price) / price) * 100, 1)
+                s_fee = kalshi_fee(current, count)
+                real_profit = round((current - price) * count - b_fee - s_fee, 4)
+                gain_pct = round((real_profit / real_cost) * 100, 1) if real_cost > 0 else 0
             else:
-                unrealized = 0
+                real_profit = 0
                 gain_pct = 0
             positions.append({
                 'ticker': t.get('ticker', ''),
@@ -681,10 +667,10 @@ def api_open():
                 'strategy': (t.get('strategy') or 'fav').upper(),
                 'count': count,
                 'entry': price,
-                'entry_total': round(price * count, 2),
+                'entry_total': real_cost,
                 'current_bid': current,
                 'bid_total': round(current * count, 2),
-                'unrealized': unrealized,
+                'unrealized': real_profit,
                 'gain_pct': gain_pct,
             })
         positions.sort(key=lambda x: x['gain_pct'], reverse=True)
