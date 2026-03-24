@@ -27,7 +27,7 @@ BUY_MAX = 0.35
 CYCLE_SECONDS = 10
 CONTRACTS_PER_TRADE = 5
 SELL_THRESHOLD = 0.30
-STARTING_BALANCE = 50.00
+STARTING_BALANCE = 20.00
 MAX_BUYS_PER_CYCLE = 10
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
@@ -306,27 +306,33 @@ def buy_candidates(markets):
 
     # Sort cheapest first, buy up to 10
     candidates.sort(key=lambda x: x['price'])
+    candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
+
+    if not candidates:
+        return
+
+    # Dynamic sizing: deploy 75% of balance spread across candidates
+    available = balance * 0.75
+    per_trade = available / len(candidates)
 
     bought = 0
     for c in candidates:
-        if bought >= MAX_BUYS_PER_CYCLE:
-            break
-
-        cost = c['price'] * CONTRACTS_PER_TRADE
+        contracts = max(int(per_trade / c['price']), 1)
+        cost = c['price'] * contracts
         if cost > balance:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${balance:.2f}")
             break
 
-        result = place_order(c['ticker'], c['side'], 'buy', c['price'], CONTRACTS_PER_TRADE)
+        result = place_order(c['ticker'], c['side'], 'buy', c['price'], contracts)
         if not result:
             continue
 
-        logger.info(f"BUY: {c['ticker']} {c['side']} x{CONTRACTS_PER_TRADE} @ ${c['price']:.2f}")
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{contracts} @ ${c['price']:.2f}")
         try:
             db.table('trades').insert({
                 'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
-                'price': float(c['price']), 'count': CONTRACTS_PER_TRADE,
+                'price': float(c['price']), 'count': contracts,
                 'current_bid': float(c['bid']),
             }).execute()
             owned.add(c['ticker'])
