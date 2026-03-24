@@ -454,6 +454,24 @@ def buy_candidates(markets):
     candidates = []
     now = datetime.now(timezone.utc)
 
+    # === MAJORITY VOTE: pick ONE side for all tickers ===
+    yes_favored = 0
+    no_favored = 0
+    for market in markets:
+        yes_ask = float(market.get('yes_ask_dollars') or '999')
+        no_ask = float(market.get('no_ask_dollars') or '999')
+        if yes_ask < 0.99 and no_ask < 0.99:
+            if yes_ask > 0.50:
+                yes_favored += 1  # market thinks YES wins
+            elif no_ask > 0.50:
+                no_favored += 1   # market thinks NO wins
+
+    if yes_favored >= no_favored:
+        direction = 'yes'
+    else:
+        direction = 'no'
+    logger.info(f"MAJORITY VOTE: yes_favored={yes_favored} no_favored={no_favored} → buying {direction.upper()} on everything")
+
     for market in markets:
         ticker = market.get('ticker', '')
 
@@ -473,18 +491,15 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f}")
+        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} → buying {direction.upper()}")
 
-        # Buy the CHEAPEST side
-        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        # Buy the majority-voted side only
+        if direction == 'yes' and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'cheap_yes'
-        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            strategy = 'vote_yes'
+        elif direction == 'no' and BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
-            strategy = 'cheap_no'
-        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'cheap_yes'
+            strategy = 'vote_no'
         else:
             continue
 
