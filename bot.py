@@ -301,13 +301,10 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # Take profit at +10% raw — lock in gains, don't get greedy
-        if raw_gain >= 0.10:
-            should_sell = True
-            reason = f"TAKE PROFIT +{raw_gain_pct:.0f}% (net {net_pct:+.1f}%)"
+        # No take profit — ride to settlement
 
         # Smart stop loss — check momentum before cutting
-        elif raw_gain <= STOP_LOSS_PCT:
+        if raw_gain <= STOP_LOSS_PCT:
             # Check how close to settlement
             close_time = market.get('close_time') or market.get('expected_expiration_time')
             mins_to_settle = 999
