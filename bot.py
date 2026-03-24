@@ -293,30 +293,44 @@ def check_sells():
         net_profit = net_pnl(entry_price, current_bid, count)
         fees = kalshi_fee(entry_price, count) + kalshi_fee(current_bid, count)
 
-        # Track peak bid
+        # Track peak bid and momentum
         trade_id = trade['id']
+        prev_bid = peak_bids.get(f"{trade_id}_prev", current_bid)
         if trade_id not in peak_bids or current_bid > peak_bids[trade_id]:
             peak_bids[trade_id] = current_bid
+            peak_bids[f"{trade_id}_drops"] = 0  # reset drop counter on new peak
         peak = peak_bids[trade_id]
 
-        # Smart sell: calculate breakeven including buy fee already paid
+        # Count consecutive drops from peak
+        drop_count = peak_bids.get(f"{trade_id}_drops", 0)
+        if current_bid < prev_bid:
+            drop_count += 1
+        else:
+            drop_count = 0  # reset if price goes up or flat
+        peak_bids[f"{trade_id}_drops"] = drop_count
+        peak_bids[f"{trade_id}_prev"] = current_bid
+
+        # Calculate real profit after all fees
         b_fee = kalshi_fee(entry_price, count)
         s_fee = kalshi_fee(current_bid, count)
         real_profit = (current_bid - entry_price) * count - b_fee - s_fee
-        breakeven_price = entry_price + (b_fee + kalshi_fee(entry_price * 1.1, count)) / count  # approximate
+        drop_from_peak = (current_bid - peak) / peak if peak > 0 else 0
+        climbing = current_bid > prev_bid
 
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} NET={net_pct:+.1f}% profit=${real_profit:.4f} breakeven~${breakeven_price:.2f} x{count}")
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} peak=${peak:.2f} drop={drop_from_peak*100:+.0f}% drops={drop_count} {'UP' if climbing else 'DN'} profit=${real_profit:.4f} x{count}")
 
         should_sell = False
         reason = ''
 
-        # SMART SELL: only sell if we're net positive after ALL fees (buy + sell)
-        # Buy fee is already paid — factor it in so we don't sell at a real loss
-        if real_profit > 0 and net >= 0.10:
-            # We're 10%+ net profitable after all fees — take it
-            should_sell = True
-            reason = f"SMART SELL: net profit ${real_profit:.4f} ({net_pct:+.1f}% after fees)"
+        # TRAILING SELL: let winners ride, sell when momentum dies
+        # Only sell if profitable after fees
+        if real_profit > 0:
+            # Sell if 2+ consecutive drops AND dropped 15%+ from peak
+            if drop_count >= 2 and drop_from_peak <= -0.15:
+                should_sell = True
+                reason = f"TRAILING SELL: {drop_count} drops, peak=${peak:.2f} now=${current_bid:.2f} ({drop_from_peak*100:.0f}%) profit=${real_profit:.4f}"
 
+        # If not profitable — just ride to settlement, no sell
         if not should_sell:
             continue
 
