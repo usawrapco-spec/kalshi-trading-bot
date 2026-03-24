@@ -164,11 +164,13 @@ def get_balance():
         if real is not None:
             return real
     try:
-        buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
-        buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
+        # Only subtract cost of OPEN positions (closed ones returned their money)
+        open_buys = db.table('trades').select('price,count').eq('action', 'buy').is_('pnl', 'null').execute()
+        open_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
+        # Add realized P&L from closed positions
         pnls = db.table('trades').select('pnl').not_.is_('pnl', 'null').execute()
         total_pnl = sum(sf(t['pnl']) for t in (pnls.data or []))
-        return max(0, STARTING_BALANCE - buy_cost + total_pnl)
+        return max(0, STARTING_BALANCE - open_cost + total_pnl)
     except Exception as e:
         logger.error(f"Balance calc failed: {e}")
         return 0.0
