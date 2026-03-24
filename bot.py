@@ -267,8 +267,13 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # Stop loss at -30% — only cut LOSERS, let winners ride to settlement
-        if gain <= STOP_LOSS_PCT:
+        # Take profit at +50%
+        if gain >= 0.50:
+            should_sell = True
+            reason = f"+{gain_pct:.0f}% PROFIT"
+
+        # Stop loss at -30% — cut losers
+        elif gain <= STOP_LOSS_PCT:
             should_sell = True
             reason = f"{gain_pct:.0f}% STOP LOSS"
 
