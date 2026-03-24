@@ -271,11 +271,17 @@ def fetch_all_markets():
 
 def buy_candidates(markets):
     balance = get_balance()
-    owned = get_owned_tickers()
-    logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
+    open_positions = get_open_positions()
+    deployed = sum(sf(t['price']) * (t.get('count') or 1) for t in open_positions)
+    max_deploy = balance * 0.75
+    logger.info(f"Balance: ${balance:.2f} | {len(open_positions)} positions | deployed=${deployed:.2f}/{max_deploy:.2f}")
 
     if balance <= 5.0:
         logger.info("Balance too low, skipping buys")
+        return
+
+    if deployed >= max_deploy:
+        logger.info("Already 75% deployed, skipping buys")
         return
 
     candidates = []
@@ -283,9 +289,6 @@ def buy_candidates(markets):
 
     for market in markets:
         ticker = market.get('ticker', '')
-
-        if ticker in owned:
-            continue
 
         yes_ask = float(market.get('yes_ask_dollars') or '999')
         yes_bid = float(market.get('yes_bid_dollars') or '0')
@@ -312,13 +315,15 @@ def buy_candidates(markets):
     if not candidates:
         return
 
-    # Dynamic sizing: deploy 75% of balance spread across candidates
-    available = balance * 0.75
-    per_trade = available / len(candidates)
+    # Gradual scaling: spread remaining deploy room across candidates, max 5 per buy
+    remaining = max_deploy - deployed
+    per_trade = remaining / len(candidates) if candidates else 0
 
     bought = 0
     for c in candidates:
-        contracts = max(int(per_trade / c['price']), 1)
+        contracts = int(per_trade / c['price'])
+        contracts = min(contracts, 5)
+        contracts = max(contracts, 1)
         cost = c['price'] * contracts
         if cost > balance:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${balance:.2f}")
@@ -335,7 +340,6 @@ def buy_candidates(markets):
                 'price': float(c['price']), 'count': contracts,
                 'current_bid': float(c['bid']),
             }).execute()
-            owned.add(c['ticker'])
             balance -= cost
             bought += 1
         except Exception as e:
