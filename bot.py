@@ -23,8 +23,8 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY: ALL 15M CRYPTO MARKETS ===
-BUY_MIN = 0.50              # buy favorites — the side market thinks wins
-BUY_MAX = 0.97              # up to 97 cents
+BUY_MIN = 0.01              # cheap side
+BUY_MAX = 0.15              # max 15 cents
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat Kalshi fees)
 STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
 TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
@@ -301,11 +301,13 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # No take profit — let contracts ride to settlement for max payout
-        # Only sell on stop loss below
+        # Take profit at +10% raw — lock in gains, don't get greedy
+        if raw_gain >= 0.10:
+            should_sell = True
+            reason = f"TAKE PROFIT +{raw_gain_pct:.0f}% (net {net_pct:+.1f}%)"
 
         # Smart stop loss — check momentum before cutting
-        if raw_gain <= STOP_LOSS_PCT:
+        elif raw_gain <= STOP_LOSS_PCT:
             # Check how close to settlement
             close_time = market.get('close_time') or market.get('expected_expiration_time')
             mins_to_settle = 999
@@ -495,16 +497,16 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f}")
 
-        # Buy the FAVORITE — the expensive side that's most likely to settle at $1.00
-        if yes_ask >= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        # Buy the CHEAPEST side
+        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'fav_yes'
+            strategy = 'cheap_yes'
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
-            strategy = 'fav_no'
+            strategy = 'cheap_no'
         elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'fav_yes'
+            strategy = 'cheap_yes'
         else:
             continue
 
@@ -522,7 +524,7 @@ def buy_candidates(markets):
 
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'strategy': strategy})
 
-    candidates.sort(key=lambda x: x['price'], reverse=True)  # highest conviction first
+    candidates.sort(key=lambda x: x['price'])  # cheapest first
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
 
