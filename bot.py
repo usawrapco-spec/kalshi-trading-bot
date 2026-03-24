@@ -24,7 +24,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY ===
 BUY_MIN = 0.03
 BUY_MAX = 0.15
-SELL_THRESHOLD = 0.35       # +35% take profit
+SELL_THRESHOLD = 0.45       # +45% take profit (beats fees)
 FEE_PER_CONTRACT = 0.07    # ~$0.035/side x2 = $0.07 round trip per contract
 STOP_LOSS = -0.25           # -25% stop loss
 MAX_MINS_TO_EXPIRY = 20     # only buy contracts settling within 20 min
