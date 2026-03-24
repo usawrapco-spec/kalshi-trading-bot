@@ -456,11 +456,14 @@ def api_status():
         positions_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_positions)
         portfolio = cash + positions_value
 
-        resolved = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').execute()
+        resolved = db.table('trades').select('pnl,count').eq('action', 'buy').not_.is_('pnl', 'null').execute()
         resolved_data = resolved.data or []
         total_pnl = sum(sf(t['pnl']) for t in resolved_data)
         wins = sum(1 for t in resolved_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in resolved_data if sf(t['pnl']) <= 0)
+        # Kalshi fee: $0.01/contract on buy + $0.01/contract on sell (settled trades have both)
+        total_fees = sum((t.get('count') or 1) * 0.02 for t in resolved_data)
+        pnl_after_fees = total_pnl - total_fees
 
         mode = "PAPER" if not ENABLE_TRADING else "LIVE"
 
@@ -469,6 +472,8 @@ def api_status():
             'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
             'net_pnl': round(total_pnl, 4),
+            'pnl_after_fees': round(pnl_after_fees, 4),
+            'total_fees': round(total_fees, 4),
             'wins': wins,
             'losses': losses,
             'open_count': len(open_positions),
@@ -595,7 +600,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="top-bar" style="flex-direction:column;gap:6px">
   <div style="font-size:16px">PORTFOLIO: <span id="tb-portfolio">...</span></div>
   <div style="font-size:12px;color:#888">Positions: <span id="tb-positions">...</span> &nbsp;&nbsp; Cash: <span id="tb-cash">...</span></div>
-  <div style="font-size:12px">P&amp;L: <span id="tb-pnl">...</span> &nbsp;&nbsp; RECORD: <span id="tb-record">...</span></div>
+  <div style="font-size:12px">P&amp;L: <span id="tb-pnl">...</span> &nbsp;&nbsp; After fees: <span id="tb-pnl-fees">...</span> &nbsp;&nbsp; RECORD: <span id="tb-record">...</span></div>
 </div>
 
 <div class="panel">
@@ -662,6 +667,8 @@ async function refresh(){
 
     var pnl=status.net_pnl||0;
     $('tb-pnl').innerHTML='<span class="'+cls(pnl)+'">'+(pnl>=0?'+':'')+pnl.toFixed(2)+'</span>';
+    var pnlFees=status.pnl_after_fees||0;
+    $('tb-pnl-fees').innerHTML='<span class="'+cls(pnlFees)+'">'+(pnlFees>=0?'+':'')+pnlFees.toFixed(2)+'</span> <span class="gray">(fees: -$'+(status.total_fees||0).toFixed(2)+')</span>';
     $('tb-record').innerHTML='<span class="green">'+(status.wins||0)+'W</span> <span class="gray">/</span> <span class="red">'+(status.losses||0)+'L</span>';
 
     var mode=status.mode||'PAPER';
