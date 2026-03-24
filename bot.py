@@ -127,18 +127,18 @@ def get_balance():
         real = get_kalshi_balance()
         if real is not None:
             return real
-    # Paper mode or Kalshi failed — use calculated balance
+    # Paper mode: starting balance minus currently deployed (open positions only)
     try:
-        buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
-        buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
+        open_buys = db.table('trades').select('price,count').eq('action', 'buy').is_('pnl', 'null').execute()
+        deployed = sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
 
         pnls = db.table('trades').select('pnl').not_.is_('pnl', 'null').execute()
         total_pnl = sum(sf(t['pnl']) for t in (pnls.data or []))
 
-        return max(0, STARTING_BALANCE - buy_cost + total_pnl)
+        return max(0, STARTING_BALANCE - deployed + total_pnl)
     except Exception as e:
         logger.error(f"Balance calc failed: {e}")
-        return 0.0
+        return STARTING_BALANCE
 
 
 def get_open_positions():
