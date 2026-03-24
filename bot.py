@@ -121,10 +121,12 @@ def get_kalshi_balance():
 
 
 def get_balance():
-    """Get cash balance — real from Kalshi API, fallback to calculated."""
-    real = get_kalshi_balance()
-    if real is not None:
-        return real
+    """Get cash balance — real from Kalshi if live, paper balance if paper mode."""
+    if ENABLE_TRADING:
+        real = get_kalshi_balance()
+        if real is not None:
+            return real
+    # Paper mode or Kalshi failed — use calculated balance
     try:
         buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
         buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
@@ -358,7 +360,7 @@ def buy_candidates(markets):
     owned = get_owned_tickers()
     logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
 
-    reserve = balance * 0.20
+    reserve = balance * 0.50
     deployable = balance - reserve
     if deployable <= 1.0:
         logger.info(f"Balance ${balance:.2f}, reserve ${reserve:.2f}, deployable too low — skipping buys")
