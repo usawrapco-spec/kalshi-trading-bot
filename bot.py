@@ -175,7 +175,7 @@ def get_owned_tickers():
 def get_contracts(price):
     recent = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(5).execute()
     recent_wins = sum(1 for t in recent.data if t['pnl'] > 0)
-    if recent_wins >= HOT_STREAK_WINS and price <= BUY_MAX:
+    if recent_wins >= HOT_STREAK_WINS and price <= LONG_MAX:
         return CONTRACTS_HOT
     return CONTRACTS_DEFAULT
 
