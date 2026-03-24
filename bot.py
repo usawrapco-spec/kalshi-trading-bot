@@ -21,11 +21,12 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
-# === STRATEGY: CHEAP ENTRIES, SELL AT +100%, DOUBLE DOWN ON WINNERS ===
+# === STRATEGY: CHEAP ENTRIES, TRAILING STOP ON WINNERS ===
 BUY_MIN = 0.03
 BUY_MAX = 0.20
-SELL_THRESHOLD = 3.00       # +300% minimum to sell — let winners ride big
-MAX_ADDS = 2                # can add to a winning position twice (max 9 contracts)
+TRAILING_ACTIVATE = 0.50    # trailing stop activates once gain > +50%
+TRAILING_DROP = 0.25        # sell if price drops 25% from peak bid
+MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
@@ -45,7 +46,7 @@ app = Flask(__name__)
 
 current_hot_markets = []
 last_cycle_prices = {}   # ticker -> yes_ask, for momentum detection
-peak_gains = {}          # trade_id -> highest gain seen, for profit protection
+peak_bids = {}           # trade_id -> highest bid seen
 
 
 def sf(val):
@@ -212,7 +213,7 @@ def check_sells():
                 db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
             except Exception as e:
                 logger.error(f"Settle DB error: {e}")
-            peak_gains.pop(trade['id'], None)
+            peak_bids.pop(trade['id'], None)
             expired += 1
             continue
 
@@ -249,14 +250,27 @@ def check_sells():
 
         gain = (current_bid - entry_price) / entry_price
         gain_pct = gain * 100
+        trade_id = trade['id']
 
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
+        # Track peak bid
+        prev_peak_bid = peak_bids.get(trade_id, current_bid)
+        if current_bid > prev_peak_bid:
+            peak_bids[trade_id] = current_bid
+        peak_bid = peak_bids.get(trade_id, current_bid)
+        peak_gain = (peak_bid - entry_price) / entry_price if entry_price > 0 else 0
 
-        # Sell at +100% (double your money)
-        if gain < SELL_THRESHOLD:
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% (peak ${peak_bid:.2f} +{peak_gain*100:.0f}%)")
+
+        # Trailing stop: only activates once gain was > +50%
+        # Then sells if price drops 25% from peak bid
+        if peak_gain < TRAILING_ACTIVATE:
             continue
 
-        reason = f"+{gain_pct:.0f}% PROFIT"
+        drop_from_peak = (peak_bid - current_bid) / peak_bid if peak_bid > 0 else 0
+        if drop_from_peak < TRAILING_DROP:
+            continue  # still riding, hasn't dropped enough
+
+        reason = f"TRAIL STOP +{gain_pct:.0f}% (peak ${peak_bid:.2f} +{peak_gain*100:.0f}%, dropped {drop_from_peak*100:.0f}%)"
 
         # === SELL ORDER ===
         pnl = round((current_bid - entry_price) * count, 4)
@@ -294,7 +308,7 @@ def check_sells():
                 }).execute()
         except Exception as e:
             logger.error(f"Sell DB error: {e}")
-        peak_gains.pop(trade_id, None)
+        peak_bids.pop(trade_id, None)
         sold += 1
 
     logger.info(f"SELL SUMMARY: sold={sold} expired={expired}")
@@ -669,7 +683,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-15c &mdash; sell +100% &mdash; double down on winners
+  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-20c &mdash; trailing stop &mdash; let winners ride
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -702,8 +716,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Buy cheap 3-15c | Sell +100% | Double down on winners</span>
-  <span>20min max | 3 contracts | Max 3 adds | 50% reserve</span>
+  <span>Buy cheap 3-20c | Trailing stop: activates +50%, sells on 25% drop from peak</span>
+  <span>20min max | 3 contracts | Double down winners | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
