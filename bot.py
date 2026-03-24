@@ -21,12 +21,11 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
-# === STRATEGY: CHEAP ENTRIES, TIERED PROFIT TAKING ===
+# === STRATEGY: CHEAP ENTRIES, SELL ALL AT TARGET ===
 BUY_MIN = 0.03
-BUY_MAX = 0.20
-TIER1_GAIN = 0.30           # +30%: sell 1 of 3 contracts
-TIER2_GAIN = 1.00           # +100%: sell 1 more
-# Last contract rides to settlement for moonshot
+BUY_MAX = 0.12
+SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts
+STOP_LOSS = -0.25           # -25%: cut ALL contracts
 MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
@@ -254,55 +253,54 @@ def check_sells():
 
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% x{count}")
 
-        # Tiered profit taking: sell 1 contract at each tier
-        sell_count = 0
+        should_sell = False
         reason = ''
 
-        if count >= 3 and gain >= TIER1_GAIN:
-            sell_count = 1
-            reason = f"TIER1 +{gain_pct:.0f}% (sell 1/{count})"
-        elif count == 2 and gain >= TIER2_GAIN:
-            sell_count = 1
-            reason = f"TIER2 +{gain_pct:.0f}% (sell 1/{count})"
-        # count == 1: ride to settlement, no sell
+        # Take profit at +30%
+        if gain >= SELL_THRESHOLD:
+            should_sell = True
+            reason = f"+{gain_pct:.0f}% PROFIT"
 
-        if sell_count == 0:
+        # Stop loss at -25%
+        if gain <= STOP_LOSS:
+            should_sell = True
+            reason = f"{gain_pct:+.0f}% STOP LOSS"
+
+        if not should_sell:
             continue
 
-        # === SELL 1 CONTRACT, KEEP REST ===
-        pnl = round((current_bid - entry_price) * sell_count, 4)
-        original_count = trade.get('count') or 1
+        # === SELL ALL CONTRACTS ===
+        pnl = round((current_bid - entry_price) * count, 4)
 
-        logger.info(f"SELL ATTEMPT: {ticker} {side} x{sell_count} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% reason={reason}")
+        logger.info(f"SELL ATTEMPT: {ticker} {side} x{count} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% reason={reason}")
 
-        result = place_order(ticker, side, 'sell', current_bid, sell_count)
+        result = place_order(ticker, side, 'sell', current_bid, count)
         if not result:
             logger.error(f"SELL FAILED: {ticker} -- order not filled")
             continue
 
         order_id, filled = result
-        if filled <= 0:
-            continue
+        if filled < count:
+            logger.warning(f"PARTIAL SELL: {ticker} filled {filled}/{count}")
+            pnl = round((current_bid - entry_price) * filled, 4)
 
-        pnl = round((current_bid - entry_price) * filled, 4)
-        remaining = original_count - filled
-
-        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | pnl=${pnl:.4f} | {remaining} remaining")
+        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | pnl=${pnl:.4f}")
         try:
-            # Reduce count on original position, record sold portion
-            db.table('trades').update({
-                'count': remaining,
-                'current_bid': float(current_bid),
-            }).eq('id', trade['id']).execute()
-            # Record the sold contract as a resolved trade
-            db.table('trades').insert({
-                'ticker': ticker, 'side': side, 'action': 'buy',
-                'price': float(entry_price), 'count': filled,
-                'current_bid': float(current_bid), 'pnl': float(pnl),
-            }).execute()
-            # If no contracts left, mark original as resolved too
-            if remaining <= 0:
-                db.table('trades').update({'pnl': 0.0}).eq('id', trade['id']).execute()
+            if filled >= count:
+                db.table('trades').update({
+                    'pnl': float(pnl),
+                    'current_bid': float(current_bid),
+                }).eq('id', trade['id']).execute()
+            else:
+                db.table('trades').update({
+                    'count': count - filled,
+                    'current_bid': float(current_bid),
+                }).eq('id', trade['id']).execute()
+                db.table('trades').insert({
+                    'ticker': ticker, 'side': side, 'action': 'buy',
+                    'price': float(entry_price), 'count': filled,
+                    'current_bid': float(current_bid), 'pnl': float(pnl),
+                }).execute()
         except Exception as e:
             logger.error(f"Sell DB error: {e}")
         sold += 1
@@ -679,7 +677,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-20c &mdash; tiered selling (+30%/+100%/ride)
+  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-12c &mdash; sell all +30% / stop -25%
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -712,8 +710,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Buy cheap 3-20c | Sell: 1 at +30%, 1 at +100%, 1 rides to settlement</span>
-  <span>20min max | 3 contracts | Double down winners | 50% reserve</span>
+  <span>Buy cheap 3-12c | Sell ALL at +30% | Stop ALL at -25%</span>
+  <span>20min max | 3 contracts | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
