@@ -21,9 +21,11 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
-# === STRATEGY: CHEAP ENTRIES, RIDE TO SETTLEMENT ===
+# === STRATEGY: CHEAP ENTRIES, SELL AT +100%, DOUBLE DOWN ON WINNERS ===
 BUY_MIN = 0.03
 BUY_MAX = 0.15
+SELL_THRESHOLD = 1.00       # +100% = double your money
+MAX_ADDS = 2                # can add to a winning position twice (max 9 contracts)
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
@@ -250,8 +252,11 @@ def check_sells():
 
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        # No selling — ride everything to settlement
-        continue
+        # Sell at +100% (double your money)
+        if gain < SELL_THRESHOLD:
+            continue
+
+        reason = f"+{gain_pct:.0f}% PROFIT"
 
         # === SELL ORDER ===
         pnl = round((current_bid - entry_price) * count, 4)
@@ -353,8 +358,8 @@ def get_recent_losers():
 
 def buy_candidates(markets):
     balance = get_balance()
-    owned = get_owned_tickers()
-    logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
+    open_positions = get_open_positions()
+    logger.info(f"Balance: ${balance:.2f} | {len(open_positions)} positions open")
 
     deployable = balance * (1.0 - CASH_RESERVE)
     if deployable <= 1.0:
@@ -387,8 +392,21 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        if ticker in owned:
-            continue
+        # Check how many times we already own this ticker
+        ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
+        ticker_count = len(ticker_positions)
+
+        if ticker_count > 0:
+            # Already own it — only add if it's winning and we haven't maxed adds
+            if ticker_count > MAX_ADDS:
+                continue
+            # Check if current position is up
+            pos = ticker_positions[0]
+            pos_entry = sf(pos.get('price'))
+            pos_bid = sf(pos.get('current_bid'))
+            if pos_entry <= 0 or pos_bid <= pos_entry:
+                continue  # not winning, don't add
+            logger.info(f"  DOUBLE DOWN: {ticker} is up, adding position #{ticker_count + 1}")
 
         # Buy the CHEAPEST side, $0.03-$0.15
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
@@ -433,7 +451,7 @@ def buy_candidates(markets):
                 'price': float(c['price']), 'count': filled,
                 'current_bid': float(c['bid']),
             }).execute()
-            owned.add(c['ticker'])
+            open_positions.append({'ticker': c['ticker'], 'price': c['price']})
             deployable -= actual_cost
             bought += 1
         except Exception as e:
@@ -651,7 +669,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-15c &mdash; ride to settlement &mdash; no sell
+  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-15c &mdash; sell +100% &mdash; double down on winners
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -684,8 +702,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Buy cheap side 3-15c | Ride to settlement | No sell, no stop</span>
-  <span>20min max | 3 contracts | 50% reserve</span>
+  <span>Buy cheap 3-15c | Sell +100% | Double down on winners</span>
+  <span>20min max | 3 contracts | Max 3 adds | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
