@@ -322,10 +322,10 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # Take profit at +100% (doubled)
-        if raw_gain >= 1.00 and real_profit > 0:
+        # Take profit when bid hits $0.90+ — contract is 90% decided, lock it in
+        if current_bid >= 0.90 and real_profit > 0:
             should_sell = True
-            reason = f"TAKE PROFIT +{raw_gain*100:.0f}% profit=${real_profit:.4f}"
+            reason = f"TAKE PROFIT bid=${current_bid:.2f} (>=90c) profit=${real_profit:.4f}"
 
         if not should_sell:
             continue
