@@ -24,7 +24,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY: CHEAP ENTRIES, SELL AT +100%, DOUBLE DOWN ON WINNERS ===
 BUY_MIN = 0.03
 BUY_MAX = 0.35
-SELL_THRESHOLD = 1.00       # +100% = double your money
+SELL_THRESHOLD = 0.30       # +30% take profit
 MAX_ADDS = 2                # can add to a winning position twice (max 9 contracts)
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
