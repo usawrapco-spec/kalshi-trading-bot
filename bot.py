@@ -1,6 +1,6 @@
 """
 Live scalper. Buy cheap crypto, sell at 30%, take loss on expiry.
-15M series only, $0.03-$0.35, 5 contracts, 10s cycles.
+15M series only, $0.03-$0.35, 10/5 tiered contracts, 10s cycles.
 """
 
 import os, time, logging, traceback, re
@@ -23,14 +23,16 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === SETTINGS ===
 BUY_MIN = 0.03
-BUY_MAX = 0.20
+BUY_MAX = 0.35
 CYCLE_SECONDS = 10
-CONTRACTS_PER_TRADE = 5
 SELL_THRESHOLD = 0.30
 STARTING_BALANCE = 20.00
 MAX_BUYS_PER_CYCLE = 10
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
+
+def get_contracts(price):
+    return 10 if price < 0.20 else 5
 
 # Set dynamically at startup
 BOT_START_TIME = None
@@ -350,20 +352,21 @@ def buy_candidates(markets):
         if bought >= MAX_BUYS_PER_CYCLE:
             break
 
-        cost = c['price'] * CONTRACTS_PER_TRADE
+        contracts = get_contracts(c['price'])
+        cost = c['price'] * contracts
         if cost > balance:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${balance:.2f}")
             break
 
-        result = place_order(c['ticker'], c['side'], 'buy', c['price'], CONTRACTS_PER_TRADE)
+        result = place_order(c['ticker'], c['side'], 'buy', c['price'], contracts)
         if not result:
             continue
 
-        logger.info(f"BUY: {c['ticker']} {c['side']} x{CONTRACTS_PER_TRADE} @ ${c['price']:.2f}")
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{contracts} @ ${c['price']:.2f}")
         try:
             db.table('trades').insert({
                 'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
-                'price': float(c['price']), 'count': CONTRACTS_PER_TRADE,
+                'price': float(c['price']), 'count': contracts,
                 'current_bid': float(c['bid']),
             }).execute()
             owned.add(c['ticker'])
@@ -573,7 +576,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-45c &mdash; sell at 30%
+  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-35c &mdash; sell at 30%
 </div>
 
 <div class="top-bar" style="flex-direction:column;gap:6px">
@@ -605,7 +608,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <span>Series: 15M crypto (5 series) | No filters | No stop loss</span>
-  <span>Buy: 3-35c | Sell: 30% | 5 contracts | 10s cycles</span>
+  <span>Buy: 3-35c | Sell: 30% | 10/5 contracts | 10s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
@@ -723,7 +726,7 @@ setInterval(refresh,15000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- scalper: ${BUY_MIN}-${BUY_MAX}, sell at {SELL_THRESHOLD*100:.0f}%, {CYCLE_SECONDS}s cycles")
+    logger.info(f"Bot starting [{mode}] -- scalper: ${BUY_MIN}-${BUY_MAX}, sell at {SELL_THRESHOLD*100:.0f}%, 10/5 contracts, {CYCLE_SECONDS}s cycles")
     logger.info(f"Series: {CRYPTO_SERIES}")
 
     init_bot()
