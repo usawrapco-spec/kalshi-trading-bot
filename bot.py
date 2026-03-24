@@ -818,13 +818,17 @@ function getNextSettlement(){
   var now=new Date();
   var mins=now.getMinutes();
   var nextQuarter=Math.ceil((mins+1)/15)*15;
-  var next=new Date(now);
-  next.setMinutes(nextQuarter,0,0);
-  if(nextQuarter>=60){next.setHours(next.getHours()+1);next.setMinutes(0,0,0)}
+  var next=new Date(now.getTime());
+  if(nextQuarter>=60){
+    next.setHours(now.getHours()+1,0,0,0);
+  } else {
+    next.setMinutes(nextQuarter,0,0);
+  }
   return next;
 }
 function updateCountdown(){
-  var secs=Math.floor((getNextSettlement()-new Date())/1000);
+  var secs=Math.max(0,Math.floor((getNextSettlement()-new Date())/1000));
+  if(secs>900)secs=secs%900;
   var m=Math.floor(secs/60);
   var s=secs%60;
   $('countdown').textContent=m+':'+s.toString().padStart(2,'0');
@@ -840,7 +844,7 @@ setInterval(updateCountdown,1000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- buy cheap ${BUY_MIN}-${BUY_MAX}, ride to settlement, {CONTRACTS_DEFAULT} contracts, {CASH_RESERVE*100:.0f}% reserve")
+    logger.info(f"Bot starting [{mode}] -- buy cheap ${BUY_MIN}-${BUY_MAX}, sell +{SELL_THRESHOLD*100:.0f}%, {CONTRACTS} contracts, {CASH_RESERVE*100:.0f}% reserve")
     logger.info(f"Series: {CRYPTO_SERIES}")
 
     while True:
