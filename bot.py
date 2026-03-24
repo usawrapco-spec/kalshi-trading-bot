@@ -29,7 +29,7 @@ FEE_PER_CONTRACT = 0.07    # ~$0.035/side x2 = $0.07 round trip per contract
 STOP_LOSS = -0.25           # -25% stop loss
 MAX_MINS_TO_EXPIRY = 20     # only buy contracts settling within 20 min
 CYCLE_SECONDS = 10
-STARTING_BALANCE = 20.00
+STARTING_BALANCE = 100.00
 CASH_RESERVE = 0.50         # keep 50% cash
 MAX_BUYS_PER_CYCLE = 10
 CONTRACTS_DEFAULT = 5
