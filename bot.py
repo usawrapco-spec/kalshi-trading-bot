@@ -222,17 +222,24 @@ def check_sells():
 
         # === SETTLED: Kalshi has a final result ===
         if result_val:
-            if result_val == side:
-                pnl = round((1.0 - entry_price) * count, 4)
-                reason = "WIN settled @$1.00"
-            else:
-                pnl = round(-entry_price * count, 4)
-                reason = "LOSS settled"
-            logger.info(f"SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
-            if pnl < 0:
-                daily_loss += abs(pnl)
+            settle_price = 1.0 if result_val == side else 0.0
+            gross = round((settle_price - entry_price) * count, 4)
+            b_fee = kalshi_fee(entry_price, count)
+            s_fee = 0.0  # no sell fee on settlement
+            net = round(gross - b_fee, 4)
+            reason = f"{'WIN' if result_val == side else 'LOSS'} settled @${settle_price:.2f}"
+            logger.info(f"SETTLED: {ticker} {side} | {reason} | gross=${gross:.4f} buy_fee=${b_fee:.4f} net=${net:.4f}")
+            if net < 0:
+                daily_loss += abs(net)
             try:
-                db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
+                db.table('trades').update({
+                    'pnl': float(net),
+                    'gross_pnl': float(gross),
+                    'net_pnl': float(net),
+                    'buy_fee': float(b_fee),
+                    'sell_fee': float(s_fee),
+                    'current_bid': float(settle_price),
+                }).eq('id', trade['id']).execute()
             except Exception as e:
                 logger.error(f"Settle DB error: {e}")
             peak_bids.pop(trade['id'], None)
@@ -352,7 +359,11 @@ def check_sells():
             logger.warning(f"PARTIAL SELL: {ticker} filled {filled}/{count}")
             pnl = net_pnl(entry_price, current_bid, filled)
 
-        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | net_pnl=${pnl:.4f} (after fees)")
+        s_fee = kalshi_fee(current_bid, filled)
+        b_fee = kalshi_fee(entry_price, filled)
+        gross = round((current_bid - entry_price) * filled, 4)
+
+        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | gross=${gross:.4f} buy_fee=${b_fee:.4f} sell_fee=${s_fee:.4f} net=${pnl:.4f}")
         if pnl < 0:
             daily_loss += abs(pnl)
             logger.info(f"Daily loss now: ${daily_loss:.2f} (limit: ${MAX_DAILY_LOSS:.2f})")
@@ -360,6 +371,10 @@ def check_sells():
             if filled >= count:
                 db.table('trades').update({
                     'pnl': float(pnl),
+                    'gross_pnl': float(gross),
+                    'net_pnl': float(pnl),
+                    'buy_fee': float(b_fee),
+                    'sell_fee': float(s_fee),
                     'current_bid': float(current_bid),
                 }).eq('id', trade['id']).execute()
             else:
@@ -370,7 +385,12 @@ def check_sells():
                 db.table('trades').insert({
                     'ticker': ticker, 'side': side, 'action': 'buy',
                     'price': float(entry_price), 'count': filled,
-                    'current_bid': float(current_bid), 'pnl': float(pnl),
+                    'current_bid': float(current_bid),
+                    'pnl': float(pnl),
+                    'gross_pnl': float(gross),
+                    'net_pnl': float(pnl),
+                    'buy_fee': float(b_fee),
+                    'sell_fee': float(s_fee),
                 }).execute()
         except Exception as e:
             logger.error(f"Sell DB error: {e}")
@@ -533,13 +553,15 @@ def buy_candidates(markets):
             continue
 
         actual_cost = c['price'] * filled
-        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f}")
+        b_fee = kalshi_fee(c['price'], filled)
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f} | buy_fee=${b_fee:.4f}")
         try:
             db.table('trades').insert({
                 'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
                 'price': float(c['price']), 'count': filled,
                 'current_bid': float(c['bid']),
                 'strategy': c.get('strategy'),
+                'buy_fee': float(b_fee),
             }).execute()
             open_positions.append({'ticker': c['ticker'], 'price': c['price']})
             deployable -= actual_cost
