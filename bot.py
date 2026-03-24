@@ -339,23 +339,14 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        yes_price = float(market.get('yes_bid_dollars') or '0')
-
-        # Momentum: buy with the trend, skip if flat
-        if yes_price > 0.55:
-            # Market leaning UP — buy YES if in range
-            if BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-                side, price, bid = 'yes', yes_ask, yes_bid
-            else:
-                continue
-        elif yes_price < 0.45:
-            # Market leaning DOWN — buy NO if in range
-            if BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
-                side, price, bid = 'no', no_ask, no_bid
-            else:
-                continue
+        # Buy cheapest side in range
+        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            side, price, bid = 'yes', yes_ask, yes_bid
+        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            side, price, bid = 'no', no_ask, no_bid
+        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            side, price, bid = 'yes', yes_ask, yes_bid
         else:
-            # Near 50/50, no clear signal, skip
             continue
 
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
