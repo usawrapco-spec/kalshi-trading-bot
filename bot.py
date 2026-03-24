@@ -33,7 +33,7 @@ MAX_ADDS = 2                # can add to a GREEN position twice (max 15 contract
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 5           # faster polling = stop-loss triggers sooner
-STARTING_BALANCE = 100.00
+STARTING_BALANCE = 1000.00
 CASH_RESERVE = 0.20         # keep 20% cash reserve ($20 buffer)
 MAX_BUYS_PER_CYCLE = 3      # slower entry pace, less overexposure
 CONTRACTS = 3
