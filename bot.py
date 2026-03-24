@@ -26,7 +26,7 @@ BUY_MIN = 0.03
 BUY_MAX = 0.12
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts
 # No stop loss — let cheap entries ride to settlement
-MAX_ADDS = 2                # can add to a winning position twice
+MAX_ADDS = 2                # can add to a GREEN position twice (max 15 contracts)
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
@@ -387,23 +387,7 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # Check how many times we already own this ticker
-        ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
-        ticker_count = len(ticker_positions)
-
-        if ticker_count > 0:
-            # Already own it — only add if it's winning and we haven't maxed adds
-            if ticker_count > MAX_ADDS:
-                continue
-            # Check if current position is up
-            pos = ticker_positions[0]
-            pos_entry = sf(pos.get('price'))
-            pos_bid = sf(pos.get('current_bid'))
-            if pos_entry <= 0 or pos_bid <= pos_entry:
-                continue  # not winning, don't add
-            logger.info(f"  DOUBLE DOWN: {ticker} is up, adding position #{ticker_count + 1}")
-
-        # Buy the CHEAPEST side, $0.03-$0.15
+        # Buy the CHEAPEST side, $0.03-$0.12
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
@@ -412,6 +396,18 @@ def buy_candidates(markets):
             side, price, bid = 'yes', yes_ask, yes_bid
         else:
             continue
+
+        # Dedup: check if we already own this ticker
+        ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
+        if ticker_positions:
+            # Only double down if position is GREEN using LIVE bid
+            pos = ticker_positions[0]
+            pos_entry = sf(pos.get('price'))
+            pos_side = pos.get('side')
+            live_bid = yes_bid if pos_side == 'yes' else no_bid
+            if live_bid <= pos_entry or len(ticker_positions) > MAX_ADDS:
+                continue  # red or maxed out, skip
+            logger.info(f"  DOUBLE DOWN: {ticker} {pos_side} entry=${pos_entry:.2f} live_bid=${live_bid:.2f} GREEN, adding")
 
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
 
