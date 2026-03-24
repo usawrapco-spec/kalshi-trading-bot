@@ -25,7 +25,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 BUY_MIN = 0.03
 BUY_MAX = 0.12
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts
-STOP_LOSS = -0.25           # -25%: cut ALL contracts
+# No stop loss — let cheap entries ride to settlement
 MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
@@ -261,10 +261,7 @@ def check_sells():
             should_sell = True
             reason = f"+{gain_pct:.0f}% PROFIT"
 
-        # Stop loss at -25%
-        if gain <= STOP_LOSS:
-            should_sell = True
-            reason = f"{gain_pct:+.0f}% STOP LOSS"
+        # No stop loss — ride to settlement
 
         if not should_sell:
             continue
