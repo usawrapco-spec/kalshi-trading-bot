@@ -374,6 +374,15 @@ def detect_momentum(markets):
     return momentum
 
 
+def get_recent_losers():
+    """Get tickers that lost in the last 3 resolved trades — don't re-buy losers."""
+    try:
+        recent = db.table('trades').select('ticker,pnl').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(3).execute()
+        return {t['ticker'] for t in (recent.data or []) if sf(t['pnl']) < 0}
+    except:
+        return set()
+
+
 def buy_candidates(markets):
     balance = get_balance()
     owned = get_owned_tickers()
@@ -390,9 +399,14 @@ def buy_candidates(markets):
 
     candidates = []
     now = datetime.now(timezone.utc)
+    recent_losers = get_recent_losers()
 
     for market in markets:
         ticker = market.get('ticker', '')
+
+        # Skip tickers that just lost — don't throw money at dead markets
+        if ticker in recent_losers:
+            continue
 
         # Only buy contracts settling within 20 minutes
         close_time = market.get('close_time') or market.get('expected_expiration_time')
