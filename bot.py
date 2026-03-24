@@ -318,47 +318,62 @@ def check_sells():
         score = 0
         signals = []
 
-        # Must be profitable to even consider selling
-        if real_profit <= 0:
-            logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} — not profitable, holding x{count}")
-            continue
+        raw_gain = (current_bid - entry_price) / entry_price if entry_price > 0 else 0
 
-        # Signal: profitable
-        score += 1
-        signals.append('profitable')
-
-        # Signal: bid above $0.70 — captured most of the value
-        if current_bid >= 0.70:
+        if real_profit > 0:
+            # === PROFIT SCORE: when to take gains ===
             score += 1
-            signals.append(f'bid${current_bid:.2f}>=0.70')
+            signals.append('profitable')
 
-        # Signal: bid above $0.90 — near max payout
-        if current_bid >= 0.90:
-            score += 2
-            signals.append(f'bid${current_bid:.2f}>=0.90')
+            if current_bid >= 0.70:
+                score += 1
+                signals.append(f'bid>=$0.70')
+            if current_bid >= 0.90:
+                score += 2
+                signals.append(f'bid>=$0.90')
+            if dropping:
+                score += 1
+                signals.append('dropping')
+            if mins_left <= 3:
+                score += 2
+                signals.append(f'{mins_left:.0f}m<=3')
+            if mins_left <= 1:
+                score += 1
+                signals.append(f'{mins_left:.0f}m<=1')
 
-        # Signal: price dropping
-        if dropping:
+            logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} TAKE_SCORE={score} [{', '.join(signals)}] x{count}")
+
+        else:
+            # === LOSS SCORE: when to cut losses ===
             score += 1
-            signals.append(f'dropping({prev_bid:.2f}->{current_bid:.2f})')
+            signals.append('losing')
 
-        # Signal: close to settlement
-        if mins_left <= 3:
-            score += 2
-            signals.append(f'{mins_left:.1f}min<=3')
-        if mins_left <= 1:
-            score += 1  # extra point for very close
-            signals.append(f'{mins_left:.1f}min<=1')
+            if raw_gain <= -0.30:
+                score += 1
+                signals.append(f'down{raw_gain*100:.0f}%')
+            if raw_gain <= -0.50:
+                score += 2
+                signals.append(f'down50%+')
+            if dropping:
+                score += 1
+                signals.append('dropping')
+            if mins_left <= 3:
+                score += 2
+                signals.append(f'{mins_left:.0f}m<=3')
+            if mins_left <= 1:
+                score += 1
+                signals.append(f'{mins_left:.0f}m<=1')
 
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} SCORE={score} [{', '.join(signals)}] x{count}")
+            logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} loss=${real_profit:.4f} CUT_SCORE={score} [{', '.join(signals)}] x{count}")
 
         should_sell = False
         reason = ''
 
-        # Score 4+ = sell
+        # Score 4+ = sell (works for both profit-taking and loss-cutting)
         if score >= 4:
             should_sell = True
-            reason = f"GUT SELL score={score} [{', '.join(signals)}] profit=${real_profit:.4f}"
+            label = "GUT SELL" if real_profit > 0 else "CUT LOSS"
+            reason = f"{label} score={score} [{', '.join(signals)}] pnl=${real_profit:.4f}"
 
         if not should_sell:
             continue
@@ -813,7 +828,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; all 15M crypto &mdash; take +10% net / stop -30% / +100% instant
+  <span id="mode-label">PAPER MODE</span> &mdash; all 15M crypto &mdash; gut score sell (4+) / loss score cut (4+)
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -827,8 +842,8 @@ tr:hover{background:#1a1a1a !important}
 <div class="panel">
   <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Bid</th><th>Value</th><th>P&amp;L</th><th>Gain%</th>
-  </tr></thead><tbody id="open-body"><tr><td colspan="10" class="loading">Loading...</td></tr></tbody></table></div>
+    <th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Buy Fee</th><th>Bid</th><th>Value</th><th>Sell Fee</th><th>Net P&amp;L</th><th>Gain%</th>
+  </tr></thead><tbody id="open-body"><tr><td colspan="12" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
@@ -919,13 +934,15 @@ async function refresh(){
       h+='<td>'+p.count+'</td>';
       h+='<td>$'+p.entry.toFixed(2)+'</td>';
       h+='<td>$'+(p.entry_total||0).toFixed(2)+'</td>';
+      h+='<td class="red">-$'+(p.buy_fee||0).toFixed(4)+'</td>';
       h+='<td>'+bidText+'</td>';
       h+='<td class="'+gc+'">'+valText+'</td>';
-      h+='<td class="'+gc+'">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(2)+'</td>';
-      h+='<td class="'+gc+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
+      h+='<td class="red">-$'+(p.sell_fee||0).toFixed(4)+'</td>';
+      h+='<td class="'+gc+'" style="font-weight:700">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(2)+'</td>';
+      h+='<td class="'+gc+'" style="font-weight:700">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
       h+='</tr>';
     });
-    $('open-body').innerHTML=h||'<tr><td colspan="10" class="gray" style="text-align:center">No open positions</td></tr>';
+    $('open-body').innerHTML=h||'<tr><td colspan="12" class="gray" style="text-align:center">No open positions</td></tr>';
   }
 
   if(trades){
