@@ -24,7 +24,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
 BUY_MIN = 0.01              # no minimum
-BUY_MAX = 0.50              # max $0.50 — controls losses
+BUY_MAX = 0.97              # no cap — let majority vote decide
 TAKE_PROFIT_BID = 0.90      # sell when bid hits $0.90+ (contract 90% decided)
 MAX_ADDS = 999              # unlimited adds on green positions
 TAKER_FEE_RATE = 0.07
