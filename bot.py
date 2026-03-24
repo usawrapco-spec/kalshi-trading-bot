@@ -271,17 +271,11 @@ def fetch_all_markets():
 
 def buy_candidates(markets):
     balance = get_balance()
-    open_positions = get_open_positions()
-    deployed = sum(sf(t['price']) * (t.get('count') or 1) for t in open_positions)
-    max_deploy = balance * 0.75
-    logger.info(f"Balance: ${balance:.2f} | {len(open_positions)} positions | deployed=${deployed:.2f}/{max_deploy:.2f}")
+    owned = get_owned_tickers()
+    logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
 
     if balance <= 5.0:
         logger.info("Balance too low, skipping buys")
-        return
-
-    if deployed >= max_deploy:
-        logger.info("Already 75% deployed, skipping buys")
         return
 
     candidates = []
@@ -289,6 +283,9 @@ def buy_candidates(markets):
 
     for market in markets:
         ticker = market.get('ticker', '')
+
+        if ticker in owned:
+            continue
 
         yes_ask = float(market.get('yes_ask_dollars') or '999')
         yes_bid = float(market.get('yes_bid_dollars') or '0')
@@ -312,34 +309,28 @@ def buy_candidates(markets):
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
 
-    if not candidates:
-        return
-
-    # Gradual scaling: spread remaining deploy room across candidates, max 5 per buy
-    remaining = max_deploy - deployed
-    per_trade = remaining / len(candidates) if candidates else 0
-
     bought = 0
     for c in candidates:
-        contracts = int(per_trade / c['price'])
-        contracts = min(contracts, 5)
-        contracts = max(contracts, 1)
-        cost = c['price'] * contracts
+        if bought >= MAX_BUYS_PER_CYCLE:
+            break
+
+        cost = c['price'] * CONTRACTS_PER_TRADE
         if cost > balance:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${balance:.2f}")
             break
 
-        result = place_order(c['ticker'], c['side'], 'buy', c['price'], contracts)
+        result = place_order(c['ticker'], c['side'], 'buy', c['price'], CONTRACTS_PER_TRADE)
         if not result:
             continue
 
-        logger.info(f"BUY: {c['ticker']} {c['side']} x{contracts} @ ${c['price']:.2f}")
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{CONTRACTS_PER_TRADE} @ ${c['price']:.2f}")
         try:
             db.table('trades').insert({
                 'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
-                'price': float(c['price']), 'count': contracts,
+                'price': float(c['price']), 'count': CONTRACTS_PER_TRADE,
                 'current_bid': float(c['bid']),
             }).execute()
+            owned.add(c['ticker'])
             balance -= cost
             bought += 1
         except Exception as e:
