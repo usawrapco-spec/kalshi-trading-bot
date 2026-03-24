@@ -29,7 +29,7 @@ SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat
 STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
 TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
 MOMENTUM_THRESHOLD = 0.02   # 2% price change = momentum signal (was 5%, too strict)
-MAX_ADDS = 2                # can add to a GREEN position twice (max 15 contracts)
+MAX_ADDS = 10               # keep adding to GREEN positions — ride the winners hard
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10          # 10 sec cycles — don't overtrade
