@@ -293,44 +293,73 @@ def check_sells():
         net_profit = net_pnl(entry_price, current_bid, count)
         fees = kalshi_fee(entry_price, count) + kalshi_fee(current_bid, count)
 
-        # Track peak bid and momentum
+        # Track momentum
         trade_id = trade['id']
         prev_bid = peak_bids.get(f"{trade_id}_prev", current_bid)
-        if trade_id not in peak_bids or current_bid > peak_bids[trade_id]:
-            peak_bids[trade_id] = current_bid
-            peak_bids[f"{trade_id}_drops"] = 0  # reset drop counter on new peak
-        peak = peak_bids[trade_id]
-
-        # Count consecutive drops from peak
-        drop_count = peak_bids.get(f"{trade_id}_drops", 0)
-        if current_bid < prev_bid:
-            drop_count += 1
-        else:
-            drop_count = 0  # reset if price goes up or flat
-        peak_bids[f"{trade_id}_drops"] = drop_count
         peak_bids[f"{trade_id}_prev"] = current_bid
 
         # Calculate real profit after all fees
         b_fee = kalshi_fee(entry_price, count)
         s_fee = kalshi_fee(current_bid, count)
         real_profit = (current_bid - entry_price) * count - b_fee - s_fee
-        drop_from_peak = (current_bid - peak) / peak if peak > 0 else 0
-        climbing = current_bid > prev_bid
+        dropping = current_bid < prev_bid
 
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} peak=${peak:.2f} drop={drop_from_peak*100:+.0f}% drops={drop_count} {'UP' if climbing else 'DN'} profit=${real_profit:.4f} x{count}")
+        # Time to settlement
+        close_time = market.get('close_time') or market.get('expected_expiration_time')
+        mins_left = 999
+        if close_time:
+            try:
+                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                mins_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 60
+            except:
+                pass
+
+        # === GUT FEELING SCORE ===
+        score = 0
+        signals = []
+
+        # Must be profitable to even consider selling
+        if real_profit <= 0:
+            logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} — not profitable, holding x{count}")
+            continue
+
+        # Signal: profitable
+        score += 1
+        signals.append('profitable')
+
+        # Signal: bid above $0.70 — captured most of the value
+        if current_bid >= 0.70:
+            score += 1
+            signals.append(f'bid${current_bid:.2f}>=0.70')
+
+        # Signal: bid above $0.90 — near max payout
+        if current_bid >= 0.90:
+            score += 2
+            signals.append(f'bid${current_bid:.2f}>=0.90')
+
+        # Signal: price dropping
+        if dropping:
+            score += 1
+            signals.append(f'dropping({prev_bid:.2f}->{current_bid:.2f})')
+
+        # Signal: close to settlement
+        if mins_left <= 3:
+            score += 2
+            signals.append(f'{mins_left:.1f}min<=3')
+        if mins_left <= 1:
+            score += 1  # extra point for very close
+            signals.append(f'{mins_left:.1f}min<=1')
+
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} SCORE={score} [{', '.join(signals)}] x{count}")
 
         should_sell = False
         reason = ''
 
-        # TRAILING SELL: let winners ride, sell when momentum dies
-        # Only sell if profitable after fees
-        if real_profit > 0:
-            # Sell if 2+ consecutive drops AND dropped 15%+ from peak
-            if drop_count >= 2 and drop_from_peak <= -0.15:
-                should_sell = True
-                reason = f"TRAILING SELL: {drop_count} drops, peak=${peak:.2f} now=${current_bid:.2f} ({drop_from_peak*100:.0f}%) profit=${real_profit:.4f}"
+        # Score 4+ = sell
+        if score >= 4:
+            should_sell = True
+            reason = f"GUT SELL score={score} [{', '.join(signals)}] profit=${real_profit:.4f}"
 
-        # If not profitable — just ride to settlement, no sell
         if not should_sell:
             continue
 
@@ -673,6 +702,7 @@ def api_open():
                 real_profit = round((current - price) * count - b_fee - s_fee, 4)
                 gain_pct = round((real_profit / real_cost) * 100, 1) if real_cost > 0 else 0
             else:
+                s_fee = 0
                 real_profit = 0
                 gain_pct = 0
             positions.append({
@@ -684,6 +714,8 @@ def api_open():
                 'entry_total': real_cost,
                 'current_bid': current,
                 'bid_total': round(current * count, 2),
+                'buy_fee': round(b_fee, 4),
+                'sell_fee': round(s_fee, 4),
                 'unrealized': real_profit,
                 'gain_pct': gain_pct,
             })
