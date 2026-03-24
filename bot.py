@@ -432,50 +432,16 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # Directional filter: check if price is trending
-        strategy = None
-        old_yes = last_cycle_prices.get(ticker)
-        if old_yes and old_yes > 0:
-            price_change = (yes_ask - old_yes) / old_yes
-        else:
-            price_change = 0
-
-        # Update price history for next cycle's momentum detection
-        last_cycle_prices[ticker] = yes_ask
-
-        # REQUIRE price history — skip on first scan, don't buy blind
-        if old_yes is None:
-            continue  # need at least 1 prior cycle to detect momentum
-
-        # Buy the CHEAPEST side with directional confirmation
+        # Buy the CHEAPEST side — stop-loss & trailing stop provide protection
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            if price_change >= MOMENTUM_THRESHOLD:
-                side, price, bid = 'yes', yes_ask, yes_bid
-                strategy = 'momentum_yes_up'
-            elif price_change <= -MOMENTUM_THRESHOLD:
-                # Price dropping = NO side getting stronger
-                if BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
-                    side, price, bid = 'no', no_ask, no_bid
-                    strategy = 'momentum_no_down'
-                else:
-                    continue
-            else:
-                continue  # no clear direction, skip
+            side, price, bid = 'yes', yes_ask, yes_bid
+            strategy = 'cheap_yes'
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
-            if price_change <= -MOMENTUM_THRESHOLD:
-                side, price, bid = 'no', no_ask, no_bid
-                strategy = 'momentum_no_down'
-            elif price_change >= MOMENTUM_THRESHOLD:
-                # Price rising but NO is still cheap — skip, YES is the play
-                continue
-            else:
-                continue
+            side, price, bid = 'no', no_ask, no_bid
+            strategy = 'cheap_no'
         elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            if price_change >= MOMENTUM_THRESHOLD:
-                side, price, bid = 'yes', yes_ask, yes_bid
-                strategy = 'momentum_yes_up'
-            else:
-                continue
+            side, price, bid = 'yes', yes_ask, yes_bid
+            strategy = 'cheap_yes'
         else:
             continue
 
