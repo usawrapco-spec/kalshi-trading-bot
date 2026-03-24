@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === SETTINGS ===
 BUY_MIN = 0.03
-BUY_MAX = 0.35
+BUY_MAX = 0.20
 CYCLE_SECONDS = 10
 CONTRACTS_PER_TRADE = 5
 SELL_THRESHOLD = 0.30
