@@ -21,26 +21,16 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
-# === DUAL STRATEGY ===
-# Favorites: steady wins betting with the market (expensive side)
-FAV_MIN = 0.55
-FAV_MAX = 0.95
-FAV_SELL = 0.12             # +12% take profit
-FAV_PROTECT = 0.05          # +5% protect floor
-
-# Longshots: cheap side, ride to settlement (moonshots during volatility)
-LONG_MIN = 0.03
-LONG_MAX = 0.15
-LONG_PROTECT_PEAK = 2.0     # sell if was +200% and drops to +100%
-LONG_PROTECT_FLOOR = 1.0
-
+# === STRATEGY: CHEAP ENTRIES, RIDE TO SETTLEMENT ===
+BUY_MIN = 0.03
+BUY_MAX = 0.15
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
 STARTING_BALANCE = 100.00
 CASH_RESERVE = 0.50
-MAX_BUYS_PER_CYCLE = 5       # total across both strategies
-CONTRACTS_DEFAULT = 5
+MAX_BUYS_PER_CYCLE = 5
+CONTRACTS_DEFAULT = 3
 CONTRACTS_HOT = 10            # reduced from 20 to cut fees
 HOT_STREAK_WINS = 3
 
@@ -162,8 +152,8 @@ def get_open_positions():
 
 def get_owned_tickers():
     try:
-        result = db.table('trades').select('ticker,strategy').eq('action', 'buy').is_('pnl', 'null').execute()
-        return {f"{t['ticker']}:{t.get('strategy', 'fav')}" for t in (result.data or [])}
+        result = db.table('trades').select('ticker').eq('action', 'buy').is_('pnl', 'null').execute()
+        return {t['ticker'] for t in (result.data or [])}
     except Exception as e:
         logger.error(f"get_owned_tickers failed: {e}")
         return set()
@@ -172,7 +162,7 @@ def get_owned_tickers():
 def get_contracts(price):
     recent = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(5).execute()
     recent_wins = sum(1 for t in recent.data if t['pnl'] > 0)
-    if recent_wins >= HOT_STREAK_WINS and price <= LONG_MAX:
+    if recent_wins >= HOT_STREAK_WINS and price <= BUY_MAX:
         return CONTRACTS_HOT
     return CONTRACTS_DEFAULT
 
@@ -257,36 +247,11 @@ def check_sells():
 
         gain = (current_bid - entry_price) / entry_price
         gain_pct = gain * 100
-        strat = trade.get('strategy') or 'fav'
 
-        # Track peak gain for profit protection
-        trade_id = trade['id']
-        prev_peak = peak_gains.get(trade_id, 0)
-        if gain > prev_peak:
-            peak_gains[trade_id] = gain
-        current_peak = peak_gains.get(trade_id, 0)
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        logger.info(f"  POS [{strat.upper()}]: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% (peak {current_peak*100:+.0f}%)")
-
-        should_sell = False
-        reason = ''
-
-        if strat == 'fav':
-            # FAVORITE: take profit at +12%, protect at +5%, NO stop (ride to settlement)
-            if gain >= FAV_SELL:
-                should_sell = True
-                reason = f"FAV +{gain_pct:.0f}% PROFIT"
-            elif current_peak >= 0.12 and gain <= FAV_PROTECT:
-                should_sell = True
-                reason = f"FAV PROTECT +{gain_pct:.0f}% (was +{current_peak*100:.0f}%)"
-        else:
-            # LONGSHOT: NO take profit, NO stop loss — ride to settlement at $1.00 or $0.00
-            if current_peak >= LONG_PROTECT_PEAK and gain <= LONG_PROTECT_FLOOR:
-                should_sell = True
-                reason = f"LONG PROTECT +{gain_pct:.0f}% (was +{current_peak*100:.0f}%)"
-
-        if not should_sell:
-            continue
+        # No selling — ride everything to settlement
+        continue
 
         # === SELL ORDER ===
         pnl = round((current_bid - entry_price) * count, 4)
@@ -422,24 +387,22 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # FAVORITE: pick the more expensive side (55-95c)
-        fav_key = f"{ticker}:fav"
-        if fav_key not in owned:
-            if yes_ask >= no_ask and FAV_MIN <= yes_ask <= FAV_MAX and yes_bid > 0:
-                candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid, 'strategy': 'fav', 'key': fav_key})
-            elif FAV_MIN <= no_ask <= FAV_MAX and no_bid > 0:
-                candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid, 'strategy': 'fav', 'key': fav_key})
+        if ticker in owned:
+            continue
 
-        # LONGSHOT: pick the cheaper side (3-15c)
-        long_key = f"{ticker}:long"
-        if long_key not in owned:
-            if yes_ask <= no_ask and LONG_MIN <= yes_ask <= LONG_MAX and yes_bid > 0:
-                candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'bid': yes_bid, 'strategy': 'long', 'key': long_key})
-            elif LONG_MIN <= no_ask <= LONG_MAX and no_bid > 0:
-                candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'bid': no_bid, 'strategy': 'long', 'key': long_key})
+        # Buy the CHEAPEST side, $0.03-$0.15
+        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            side, price, bid = 'yes', yes_ask, yes_bid
+        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            side, price, bid = 'no', no_ask, no_bid
+        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            side, price, bid = 'yes', yes_ask, yes_bid
+        else:
+            continue
 
-    # Favorites first (reliable), then longshots
-    candidates.sort(key=lambda x: (0 if x['strategy'] == 'fav' else 1, -x['price'] if x['strategy'] == 'fav' else x['price']))
+        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
+
+    candidates.sort(key=lambda x: x['price'])
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
 
@@ -448,8 +411,7 @@ def buy_candidates(markets):
         if bought >= MAX_BUYS_PER_CYCLE:
             break
 
-        strat = c['strategy']
-        contracts = 3 if strat == 'long' else get_contracts(c['price'])
+        contracts = get_contracts(c['price'])
         cost = c['price'] * contracts
         if cost > deployable:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f}")
@@ -464,15 +426,14 @@ def buy_candidates(markets):
             continue
 
         actual_cost = c['price'] * filled
-        logger.info(f"BUY [{strat.upper()}]: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f}")
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f}")
         try:
             db.table('trades').insert({
                 'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
                 'price': float(c['price']), 'count': filled,
                 'current_bid': float(c['bid']),
-                'strategy': strat,
             }).execute()
-            owned.add(c['key'])
+            owned.add(c['ticker'])
             deployable -= actual_cost
             bought += 1
         except Exception as e:
@@ -690,7 +651,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; dual scalper &mdash; FAV 55-85c (+12%) + LONG 3-15c (ride to $1)
+  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-15c &mdash; ride to settlement &mdash; no sell
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -723,8 +684,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>FAV: 55-85c sell +12% stop -10% | LONG: 3-15c ride to $1 stop -25%</span>
-  <span>Momentum gated | 20min max | 5/10 contracts | 50% reserve</span>
+  <span>Buy cheap side 3-15c | Ride to settlement | No sell, no stop</span>
+  <span>20min max | 3 contracts | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
@@ -870,7 +831,7 @@ setInterval(updateCountdown,1000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- FAV ${FAV_MIN}-${FAV_MAX} sell +{FAV_SELL*100:.0f}% | LONG ${LONG_MIN}-${LONG_MAX} ride to $1 | reserve {CASH_RESERVE*100:.0f}%")
+    logger.info(f"Bot starting [{mode}] -- buy cheap ${BUY_MIN}-${BUY_MAX}, ride to settlement, {CONTRACTS_DEFAULT} contracts, {CASH_RESERVE*100:.0f}% reserve")
     logger.info(f"Series: {CRYPTO_SERIES}")
 
     while True:
