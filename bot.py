@@ -53,6 +53,29 @@ daily_loss = 0.0         # cumulative realized losses today
 daily_loss_date = None   # reset daily
 
 
+def kalshi_fee(price, count):
+    """Calculate Kalshi taker fee for a trade. Fee applies on both buy and sell."""
+    p = float(price)
+    c = int(count)
+    return min(TAKER_FEE_RATE * c * p * (1 - p), 0.02 * c)
+
+
+def net_pnl(entry_price, exit_price, count):
+    """Calculate PnL after Kalshi fees (buy + sell side)."""
+    gross = (exit_price - entry_price) * count
+    buy_fee = kalshi_fee(entry_price, count)
+    sell_fee = kalshi_fee(exit_price, count)
+    return round(gross - buy_fee - sell_fee, 4)
+
+
+def net_gain_pct(entry_price, exit_price, count):
+    """Net gain % after fees, relative to total cost (entry + buy fee)."""
+    total_cost = entry_price * count + kalshi_fee(entry_price, count)
+    if total_cost <= 0:
+        return 0
+    return net_pnl(entry_price, exit_price, count) / total_cost
+
+
 def sf(val):
     try:
         return float(val) if val is not None else 0.0
@@ -252,33 +275,37 @@ def check_sells():
                 logger.info(f"WAITING: {ticker} bid=$0, status={status}, waiting for settlement")
             continue
 
-        gain = (current_bid - entry_price) / entry_price
-        gain_pct = gain * 100
+        # Calculate net gain AFTER Kalshi fees
+        raw_gain = (current_bid - entry_price) / entry_price
+        raw_gain_pct = raw_gain * 100
+        net = net_gain_pct(entry_price, current_bid, count)
+        net_pct = net * 100
+        net_profit = net_pnl(entry_price, current_bid, count)
+        fees = kalshi_fee(entry_price, count) + kalshi_fee(current_bid, count)
 
-        # Track peak bid for trailing stop
+        # Track peak bid
         trade_id = trade['id']
         if trade_id not in peak_bids or current_bid > peak_bids[trade_id]:
             peak_bids[trade_id] = current_bid
         peak = peak_bids[trade_id]
-        drop_from_peak = (current_bid - peak) / peak if peak > 0 else 0
 
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% peak=${peak:.2f} x{count}")
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} raw={raw_gain_pct:+.0f}% NET={net_pct:+.1f}% fees=${fees:.3f} x{count}")
 
         should_sell = False
         reason = ''
 
-        # Instant sell at +100% (doubled)
-        if gain >= 1.00:
+        # Instant sell at +100% net (doubled after fees)
+        if net >= 1.00:
             should_sell = True
-            reason = f"+{gain_pct:.0f}% DOUBLED — INSTANT SELL"
+            reason = f"NET +{net_pct:.0f}% DOUBLED — INSTANT SELL"
 
-        # Take profit at +50%
-        elif gain >= 0.50:
+        # Take profit at +10% net (after fees — the real baseline)
+        elif net >= 0.10:
             should_sell = True
-            reason = f"+{gain_pct:.0f}% PROFIT"
+            reason = f"NET +{net_pct:.1f}% PROFIT (${net_profit:.3f} after ${fees:.3f} fees)"
 
         # Smart stop loss — check momentum before cutting
-        elif gain <= STOP_LOSS_PCT:
+        elif raw_gain <= STOP_LOSS_PCT:
             # Check how close to settlement
             close_time = market.get('close_time') or market.get('expected_expiration_time')
             mins_to_settle = 999
@@ -294,15 +321,15 @@ def check_sells():
                 prev_bid = peak_bids.get(f"{trade_id}_prev", current_bid)
                 if current_bid > prev_bid:
                     # Price recovering — hold, momentum shifting our way
-                    logger.info(f"  HOLD: {ticker} down {gain_pct:.0f}% but recovering (${prev_bid:.2f} -> ${current_bid:.2f}), {mins_to_settle:.1f}min left")
+                    logger.info(f"  HOLD: {ticker} net {net_pct:.0f}% but recovering (${prev_bid:.2f} -> ${current_bid:.2f}), {mins_to_settle:.1f}min left")
                 else:
                     # Still dropping near expiry — cut it
                     should_sell = True
-                    reason = f"{gain_pct:.0f}% STOP LOSS (not recovering, {mins_to_settle:.1f}min left)"
+                    reason = f"NET {net_pct:.0f}% STOP LOSS (not recovering, {mins_to_settle:.1f}min left)"
             else:
                 # Not near settlement yet — hard stop loss
                 should_sell = True
-                reason = f"{gain_pct:.0f}% STOP LOSS"
+                reason = f"NET {net_pct:.0f}% STOP LOSS"
 
             # Track previous bid for momentum detection
             peak_bids[f"{trade_id}_prev"] = current_bid
@@ -311,9 +338,9 @@ def check_sells():
             continue
 
         # === SELL ALL CONTRACTS ===
-        pnl = round((current_bid - entry_price) * count, 4)
+        pnl = net_pnl(entry_price, current_bid, count)
 
-        logger.info(f"SELL ATTEMPT: {ticker} {side} x{count} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% reason={reason}")
+        logger.info(f"SELL ATTEMPT: {ticker} {side} x{count} entry=${entry_price:.2f} bid=${current_bid:.2f} net={net_pct:+.1f}% reason={reason}")
 
         result = place_order(ticker, side, 'sell', current_bid, count)
         if not result:
@@ -323,9 +350,9 @@ def check_sells():
         order_id, filled = result
         if filled < count:
             logger.warning(f"PARTIAL SELL: {ticker} filled {filled}/{count}")
-            pnl = round((current_bid - entry_price) * filled, 4)
+            pnl = net_pnl(entry_price, current_bid, filled)
 
-        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | pnl=${pnl:.4f}")
+        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | net_pnl=${pnl:.4f} (after fees)")
         if pnl < 0:
             daily_loss += abs(pnl)
             logger.info(f"Daily loss now: ${daily_loss:.2f} (limit: ${MAX_DAILY_LOSS:.2f})")
