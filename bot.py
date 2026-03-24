@@ -32,7 +32,7 @@ MAX_BUYS_PER_CYCLE = 10
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
 def get_contracts(price):
-    return 10 if price < 0.20 else 5
+    return 20 if price < 0.20 else 5
 
 # Set dynamically at startup
 BOT_START_TIME = None
