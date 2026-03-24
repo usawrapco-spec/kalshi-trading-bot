@@ -22,16 +22,15 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === DUAL STRATEGY ===
-# Favorites: steady wins betting with the market
+# Favorites: steady wins betting with the market (expensive side)
 FAV_MIN = 0.55
 FAV_MAX = 0.95
 FAV_SELL = 0.12             # +12% take profit
 FAV_PROTECT = 0.05          # +5% protect floor
-FAV_STOP = -0.10            # -10% stop loss
 
-# Longshots: cheap moonshots that ride to settlement
+# Longshots: cheap side, ride to settlement (matches old profitable bot)
 LONG_MIN = 0.03
-LONG_MAX = 0.15
+LONG_MAX = 0.35
 LONG_PROTECT_PEAK = 2.0     # sell if was +200% and drops to +100%
 LONG_PROTECT_FLOOR = 1.0
 LONG_STOP = -0.25            # -25% stop loss (no take profit — ride to $1.00)
