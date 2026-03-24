@@ -338,10 +338,22 @@ def check_sells():
 def fetch_all_markets():
     all_markets = []
     for series in CRYPTO_SERIES:
+        cursor = None
+        pages = 0
         try:
-            resp = kalshi_get(f'/markets?series_ticker={series}&status=open&limit=200')
-            batch = resp.get('markets', [])
-            all_markets.extend(batch)
+            while True:
+                url = f'/markets?series_ticker={series}&status=open&limit=200'
+                if cursor:
+                    url += f'&cursor={cursor}'
+                resp = kalshi_get(url)
+                batch = resp.get('markets', [])
+                all_markets.extend(batch)
+                pages += 1
+                cursor = resp.get('cursor')
+                if not cursor or not batch:
+                    break
+            if pages > 1:
+                logger.info(f"  {series}: {pages} pages fetched")
         except Exception as e:
             logger.error(f"Fetch {series} failed: {e}")
     logger.info(f"Fetched {len(all_markets)} markets from {len(CRYPTO_SERIES)} series")
