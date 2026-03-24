@@ -102,7 +102,22 @@ def place_order(ticker, side, action, price, count):
 
 # === BALANCE ===
 
+def get_kalshi_balance():
+    """Get real cash balance from Kalshi API (returns dollars)."""
+    try:
+        resp = kalshi_get('/portfolio/balance')
+        balance_cents = resp.get('balance', 0)
+        return balance_cents / 100.0
+    except Exception as e:
+        logger.error(f"Kalshi balance fetch failed: {e}")
+        return None
+
+
 def get_balance():
+    """Get cash balance — real from Kalshi API, fallback to calculated."""
+    real = get_kalshi_balance()
+    if real is not None:
+        return real
     try:
         buys = db.table('trades').select('price,count').eq('action', 'buy').gte('created_at', BOT_START_TIME).execute()
         buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
@@ -420,10 +435,11 @@ def health():
 @app.route('/api/status')
 def api_status():
     try:
-        balance = get_balance()
+        cash = get_balance()
 
         open_positions = get_open_positions()
         positions_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_positions)
+        portfolio = cash + positions_value
 
         resolved = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').gte('created_at', BOT_START_TIME).execute()
         resolved_data = resolved.data or []
@@ -434,7 +450,8 @@ def api_status():
         mode = "PAPER" if not ENABLE_TRADING else "LIVE"
 
         return jsonify({
-            'balance': round(balance, 2),
+            'portfolio': round(portfolio, 2),
+            'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
             'net_pnl': round(total_pnl, 4),
             'wins': wins,
@@ -444,7 +461,7 @@ def api_status():
         })
     except Exception as e:
         logger.error(f"API status error: {e}")
-        return jsonify({'balance': 0, 'positions_value': 0, 'net_pnl': 0, 'wins': 0, 'losses': 0, 'open_count': 0, 'mode': 'PAPER'})
+        return jsonify({'portfolio': 0, 'cash': 0, 'positions_value': 0, 'net_pnl': 0, 'wins': 0, 'losses': 0, 'open_count': 0, 'mode': 'PAPER'})
 
 
 @app.route('/api/open')
@@ -559,14 +576,10 @@ tr:hover{background:#1a1a1a !important}
   <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-45c &mdash; sell at 30%
 </div>
 
-<div class="top-bar">
-  <span>BALANCE: <span id="tb-balance">...</span></span>
-  <span class="sep">|</span>
-  <span>POSITIONS: <span id="tb-positions">...</span></span>
-  <span class="sep">|</span>
-  <span>RECORD: <span id="tb-record">...</span></span>
-  <span class="sep">|</span>
-  <span>P&amp;L: <span id="tb-pnl">...</span></span>
+<div class="top-bar" style="flex-direction:column;gap:6px">
+  <div style="font-size:16px">PORTFOLIO: <span id="tb-portfolio">...</span></div>
+  <div style="font-size:12px;color:#888">Positions: <span id="tb-positions">...</span> &nbsp;&nbsp; Cash: <span id="tb-cash">...</span></div>
+  <div style="font-size:12px">P&amp;L: <span id="tb-pnl">...</span> &nbsp;&nbsp; RECORD: <span id="tb-record">...</span></div>
 </div>
 
 <div class="panel">
@@ -627,8 +640,9 @@ async function refresh(){
   ]);
 
   if(status){
-    $('tb-balance').textContent='$'+(status.balance||0).toFixed(2);
+    $('tb-portfolio').textContent='$'+(status.portfolio||0).toFixed(2);
     $('tb-positions').textContent='$'+(status.positions_value||0).toFixed(2);
+    $('tb-cash').textContent='$'+(status.cash||0).toFixed(2);
 
     var pnl=status.net_pnl||0;
     $('tb-pnl').innerHTML='<span class="'+cls(pnl)+'">'+(pnl>=0?'+':'')+pnl.toFixed(2)+'</span>';
