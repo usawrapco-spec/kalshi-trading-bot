@@ -324,8 +324,10 @@ def buy_candidates(markets):
     owned = get_owned_tickers()
     logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
 
-    if balance <= 5.0:
-        logger.info("Balance too low, skipping buys")
+    reserve = balance * 0.50
+    deployable = balance - reserve
+    if deployable <= 1.0:
+        logger.info(f"Balance ${balance:.2f}, reserve ${reserve:.2f}, deployable too low — skipping buys")
         return
 
     candidates = []
@@ -335,6 +337,16 @@ def buy_candidates(markets):
         ticker = market.get('ticker', '')
 
         if ticker in owned:
+            continue
+
+        # Only buy contracts settling within 20 minutes
+        close_time = market.get('close_time') or market.get('expected_expiration_time')
+        if close_time:
+            close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+            mins_left = (close_dt - now).total_seconds() / 60
+            if mins_left > 20:
+                continue
+        else:
             continue
 
         yes_ask = float(market.get('yes_ask_dollars') or '999')
@@ -366,8 +378,8 @@ def buy_candidates(markets):
 
         contracts = get_contracts(c['price'])
         cost = c['price'] * contracts
-        if cost > balance:
-            logger.info(f"OUT OF CASH: need ${cost:.2f}, have ${balance:.2f}")
+        if cost > deployable:
+            logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f} (reserve ${reserve:.2f})")
             break
 
         result = place_order(c['ticker'], c['side'], 'buy', c['price'], contracts)
@@ -382,7 +394,7 @@ def buy_candidates(markets):
                 'current_bid': float(c['bid']),
             }).execute()
             owned.add(c['ticker'])
-            balance -= cost
+            deployable -= cost
             bought += 1
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
