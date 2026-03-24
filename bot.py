@@ -231,6 +231,13 @@ def check_sells():
             pass
 
         if current_bid <= 0:
+            pnl = round(-entry_price * count, 4)
+            logger.info(f"EXPIRED: {ticker} {side} | bid=$0 | pnl=${pnl:.4f}")
+            try:
+                db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
+            except Exception as e:
+                logger.error(f"Expire DB error: {e}")
+            expired += 1
             continue
 
         gain = (current_bid - entry_price) / entry_price
