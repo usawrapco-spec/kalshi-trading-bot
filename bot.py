@@ -24,7 +24,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY: CHEAP ENTRIES, TRAILING STOP ON WINNERS ===
 BUY_MIN = 0.03
 BUY_MAX = 0.20
-TRAILING_ACTIVATE = 0.50    # trailing stop activates once gain > +50%
+TRAILING_ACTIVATE = 1.00    # trailing stop activates once gain > +100%
 TRAILING_DROP = 0.25        # sell if price drops 25% from peak bid
 MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
