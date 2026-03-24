@@ -315,10 +315,20 @@ def check_sells():
                 pass
 
         # === GUT FEELING SCORE ===
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} {mins_left:.0f}min x{count}")
+        raw_gain = (current_bid - entry_price) / entry_price if entry_price > 0 else 0
 
-        # No selling — everything rides to settlement
-        continue
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} gain={raw_gain*100:+.0f}% profit=${real_profit:.4f} x{count}")
+
+        should_sell = False
+        reason = ''
+
+        # Take profit at +50%
+        if raw_gain >= 0.50 and real_profit > 0:
+            should_sell = True
+            reason = f"TAKE PROFIT +{raw_gain*100:.0f}% profit=${real_profit:.4f}"
+
+        if not should_sell:
+            continue
 
         # === SELL ALL CONTRACTS ===
         pnl = net_pnl(entry_price, current_bid, count)
