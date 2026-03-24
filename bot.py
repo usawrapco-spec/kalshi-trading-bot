@@ -23,8 +23,8 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY: ALL 15M CRYPTO MARKETS ===
-BUY_MIN = 0.01              # no real minimum — buy anything cheap
-BUY_MAX = 0.50              # buy under 50 cents — ride to settlement
+BUY_MIN = 0.50              # buy favorites — the side market thinks wins
+BUY_MAX = 0.97              # up to 97 cents
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat Kalshi fees)
 STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
 TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
@@ -495,16 +495,16 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f}")
 
-        # Buy the CHEAPEST side — stop-loss & trailing stop provide protection
-        if yes_ask <= no_ask and yes_ask < 0.99 and yes_bid > 0:
+        # Buy the FAVORITE — the expensive side that's most likely to settle at $1.00
+        if yes_ask >= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'yes'
-        elif no_ask < 0.99 and no_bid > 0:
+            strategy = 'fav_yes'
+        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
-            strategy = 'no'
-        elif yes_ask < 0.99 and yes_bid > 0:
+            strategy = 'fav_no'
+        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'yes'
+            strategy = 'fav_yes'
         else:
             continue
 
@@ -522,7 +522,7 @@ def buy_candidates(markets):
 
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'strategy': strategy})
 
-    candidates.sort(key=lambda x: x['price'])
+    candidates.sort(key=lambda x: x['price'], reverse=True)  # highest conviction first
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
 
