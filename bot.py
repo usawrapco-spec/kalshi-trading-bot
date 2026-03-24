@@ -22,13 +22,13 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
-# === STRATEGY: CHEAP ENTRIES, SELL ALL AT TARGET ===
+# === STRATEGY: ALL 15M CRYPTO MARKETS ===
 BUY_MIN = 0.03
-BUY_MAX = 0.20
+BUY_MAX = 0.97              # buy any contract that isn't already decided
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat Kalshi fees)
 STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
 TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
-MOMENTUM_THRESHOLD = 0.05   # 5% price change = momentum signal
+MOMENTUM_THRESHOLD = 0.02   # 2% price change = momentum signal (was 5%, too strict)
 MAX_ADDS = 2                # can add to a GREEN position twice (max 15 contracts)
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
@@ -743,7 +743,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-20c &mdash; sell +30% / stop -40% / trail -15%
+  <span id="mode-label">PAPER MODE</span> &mdash; all 15M crypto &mdash; sell +30% / stop -30% / trail -15%
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -776,7 +776,7 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Buy cheap 3-20c w/ momentum | Sell +30% | Stop -40% | Trail -15%</span>
+  <span>All 15M crypto | 2% momentum gate | Sell +30% | Stop -30% | Trail -15%</span>
   <span>20min max | 3 contracts | 20% reserve | $100 balance</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
