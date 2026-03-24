@@ -267,20 +267,10 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # Take profit at +30%
-        if gain >= SELL_THRESHOLD:
-            should_sell = True
-            reason = f"+{gain_pct:.0f}% PROFIT"
-
-        # Stop loss at -40%
-        elif gain <= STOP_LOSS_PCT:
+        # Stop loss at -30% — only cut LOSERS, let winners ride to settlement
+        if gain <= STOP_LOSS_PCT:
             should_sell = True
             reason = f"{gain_pct:.0f}% STOP LOSS"
-
-        # Trailing stop: if we were up but dropped 15% from peak
-        elif peak > entry_price and drop_from_peak <= -TRAIL_DROP_PCT:
-            should_sell = True
-            reason = f"TRAIL STOP (peak=${peak:.2f}, dropped {drop_from_peak*100:.0f}%)"
 
         if not should_sell:
             continue
