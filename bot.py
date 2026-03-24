@@ -36,7 +36,7 @@ CYCLE_SECONDS = 10          # 10 sec cycles — don't overtrade
 STARTING_BALANCE = 1000.00
 CASH_RESERVE = 0.20         # keep 20% cash reserve ($20 buffer)
 MAX_BUYS_PER_CYCLE = 999    # unlimited buys per cycle
-CONTRACTS = 20              # big position when we see a signal
+CONTRACTS = 5               # start with 5 per trade
 MAX_DAILY_LOSS = float(os.environ.get('MAX_DAILY_LOSS', '10.00'))  # stop buying after $10 daily loss
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
