@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
 BUY_MIN = 0.03
-BUY_MAX = 0.15
+BUY_MAX = 0.50
 SELL_THRESHOLD = 0.50       # +50% take profit (beats fees)
 FEE_PER_CONTRACT = 0.07    # ~$0.035/side x2 = $0.07 round trip per contract
 STOP_LOSS = -0.25           # -25% stop loss
@@ -422,7 +422,9 @@ def _get_volume(market):
 
 def update_hot_markets(markets):
     global current_hot_markets
-    by_vol = sorted(markets, key=lambda m: _get_volume(m), reverse=True)[:10]
+    # Filter out settled markets ($1.00 yes = already decided)
+    active = [m for m in markets if sf(m.get('yes_ask_dollars', '0')) < 0.99]
+    by_vol = sorted(active, key=lambda m: _get_volume(m), reverse=True)[:10]
     current_hot_markets = [
         {
             'ticker': m.get('ticker', ''),
@@ -609,7 +611,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-15c &mdash; sell +35% / stop -25%
+  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-50c &mdash; sell +50% / stop -25%
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -643,7 +645,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div class="status-bar">
   <span>Series: 15M crypto (5 series) | 20min max | Stop -25% | Fees: ~$0.07/contract</span>
-  <span>Buy: 3-15c | Sell: +35% | 5/20 contracts | 10s cycles | 50% reserve</span>
+  <span>Buy: 3-50c | Sell: +50% | 5/20 contracts | 10s cycles | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
