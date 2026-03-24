@@ -32,7 +32,12 @@ MAX_BUYS_PER_CYCLE = 10
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
 def get_contracts(price):
-    return 20 if price < 0.20 else 5
+    recent = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(5).execute()
+    recent_wins = sum(1 for t in recent.data if t['pnl'] > 0)
+    hot_streak = recent_wins >= 3
+    if hot_streak and price < 0.20:
+        return 20
+    return 5
 
 # Set dynamically at startup
 BOT_START_TIME = None
