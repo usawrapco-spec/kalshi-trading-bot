@@ -1,7 +1,7 @@
 """
-Crypto scalper. Buy cheap 15M contracts settling within 20min.
-Sell at +30% (beats fees), stop loss at -40%, trailing stop -15% from peak.
-Directional filter: only buy with momentum. $100 balance, 20% reserve.
+Kalshi 15M crypto scalper.
+Majority vote: pick ONE side (YES or NO) per window, buy all tickers same direction.
+Take profit at $0.90+ bid. Losers ride to settlement. $1000 balance, 20% reserve.
 """
 
 import os, time, logging, traceback
@@ -22,22 +22,18 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
-# === STRATEGY: ALL 15M CRYPTO MARKETS ===
-BUY_MIN = 0.01              # no minimum — prove it with data
+# === STRATEGY ===
+BUY_MIN = 0.01              # no minimum
 BUY_MAX = 0.50              # max $0.50 — controls losses
-SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat Kalshi fees)
-STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
-TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
-MOMENTUM_THRESHOLD = 0.02   # 2% price change = momentum signal (was 5%, too strict)
+TAKE_PROFIT_BID = 0.90      # sell when bid hits $0.90+ (contract 90% decided)
 MAX_ADDS = 999              # unlimited adds on green positions
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
-CYCLE_SECONDS = 10          # 10 sec cycles — don't overtrade
+CYCLE_SECONDS = 10
 STARTING_BALANCE = 1000.00
-CASH_RESERVE = 0.20         # keep 20% cash reserve ($20 buffer)
+CASH_RESERVE = 0.20         # 20% cash reserve
 MAX_BUYS_PER_CYCLE = 999    # unlimited buys per cycle
-CONTRACTS = 5               # start with 5 per trade
-MAX_DAILY_LOSS = float(os.environ.get('MAX_DAILY_LOSS', '10.00'))  # stop buying after $10 daily loss
+CONTRACTS = 5               # 5 contracts per trade
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
@@ -47,13 +43,8 @@ auth = KalshiAuth()
 app = Flask(__name__)
 
 current_hot_markets = []
-last_cycle_prices = {}   # ticker -> yes_ask, for momentum detection
-price_history = {}       # ticker -> list of last N yes_bid prices (for trend detection)
-TREND_CYCLES = 4         # need 4 cycles of data before buying (40 seconds at 10s cycles)
-TREND_MIN_MOVE = 0.01    # price must move at least $0.01 total in one direction
-peak_bids = {}           # trade_id -> highest bid seen
-daily_loss = 0.0         # cumulative realized losses today
-daily_loss_date = None   # reset daily
+last_cycle_prices = {}   # ticker -> yes_ask
+peak_bids = {}           # trade_id -> tracking data
 
 
 def kalshi_fee(price, count):
@@ -197,7 +188,6 @@ def get_owned_tickers():
 # === SELL LOGIC ===
 
 def check_sells():
-    global daily_loss
     logger.info("--- SELL CHECK ---")
     open_positions = get_open_positions()
 
@@ -234,8 +224,6 @@ def check_sells():
             net = round(gross - b_fee, 4)
             reason = f"{'WIN' if result_val == side else 'LOSS'} settled @${settle_price:.2f}"
             logger.info(f"SETTLED: {ticker} {side} | {reason} | gross=${gross:.4f} buy_fee=${b_fee:.4f} net=${net:.4f}")
-            if net < 0:
-                daily_loss += abs(net)
             try:
                 db.table('trades').update({
                     'pnl': float(net),
@@ -272,12 +260,19 @@ def check_sells():
         if current_bid <= 0:
             if status == 'open':
                 # Market is open but bid is $0 — this IS a total loss, book it now
-                pnl = round(-entry_price * count, 4)
-                logger.info(f"STOP LOSS ($0 bid): {ticker} {side} x{count} entry=${entry_price:.2f} | pnl=${pnl:.4f}")
-                if pnl < 0:
-                    daily_loss += abs(pnl)
+                b_fee = kalshi_fee(entry_price, count)
+                gross = round(-entry_price * count, 4)
+                pnl = round(gross - b_fee, 4)
+                logger.info(f"$0 BID LOSS: {ticker} {side} x{count} entry=${entry_price:.2f} | gross=${gross:.4f} fee=${b_fee:.4f} net=${pnl:.4f}")
                 try:
-                    db.table('trades').update({'pnl': float(pnl), 'current_bid': 0.0}).eq('id', trade['id']).execute()
+                    db.table('trades').update({
+                        'pnl': float(pnl),
+                        'gross_pnl': float(gross),
+                        'net_pnl': float(pnl),
+                        'buy_fee': float(b_fee),
+                        'sell_fee': 0.0,
+                        'current_bid': 0.0,
+                    }).eq('id', trade['id']).execute()
                 except Exception as e:
                     logger.error(f"$0 stop DB error: {e}")
                 peak_bids.pop(trade['id'], None)
@@ -325,7 +320,7 @@ def check_sells():
         reason = ''
 
         # Take profit when bid hits $0.90+ — contract is 90% decided, lock it in
-        if current_bid >= 0.90 and real_profit > 0:
+        if current_bid >= TAKE_PROFIT_BID and real_profit > 0:
             should_sell = True
             reason = f"TAKE PROFIT bid=${current_bid:.2f} (>=90c) profit=${real_profit:.4f}"
 
@@ -352,9 +347,6 @@ def check_sells():
         gross = round((current_bid - entry_price) * filled, 4)
 
         logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | gross=${gross:.4f} buy_fee=${b_fee:.4f} sell_fee=${s_fee:.4f} net=${pnl:.4f}")
-        if pnl < 0:
-            daily_loss += abs(pnl)
-            logger.info(f"Daily loss now: ${daily_loss:.2f} (limit: ${MAX_DAILY_LOSS:.2f})")
         try:
             if filled >= count:
                 db.table('trades').update({
@@ -413,34 +405,6 @@ def fetch_all_markets():
     logger.info(f"Fetched {len(all_markets)} markets from {len(CRYPTO_SERIES)} series")
     return all_markets
 
-
-def detect_momentum(markets):
-    """Compare current prices to last cycle. Returns True if any market moved significantly."""
-    global last_cycle_prices
-    momentum = False
-    for market in markets:
-        ticker = market.get('ticker', '')
-        yes_ask = float(market.get('yes_ask_dollars') or '0')
-        if yes_ask <= 0 or yes_ask >= 0.99:
-            continue
-        if ticker in last_cycle_prices:
-            old_price = last_cycle_prices[ticker]
-            if old_price > 0:
-                change = abs(yes_ask - old_price) / old_price
-                if change >= MOMENTUM_THRESHOLD:
-                    logger.info(f"MOMENTUM: {ticker} moved {change*100:.1f}% ({old_price:.2f} -> {yes_ask:.2f})")
-                    momentum = True
-        last_cycle_prices[ticker] = yes_ask
-    return momentum
-
-
-def get_recent_losers():
-    """Get tickers that lost in the last 3 resolved trades — don't re-buy losers."""
-    try:
-        recent = db.table('trades').select('ticker,pnl').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(3).execute()
-        return {t['ticker'] for t in (recent.data or []) if sf(t['pnl']) < 0}
-    except:
-        return set()
 
 
 def buy_candidates(markets):
@@ -552,6 +516,7 @@ def buy_candidates(markets):
                 'current_bid': float(c['bid']),
                 'strategy': c.get('strategy'),
                 'buy_fee': float(b_fee),
+                'order_id': order_id,
             }).execute()
             open_positions.append({'ticker': c['ticker'], 'price': c['price']})
             deployable -= actual_cost
