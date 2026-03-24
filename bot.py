@@ -322,8 +322,8 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # Take profit at +50%
-        if raw_gain >= 0.50 and real_profit > 0:
+        # Take profit at +100% (doubled)
+        if raw_gain >= 1.00 and real_profit > 0:
             should_sell = True
             reason = f"TAKE PROFIT +{raw_gain*100:.0f}% profit=${real_profit:.4f}"
 
