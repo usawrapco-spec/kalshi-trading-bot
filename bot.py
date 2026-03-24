@@ -249,12 +249,17 @@ def check_sells():
         gain_pct = gain * 100
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        # Take profit
+        # Determine if we should sell
+        should_sell = False
+        reason = ''
+
+        # Take profit at +50%
         if gain >= SELL_THRESHOLD:
-            pnl = round((current_bid - entry_price) * count, 4)
+            should_sell = True
             reason = f"+{gain_pct:.0f}% PROFIT"
-        else:
-            # Expiry save — sell 2min before expiry at ANY bid
+
+        # Expiry save — sell 2min before expiry at ANY bid
+        if not should_sell:
             close_time = market.get('close_time') or market.get('expected_expiration_time')
             secs_left = None
             if close_time:
@@ -264,7 +269,6 @@ def check_sells():
                 except:
                     pass
             if secs_left is None:
-                # Fallback: parse expiry from ticker (e.g. KXBTC15M-232030-30 → 20:30 UTC)
                 m = re.search(r'(\d{6})-\d+$', ticker)
                 if m:
                     try:
@@ -273,25 +277,55 @@ def check_sells():
                         now = datetime.now(timezone.utc)
                         close_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
                         if close_dt < now:
-                            close_dt = close_dt  # already passed
+                            close_dt = close_dt
                         secs_left = (close_dt - now).total_seconds()
                     except:
                         pass
             if secs_left is not None:
                 logger.info(f"  EXPIRY: {ticker} secs={secs_left:.0f}")
                 if secs_left < 120 and current_bid > 0:
-                    pnl = round((current_bid - entry_price) * count, 4)
-                    reason = f"EXPIRY SAVE {gain_pct:+.0f}%"
-                else:
-                    continue
-            else:
-                continue
+                    should_sell = True
+                    reason = f"EXPIRY SAVE {gain_pct:+.0f}% ({secs_left:.0f}s left)"
 
-        result = place_order(ticker, side, 'sell', current_bid, count)
-        if not result:
+        if not should_sell:
             continue
 
-        logger.info(f"SELL ({reason}): {ticker} {side} x{count} @ ${current_bid:.2f} | pnl=${pnl:.4f}")
+        # === SELL ORDER — verbose logging ===
+        pnl = round((current_bid - entry_price) * count, 4)
+        price_cents = int(round(current_bid * 100))
+
+        logger.info(f"SELL ATTEMPT: {ticker} side={side} count={count} entry=${entry_price:.2f} bid=${current_bid:.2f} gain={gain_pct:+.0f}% reason={reason}")
+
+        order_payload = {
+            'ticker': ticker,
+            'action': 'sell',
+            'side': side,
+            'count': count,
+            'type': 'limit',
+        }
+        if side == 'yes':
+            order_payload['yes_price'] = price_cents
+        else:
+            order_payload['no_price'] = price_cents
+
+        logger.info(f"SELL PAYLOAD: {order_payload}")
+
+        if not ENABLE_TRADING:
+            logger.info(f"PAPER SELL: {ticker} {side} x{count} @ ${current_bid:.2f}")
+            sell_result = {'order_id': 'paper', 'status': 'executed'}
+        else:
+            try:
+                resp = kalshi_post('/portfolio/orders', order_payload)
+                logger.info(f"SELL RESPONSE: {resp}")
+                order = resp.get('order', {})
+                sell_result = {'order_id': order.get('order_id', ''), 'status': order.get('status', '')}
+            except Exception as e:
+                logger.error(f"SELL FAILED: {ticker} error={str(e)}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logger.error(f"SELL ERROR BODY: {e.response.text}")
+                continue
+
+        logger.info(f"SELL ({reason}): {ticker} {side} x{count} @ ${current_bid:.2f} | pnl=${pnl:.4f} | order={sell_result}")
         try:
             db.table('trades').update({
                 'pnl': float(pnl),
@@ -339,12 +373,15 @@ def buy_candidates(markets):
         if ticker in owned:
             continue
 
-        # Only buy contracts settling within 20 minutes
+        # Only buy contracts settling within 20 minutes (and not already expired)
         close_time = market.get('close_time') or market.get('expected_expiration_time')
         if close_time:
-            close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-            mins_left = (close_dt - now).total_seconds() / 60
-            if mins_left > 20:
+            try:
+                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                mins_left = (close_dt - now).total_seconds() / 60
+                if mins_left > 20 or mins_left < 1:
+                    continue
+            except:
                 continue
         else:
             continue
@@ -364,6 +401,7 @@ def buy_candidates(markets):
         else:
             continue
 
+        logger.info(f"  CANDIDATE: {ticker} {side} ${price:.2f} mins_left={mins_left:.1f}")
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
 
     # Sort cheapest first, buy up to 10
