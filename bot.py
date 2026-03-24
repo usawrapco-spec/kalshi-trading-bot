@@ -411,7 +411,9 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        # FAVORITE: pick the more expensive side (55-85c)
+        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
+
+        # FAVORITE: pick the more expensive side (55-95c)
         fav_key = f"{ticker}:fav"
         if fav_key not in owned:
             if yes_ask >= no_ask and FAV_MIN <= yes_ask <= FAV_MAX and yes_bid > 0:
