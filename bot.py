@@ -23,7 +23,7 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY: ALL 15M CRYPTO MARKETS ===
-BUY_MIN = 0.03
+BUY_MIN = 0.01              # no real minimum — buy anything cheap
 BUY_MAX = 0.50              # buy under 50 cents — ride to settlement
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat Kalshi fees)
 STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
