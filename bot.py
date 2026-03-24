@@ -301,15 +301,8 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # Instant sell at +100% net (doubled after fees)
-        if net >= 1.00:
-            should_sell = True
-            reason = f"NET +{net_pct:.0f}% DOUBLED — INSTANT SELL"
-
-        # Take profit at +10% net (after fees — the real baseline)
-        elif net >= 0.10:
-            should_sell = True
-            reason = f"NET +{net_pct:.1f}% PROFIT (${net_profit:.3f} after ${fees:.3f} fees)"
+        # No take profit — let cheap contracts ride to settlement for max payout
+        # Only sell on stop loss below
 
         # Smart stop loss — check momentum before cutting
         elif raw_gain <= STOP_LOSS_PCT:
