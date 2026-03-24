@@ -1,9 +1,9 @@
 """
-Full reset scalper. Clear DB on startup, buy cheap crypto, sell at 30%, take loss on expiry.
-15M series only, $0.03-$0.45, 5 contracts, 30s cycles, paper mode.
+Live scalper. Buy cheap crypto, sell at tiered thresholds, take loss on expiry.
+15M series only, $0.03-$0.35, 5 contracts, 10s cycles.
 """
 
-import os, time, logging, traceback
+import os, time, logging, traceback, re
 from datetime import datetime, timezone
 from flask import Flask, jsonify, render_template_string
 from threading import Thread
@@ -220,19 +220,35 @@ def check_sells():
             pnl = round((current_bid - entry_price) * count, 4)
             reason = f"+{gain_pct:.0f}% PROFIT (threshold {threshold*100:.0f}%)"
         else:
-            # Expiry save — sell 1min before expiry if bid > 0
+            # Expiry save — sell 2min before expiry at ANY bid
             close_time = market.get('close_time') or market.get('expected_expiration_time')
+            secs_left = None
             if close_time:
                 try:
                     close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
                     secs_left = (close_dt - datetime.now(timezone.utc)).total_seconds()
-                    logger.info(f"  EXPIRY: {ticker} close={close_time} secs={secs_left:.0f}")
-                    if secs_left < 60 and current_bid > 0:
-                        pnl = round((current_bid - entry_price) * count, 4)
-                        reason = f"EXPIRY SAVE {gain_pct:+.0f}%"
-                    else:
-                        continue
                 except:
+                    pass
+            if secs_left is None:
+                # Fallback: parse expiry from ticker (e.g. KXBTC15M-232030-30 → 20:30 UTC)
+                m = re.search(r'(\d{6})-\d+$', ticker)
+                if m:
+                    try:
+                        digits = m.group(1)
+                        hh, mm = int(digits[2:4]), int(digits[4:6])
+                        now = datetime.now(timezone.utc)
+                        close_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+                        if close_dt < now:
+                            close_dt = close_dt  # already passed
+                        secs_left = (close_dt - now).total_seconds()
+                    except:
+                        pass
+            if secs_left is not None:
+                logger.info(f"  EXPIRY: {ticker} secs={secs_left:.0f}")
+                if secs_left < 120 and current_bid > 0:
+                    pnl = round((current_bid - entry_price) * count, 4)
+                    reason = f"EXPIRY SAVE {gain_pct:+.0f}%"
+                else:
                     continue
             else:
                 continue
