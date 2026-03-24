@@ -22,12 +22,13 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === SETTINGS ===
-BUY_MIN = 0.03
-BUY_MAX = 0.35
+BUY_MIN = 0.02
+BUY_MAX = 0.50
 CYCLE_SECONDS = 10
 SELL_THRESHOLD = 0.50
 STARTING_BALANCE = 100.00
 MAX_BUYS_PER_CYCLE = 10
+FEE_PER_CONTRACT = 0.02  # Kalshi charges ~$0.01/contract each side (buy+sell = $0.02 round trip)
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
@@ -360,7 +361,7 @@ def buy_candidates(markets):
     owned = get_owned_tickers()
     logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
 
-    reserve = balance * 0.50
+    reserve = balance * 0.30
     deployable = balance - reserve
     if deployable <= 1.0:
         logger.info(f"Balance ${balance:.2f}, reserve ${reserve:.2f}, deployable too low — skipping buys")
@@ -508,11 +509,17 @@ def api_status():
         positions_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_positions)
         portfolio = cash + positions_value
 
-        resolved = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').execute()
+        resolved = db.table('trades').select('pnl,count').eq('action', 'buy').not_.is_('pnl', 'null').execute()
         resolved_data = resolved.data or []
         total_pnl = sum(sf(t['pnl']) for t in resolved_data)
         wins = sum(1 for t in resolved_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in resolved_data if sf(t['pnl']) <= 0)
+
+        # Fee tracking: count total contracts traded (buy + sell = round trip)
+        all_trades = db.table('trades').select('count').eq('action', 'buy').execute()
+        total_contracts = sum((t.get('count') or 1) for t in (all_trades.data or []))
+        total_fees = round(total_contracts * FEE_PER_CONTRACT, 2)
+        pnl_after_fees = round(total_pnl - total_fees, 4)
 
         mode = "PAPER" if not ENABLE_TRADING else "LIVE"
 
@@ -521,6 +528,9 @@ def api_status():
             'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
             'net_pnl': round(total_pnl, 4),
+            'total_fees': total_fees,
+            'pnl_after_fees': pnl_after_fees,
+            'total_contracts': total_contracts,
             'wins': wins,
             'losses': losses,
             'open_count': len(open_positions),
@@ -528,7 +538,7 @@ def api_status():
         })
     except Exception as e:
         logger.error(f"API status error: {e}")
-        return jsonify({'portfolio': 0, 'cash': 0, 'positions_value': 0, 'net_pnl': 0, 'wins': 0, 'losses': 0, 'open_count': 0, 'mode': 'PAPER'})
+        return jsonify({'portfolio': 0, 'cash': 0, 'positions_value': 0, 'net_pnl': 0, 'total_fees': 0, 'pnl_after_fees': 0, 'total_contracts': 0, 'wins': 0, 'losses': 0, 'open_count': 0, 'mode': 'PAPER'})
 
 
 @app.route('/api/open')
@@ -640,14 +650,15 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-35c &mdash; sell at 30%
+  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 2-50c &mdash; sell at 50%
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
 <div class="top-bar" style="flex-direction:column;gap:6px">
   <div style="font-size:16px">PORTFOLIO: <span id="tb-portfolio">...</span></div>
   <div style="font-size:12px;color:#888">Positions: <span id="tb-positions">...</span> &nbsp;&nbsp; Cash: <span id="tb-cash">...</span></div>
-  <div style="font-size:12px">P&amp;L: <span id="tb-pnl">...</span> &nbsp;&nbsp; RECORD: <span id="tb-record">...</span></div>
+  <div style="font-size:12px">P&amp;L: <span id="tb-pnl">...</span> &nbsp;&nbsp; Fees: <span id="tb-fees" class="red">...</span> &nbsp;&nbsp; Net: <span id="tb-net">...</span></div>
+  <div style="font-size:12px">RECORD: <span id="tb-record">...</span></div>
 </div>
 
 <div class="panel">
@@ -672,8 +683,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: 15M crypto (5 series) | No filters | No stop loss</span>
-  <span>Buy: 3-35c | Sell: 30% | 10/5 contracts | 10s cycles</span>
+  <span>Series: 15M crypto (5 series) | 20min expiry | No stop loss</span>
+  <span>Buy: 2-50c | Sell: 50% | 10/5 contracts | 30% reserve | 10s cycles</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
@@ -713,7 +724,11 @@ async function refresh(){
     $('tb-cash').textContent='$'+(status.cash||0).toFixed(2);
 
     var pnl=status.net_pnl||0;
-    $('tb-pnl').innerHTML='<span class="'+cls(pnl)+'">'+(pnl>=0?'+':'')+pnl.toFixed(2)+'</span>';
+    $('tb-pnl').innerHTML='<span class="'+cls(pnl)+'">'+(pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(2)+'</span>';
+    var fees=status.total_fees||0;
+    $('tb-fees').textContent='-$'+fees.toFixed(2)+' ('+( status.total_contracts||0)+'c)';
+    var net=status.pnl_after_fees||0;
+    $('tb-net').innerHTML='<span class="'+cls(net)+'">'+(net>=0?'+$':'-$')+Math.abs(net).toFixed(2)+'</span>';
     $('tb-record').innerHTML='<span class="green">'+(status.wins||0)+'W</span> <span class="gray">/</span> <span class="red">'+(status.losses||0)+'L</span>';
 
     var mode=status.mode||'PAPER';
