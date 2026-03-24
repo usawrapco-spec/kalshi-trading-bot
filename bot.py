@@ -24,7 +24,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY: ALL 15M CRYPTO MARKETS ===
 BUY_MIN = 0.03
-BUY_MAX = 0.97              # buy any contract that isn't already decided
+BUY_MAX = 0.15              # cheap contracts only — high risk/reward
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat Kalshi fees)
 STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
 TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
@@ -32,10 +32,10 @@ MOMENTUM_THRESHOLD = 0.02   # 2% price change = momentum signal (was 5%, too str
 MAX_ADDS = 2                # can add to a GREEN position twice (max 15 contracts)
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
-CYCLE_SECONDS = 5           # faster polling = stop-loss triggers sooner
+CYCLE_SECONDS = 10          # 10 sec cycles — don't overtrade
 STARTING_BALANCE = 1000.00
 CASH_RESERVE = 0.20         # keep 20% cash reserve ($20 buffer)
-MAX_BUYS_PER_CYCLE = 3      # slower entry pace, less overexposure
+MAX_BUYS_PER_CYCLE = 2      # max 2 buys per cycle — don't flood
 CONTRACTS = 3
 MAX_DAILY_LOSS = float(os.environ.get('MAX_DAILY_LOSS', '10.00'))  # stop buying after $10 daily loss
 
