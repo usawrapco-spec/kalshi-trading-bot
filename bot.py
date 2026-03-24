@@ -121,10 +121,10 @@ def get_balance():
     if real is not None:
         return real
     try:
-        buys = db.table('trades').select('price,count').eq('action', 'buy').gte('created_at', BOT_START_TIME).execute()
+        buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
         buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
 
-        pnls = db.table('trades').select('pnl').not_.is_('pnl', 'null').gte('created_at', BOT_START_TIME).execute()
+        pnls = db.table('trades').select('pnl').not_.is_('pnl', 'null').execute()
         total_pnl = sum(sf(t['pnl']) for t in (pnls.data or []))
 
         return max(0, STARTING_BALANCE - buy_cost + total_pnl)
@@ -444,7 +444,7 @@ def api_status():
         positions_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_positions)
         portfolio = cash + positions_value
 
-        resolved = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').gte('created_at', BOT_START_TIME).execute()
+        resolved = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').execute()
         resolved_data = resolved.data or []
         total_pnl = sum(sf(t['pnl']) for t in resolved_data)
         wins = sum(1 for t in resolved_data if sf(t['pnl']) > 0)
@@ -500,7 +500,7 @@ def api_open():
 @app.route('/api/trades')
 def api_trades():
     try:
-        result = db.table('trades').select('*').eq('action', 'buy').not_.is_('pnl', 'null').gte('created_at', BOT_START_TIME).order('created_at', desc=True).limit(50).execute()
+        result = db.table('trades').select('*').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(50).execute()
         trades = []
         for t in (result.data or []):
             entry = sf(t.get('price'))
