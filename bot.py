@@ -25,7 +25,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 BUY_MIN = 0.03
 BUY_MAX = 0.50
 SELL_THRESHOLD = 0.50       # +50% take profit (beats fees)
-FEE_PER_CONTRACT = 0.07    # ~$0.035/side x2 = $0.07 round trip per contract
+TAKER_FEE_RATE = 0.07      # Kalshi taker fee: ceil(0.07 * contracts * P * (1-P)), max $0.02/contract
 STOP_LOSS = -0.25           # -25% stop loss
 MAX_MINS_TO_EXPIRY = 20     # only buy contracts settling within 20 min
 CYCLE_SECONDS = 10
@@ -474,10 +474,16 @@ def api_status():
         wins = sum(1 for t in resolved_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in resolved_data if sf(t['pnl']) <= 0)
 
-        # Fee tracking: all contracts ever traded (resolved + open)
-        all_buys = db.table('trades').select('count').eq('action', 'buy').execute()
+        # Fee tracking: Kalshi formula ceil(0.07 * count * P * (1-P)), max $0.02/contract
+        all_buys = db.table('trades').select('count,price').eq('action', 'buy').execute()
         total_contracts = sum((t.get('count') or 1) for t in (all_buys.data or []))
-        total_fees = round(total_contracts * FEE_PER_CONTRACT, 2)
+        total_fees = 0.0
+        for t in (all_buys.data or []):
+            p = sf(t.get('price'))
+            c = t.get('count') or 1
+            fee_cents = min(0.07 * c * p * (1 - p), 0.02 * c)
+            total_fees += fee_cents
+        total_fees = round(total_fees, 2)
         pnl_after_fees = round(total_pnl - total_fees, 4)
 
         mode = "PAPER" if not ENABLE_TRADING else "LIVE"
