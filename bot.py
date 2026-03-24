@@ -21,14 +21,14 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
-# === STRATEGY ===
-BUY_MIN = 0.03
-BUY_MAX = 0.15
-SELL_THRESHOLD = 0.50       # +50% take profit
-SELL_PROTECT = 0.10         # +10% minimum sell (covers fees, preserves capital)
+# === STRATEGY: BET WITH THE MARKET ===
+BUY_MIN = 0.55              # only buy the favorite (>55% implied probability)
+BUY_MAX = 0.85              # don't buy above 85% (too expensive, no upside)
+SELL_THRESHOLD = 0.12       # +12% take profit (small but consistent)
+SELL_PROTECT = 0.05         # +5% protect floor (covers fees)
 TAKER_FEE_RATE = 0.07      # Kalshi taker fee: ceil(0.07 * contracts * P * (1-P)), max $0.02/contract
-STOP_LOSS = -0.25           # -25% stop loss
-MOMENTUM_THRESHOLD = 0.05  # 5% price change between cycles = momentum
+STOP_LOSS = -0.10           # -10% stop loss (tight, favorites shouldn't drop much)
+MOMENTUM_THRESHOLD = 0.03  # 3% price change between cycles = momentum
 MAX_MINS_TO_EXPIRY = 20     # only buy contracts settling within 20 min
 CYCLE_SECONDS = 10
 STARTING_BALANCE = 100.00
@@ -400,8 +400,8 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        # Pick whichever side is CHEAPER
-        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        # Pick whichever side is the FAVORITE (more expensive = higher probability)
+        if yes_ask >= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
@@ -412,7 +412,8 @@ def buy_candidates(markets):
 
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
 
-    candidates.sort(key=lambda x: x['price'])
+    # Sort by highest probability first (most expensive = most likely to win)
+    candidates.sort(key=lambda x: x['price'], reverse=True)
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
 
@@ -660,7 +661,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; momentum scalper &mdash; 15M &mdash; 3-15c &mdash; sell +50% / protect +10% / stop -25%
+  <span id="mode-label">PAPER MODE</span> &mdash; favorite scalper &mdash; 15M &mdash; 55-85c &mdash; sell +12% / protect +5% / stop -10%
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -693,8 +694,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: 15M crypto (5 series) | 20min max | Momentum gated | Stop -25%</span>
-  <span>Buy: 3-15c | Sell: +50% | Protect: +10% | 5/20 contracts | 50% reserve</span>
+  <span>Series: 15M crypto (5 series) | 20min max | Momentum gated | Stop -10%</span>
+  <span>Buy: 55-85c (favorites) | Sell: +12% | Protect: +5% | 5/20 contracts | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
