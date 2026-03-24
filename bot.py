@@ -141,7 +141,13 @@ def get_open_positions():
 
 
 def get_owned_tickers():
-    return {t['ticker'] for t in get_open_positions()}
+    """Get ALL open tickers across all sessions, not just current."""
+    try:
+        result = db.table('trades').select('ticker').eq('action', 'buy').is_('pnl', 'null').execute()
+        return {t['ticker'] for t in (result.data or [])}
+    except Exception as e:
+        logger.error(f"get_owned_tickers failed: {e}")
+        return set()
 
 
 # === SELL LOGIC ===
