@@ -30,7 +30,7 @@ FAV_PROTECT = 0.05          # +5% protect floor
 
 # Longshots: cheap side, ride to settlement (matches old profitable bot)
 LONG_MIN = 0.03
-LONG_MAX = 0.35
+LONG_MAX = 0.15
 LONG_PROTECT_PEAK = 2.0     # sell if was +200% and drops to +100%
 LONG_PROTECT_FLOOR = 1.0
 LONG_STOP = -0.25            # -25% stop loss (no take profit — ride to $1.00)
@@ -451,7 +451,7 @@ def buy_candidates(markets):
             break
 
         strat = c['strategy']
-        contracts = get_contracts(c['price'])
+        contracts = 3 if strat == 'long' else get_contracts(c['price'])
         cost = c['price'] * contracts
         if cost > deployable:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f}")
