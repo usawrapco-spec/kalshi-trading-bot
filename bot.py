@@ -1,9 +1,9 @@
 """
-Live scalper. Buy cheap crypto, sell at 30%, take loss on expiry.
-15M series only, $0.03-$0.35, 10/5 tiered contracts, 10s cycles.
+Crypto scalper. Buy cheap 15M contracts settling within 20min.
+Sell at +45% (beats fees), stop loss at -25%. Keep it simple.
 """
 
-import os, time, logging, traceback, re
+import os, time, logging, traceback
 from datetime import datetime, timezone
 from flask import Flask, jsonify, render_template_string
 from threading import Thread
@@ -21,34 +21,28 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
-# === SETTINGS ===
-BUY_MIN = 0.02
-BUY_MAX = 0.50
+# === STRATEGY ===
+BUY_MIN = 0.03
+BUY_MAX = 0.15
+SELL_THRESHOLD = 0.35       # +35% take profit
+FEE_PER_CONTRACT = 0.07    # ~$0.035/side x2 = $0.07 round trip per contract
+STOP_LOSS = -0.25           # -25% stop loss
+MAX_MINS_TO_EXPIRY = 20     # only buy contracts settling within 20 min
 CYCLE_SECONDS = 10
-SELL_THRESHOLD = 0.50
-STARTING_BALANCE = 100.00
+STARTING_BALANCE = 20.00
+CASH_RESERVE = 0.50         # keep 50% cash
 MAX_BUYS_PER_CYCLE = 10
-FEE_PER_CONTRACT = 0.02  # Kalshi charges ~$0.01/contract each side (buy+sell = $0.02 round trip)
+CONTRACTS_DEFAULT = 5
+CONTRACTS_HOT = 20
+HOT_STREAK_WINS = 3         # 3 of last 5 wins = hot streak
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
-
-def get_contracts(price):
-    recent = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(5).execute()
-    recent_wins = sum(1 for t in recent.data if t['pnl'] > 0)
-    hot_streak = recent_wins >= 3
-    if hot_streak and price < 0.20:
-        return 20
-    return 5
-
-# Set dynamically at startup
-BOT_START_TIME = None
 
 # === INIT ===
 db = create_client(SUPABASE_URL, SUPABASE_KEY)
 auth = KalshiAuth()
 app = Flask(__name__)
 
-# === STATE ===
 current_hot_markets = []
 
 
@@ -87,9 +81,10 @@ def get_market(ticker):
 
 
 def place_order(ticker, side, action, price, count):
+    """Place order and return (order_id, filled_count) or None on failure."""
     if not ENABLE_TRADING:
         logger.info(f"PAPER {action.upper()}: {ticker} {side} x{count} @ ${price:.2f}")
-        return {'order_id': 'paper', 'status': 'executed'}
+        return ('paper', count)
 
     price_cents = int(round(price * 100))
     try:
@@ -102,43 +97,47 @@ def place_order(ticker, side, action, price, count):
             'yes_price' if side == 'yes' else 'no_price': price_cents,
         })
         order = resp.get('order', {})
-        return {'order_id': order.get('order_id', ''), 'status': order.get('status', '')}
+        order_id = order.get('order_id', '')
+        status = order.get('status', '')
+
+        # Only count actually filled contracts
+        filled = order.get('place_count', 0) - order.get('remaining_count', 0)
+        if filled <= 0:
+            filled = count if status in ('executed', 'filled') else 0
+
+        logger.info(f"ORDER {action.upper()}: {ticker} status={status} filled={filled}/{count} id={order_id}")
+        return (order_id, filled) if filled > 0 else None
     except Exception as e:
         logger.error(f"ORDER FAILED: {action.upper()} {ticker} -- {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            logger.error(f"ERROR BODY: {e.response.text}")
         return None
 
 
 # === BALANCE ===
 
 def get_kalshi_balance():
-    """Get real cash balance from Kalshi API (returns dollars)."""
     try:
         resp = kalshi_get('/portfolio/balance')
-        balance_cents = resp.get('balance', 0)
-        return balance_cents / 100.0
+        return resp.get('balance', 0) / 100.0
     except Exception as e:
         logger.error(f"Kalshi balance fetch failed: {e}")
         return None
 
 
 def get_balance():
-    """Get cash balance — real from Kalshi if live, paper balance if paper mode."""
-    if ENABLE_TRADING:
-        real = get_kalshi_balance()
-        if real is not None:
-            return real
-    # Paper mode: starting balance minus currently deployed (open positions only)
+    real = get_kalshi_balance()
+    if real is not None:
+        return real
     try:
-        open_buys = db.table('trades').select('price,count').eq('action', 'buy').is_('pnl', 'null').execute()
-        deployed = sum(sf(t['price']) * (t.get('count') or 1) for t in (open_buys.data or []))
-
+        buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
+        buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
         pnls = db.table('trades').select('pnl').not_.is_('pnl', 'null').execute()
         total_pnl = sum(sf(t['pnl']) for t in (pnls.data or []))
-
-        return max(0, STARTING_BALANCE - deployed + total_pnl)
+        return max(0, STARTING_BALANCE - buy_cost + total_pnl)
     except Exception as e:
         logger.error(f"Balance calc failed: {e}")
-        return STARTING_BALANCE
+        return 0.0
 
 
 def get_open_positions():
@@ -151,13 +150,20 @@ def get_open_positions():
 
 
 def get_owned_tickers():
-    """Get ALL open tickers across all sessions, not just current."""
     try:
         result = db.table('trades').select('ticker').eq('action', 'buy').is_('pnl', 'null').execute()
         return {t['ticker'] for t in (result.data or [])}
     except Exception as e:
         logger.error(f"get_owned_tickers failed: {e}")
         return set()
+
+
+def get_contracts(price):
+    recent = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(5).execute()
+    recent_wins = sum(1 for t in recent.data if t['pnl'] > 0)
+    if recent_wins >= HOT_STREAK_WINS and price <= BUY_MAX:
+        return CONTRACTS_HOT
+    return CONTRACTS_DEFAULT
 
 
 # === SELL LOGIC ===
@@ -190,18 +196,15 @@ def check_sells():
         status = market.get('status', '')
         result_val = market.get('result', '')
 
-        # Settled / expired
-        if status in ('closed', 'settled', 'finalized') or result_val:
+        # === SETTLED: Kalshi has a final result ===
+        if result_val:
             if result_val == side:
                 pnl = round((1.0 - entry_price) * count, 4)
                 reason = "WIN settled @$1.00"
-            elif result_val:
-                pnl = round(-entry_price * count, 4)
-                reason = "LOSS expired"
             else:
-                continue
-
-            logger.info(f"EXPIRED/SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
+                pnl = round(-entry_price * count, 4)
+                reason = "LOSS settled"
+            logger.info(f"SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
             try:
                 db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
             except Exception as e:
@@ -209,22 +212,10 @@ def check_sells():
             expired += 1
             continue
 
-        # Check if close_time has passed
-        close_time = market.get('close_time') or market.get('expected_expiration_time')
-        if close_time:
-            try:
-                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                if close_dt < datetime.now(timezone.utc):
-                    pnl = round(-entry_price * count, 4)
-                    logger.info(f"EXPIRED (time): {ticker} pnl=${pnl:.4f}")
-                    try:
-                        db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
-                    except:
-                        pass
-                    expired += 1
-                    continue
-            except:
-                pass
+        # === CLOSED but no result yet: wait for Kalshi to settle ===
+        if status in ('closed', 'settled', 'finalized'):
+            logger.info(f"WAITING: {ticker} status={status} but no result yet, skipping")
+            continue
 
         # Get current bid
         if side == 'yes':
@@ -238,102 +229,74 @@ def check_sells():
         except:
             pass
 
+        # If bid is $0, don't book a loss -- wait for settlement
         if current_bid <= 0:
-            pnl = round(-entry_price * count, 4)
-            logger.info(f"EXPIRED: {ticker} {side} | bid=$0 | pnl=${pnl:.4f}")
-            try:
-                db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
-            except Exception as e:
-                logger.error(f"Expire DB error: {e}")
-            expired += 1
+            close_time = market.get('close_time') or market.get('expected_expiration_time')
+            if close_time:
+                try:
+                    close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
+                    if close_dt < datetime.now(timezone.utc):
+                        logger.info(f"LIKELY EXPIRED: {ticker} bid=$0, past close_time, waiting for settlement")
+                        continue
+                except:
+                    pass
+            logger.info(f"SKIP: {ticker} bid=$0, waiting")
             continue
 
         gain = (current_bid - entry_price) / entry_price
         gain_pct = gain * 100
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        # Determine if we should sell
         should_sell = False
         reason = ''
 
-        # Take profit at +50%
+        # Take profit at +45%
         if gain >= SELL_THRESHOLD:
             should_sell = True
             reason = f"+{gain_pct:.0f}% PROFIT"
 
-        # Expiry save — sell 2min before expiry at ANY bid
-        if not should_sell:
-            close_time = market.get('close_time') or market.get('expected_expiration_time')
-            secs_left = None
-            if close_time:
-                try:
-                    close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                    secs_left = (close_dt - datetime.now(timezone.utc)).total_seconds()
-                except:
-                    pass
-            if secs_left is None:
-                m = re.search(r'(\d{6})-\d+$', ticker)
-                if m:
-                    try:
-                        digits = m.group(1)
-                        hh, mm = int(digits[2:4]), int(digits[4:6])
-                        now = datetime.now(timezone.utc)
-                        close_dt = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
-                        if close_dt < now:
-                            close_dt = close_dt
-                        secs_left = (close_dt - now).total_seconds()
-                    except:
-                        pass
-            if secs_left is not None:
-                logger.info(f"  EXPIRY: {ticker} secs={secs_left:.0f}")
-                if secs_left < 120 and current_bid > 0:
-                    should_sell = True
-                    reason = f"EXPIRY SAVE {gain_pct:+.0f}% ({secs_left:.0f}s left)"
+        # Stop loss at -25%
+        if gain <= STOP_LOSS:
+            should_sell = True
+            reason = f"{gain_pct:+.0f}% STOP LOSS"
 
         if not should_sell:
             continue
 
-        # === SELL ORDER — verbose logging ===
+        # === SELL ORDER ===
         pnl = round((current_bid - entry_price) * count, 4)
-        price_cents = int(round(current_bid * 100))
 
-        logger.info(f"SELL ATTEMPT: {ticker} side={side} count={count} entry=${entry_price:.2f} bid=${current_bid:.2f} gain={gain_pct:+.0f}% reason={reason}")
+        logger.info(f"SELL ATTEMPT: {ticker} {side} x{count} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% reason={reason}")
 
-        order_payload = {
-            'ticker': ticker,
-            'action': 'sell',
-            'side': side,
-            'count': count,
-            'type': 'limit',
-        }
-        if side == 'yes':
-            order_payload['yes_price'] = price_cents
-        else:
-            order_payload['no_price'] = price_cents
+        result = place_order(ticker, side, 'sell', current_bid, count)
+        if not result:
+            logger.error(f"SELL FAILED: {ticker} -- order not filled")
+            continue
 
-        logger.info(f"SELL PAYLOAD: {order_payload}")
+        order_id, filled = result
 
-        if not ENABLE_TRADING:
-            logger.info(f"PAPER SELL: {ticker} {side} x{count} @ ${current_bid:.2f}")
-            sell_result = {'order_id': 'paper', 'status': 'executed'}
-        else:
-            try:
-                resp = kalshi_post('/portfolio/orders', order_payload)
-                logger.info(f"SELL RESPONSE: {resp}")
-                order = resp.get('order', {})
-                sell_result = {'order_id': order.get('order_id', ''), 'status': order.get('status', '')}
-            except Exception as e:
-                logger.error(f"SELL FAILED: {ticker} error={str(e)}")
-                if hasattr(e, 'response') and e.response is not None:
-                    logger.error(f"SELL ERROR BODY: {e.response.text}")
-                continue
+        if filled < count:
+            logger.warning(f"PARTIAL SELL: {ticker} filled {filled}/{count}")
+            pnl = round((current_bid - entry_price) * filled, 4)
 
-        logger.info(f"SELL ({reason}): {ticker} {side} x{count} @ ${current_bid:.2f} | pnl=${pnl:.4f} | order={sell_result}")
+        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | pnl=${pnl:.4f}")
         try:
-            db.table('trades').update({
-                'pnl': float(pnl),
-                'current_bid': float(current_bid),
-            }).eq('id', trade['id']).execute()
+            if filled >= count:
+                db.table('trades').update({
+                    'pnl': float(pnl),
+                    'current_bid': float(current_bid),
+                }).eq('id', trade['id']).execute()
+            else:
+                # Partial: reduce count, record sold portion separately
+                db.table('trades').update({
+                    'count': count - filled,
+                    'current_bid': float(current_bid),
+                }).eq('id', trade['id']).execute()
+                db.table('trades').insert({
+                    'ticker': ticker, 'side': side, 'action': 'buy',
+                    'price': float(entry_price), 'count': filled,
+                    'current_bid': float(current_bid), 'pnl': float(pnl),
+                }).execute()
         except Exception as e:
             logger.error(f"Sell DB error: {e}")
         sold += 1
@@ -361,10 +324,9 @@ def buy_candidates(markets):
     owned = get_owned_tickers()
     logger.info(f"Balance: ${balance:.2f} | {len(owned)} positions open")
 
-    reserve = balance * 0.30
-    deployable = balance - reserve
+    deployable = balance * (1.0 - CASH_RESERVE)
     if deployable <= 1.0:
-        logger.info(f"Balance ${balance:.2f}, reserve ${reserve:.2f}, deployable too low — skipping buys")
+        logger.info(f"Balance ${balance:.2f}, deployable ${deployable:.2f} too low -- skipping buys")
         return
 
     candidates = []
@@ -376,13 +338,13 @@ def buy_candidates(markets):
         if ticker in owned:
             continue
 
-        # Only buy contracts settling within 20 minutes (and not already expired)
+        # Only buy contracts settling within 20 minutes
         close_time = market.get('close_time') or market.get('expected_expiration_time')
         if close_time:
             try:
                 close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
                 mins_left = (close_dt - now).total_seconds() / 60
-                if mins_left > 20 or mins_left < 1:
+                if mins_left > MAX_MINS_TO_EXPIRY or mins_left < 1:
                     continue
             except:
                 continue
@@ -394,7 +356,7 @@ def buy_candidates(markets):
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        # Pick whichever side is cheaper, $0.03-$0.20
+        # Pick whichever side is cheaper, $0.03-$0.15
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
@@ -404,10 +366,8 @@ def buy_candidates(markets):
         else:
             continue
 
-        logger.info(f"  CANDIDATE: {ticker} {side} ${price:.2f} mins_left={mins_left:.1f}")
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
 
-    # Sort cheapest first, buy up to 10
     candidates.sort(key=lambda x: x['price'])
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
@@ -420,22 +380,27 @@ def buy_candidates(markets):
         contracts = get_contracts(c['price'])
         cost = c['price'] * contracts
         if cost > deployable:
-            logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f} (reserve ${reserve:.2f})")
+            logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f}")
             break
 
         result = place_order(c['ticker'], c['side'], 'buy', c['price'], contracts)
         if not result:
             continue
 
-        logger.info(f"BUY: {c['ticker']} {c['side']} x{contracts} @ ${c['price']:.2f}")
+        order_id, filled = result
+        if filled <= 0:
+            continue
+
+        actual_cost = c['price'] * filled
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f} (ordered {contracts})")
         try:
             db.table('trades').insert({
                 'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
-                'price': float(c['price']), 'count': contracts,
+                'price': float(c['price']), 'count': filled,
                 'current_bid': float(c['bid']),
             }).execute()
             owned.add(c['ticker'])
-            deployable -= cost
+            deployable -= actual_cost
             bought += 1
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
@@ -468,14 +433,6 @@ def update_hot_markets(markets):
     ]
 
 
-# === STARTUP ===
-
-def init_bot():
-    global BOT_START_TIME
-    BOT_START_TIME = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    logger.info(f"BOT_START_TIME set to {BOT_START_TIME}")
-
-
 # === MAIN CYCLE ===
 
 def run_cycle():
@@ -504,7 +461,6 @@ def health():
 def api_status():
     try:
         cash = get_balance()
-
         open_positions = get_open_positions()
         positions_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_positions)
         portfolio = cash + positions_value
@@ -515,9 +471,9 @@ def api_status():
         wins = sum(1 for t in resolved_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in resolved_data if sf(t['pnl']) <= 0)
 
-        # Fee tracking: count total contracts traded (buy + sell = round trip)
-        all_trades = db.table('trades').select('count').eq('action', 'buy').execute()
-        total_contracts = sum((t.get('count') or 1) for t in (all_trades.data or []))
+        # Fee tracking: all contracts ever traded (resolved + open)
+        all_buys = db.table('trades').select('count').eq('action', 'buy').execute()
+        total_contracts = sum((t.get('count') or 1) for t in (all_buys.data or []))
         total_fees = round(total_contracts * FEE_PER_CONTRACT, 2)
         pnl_after_fees = round(total_pnl - total_fees, 4)
 
@@ -560,7 +516,9 @@ def api_open():
                 'side': t.get('side', ''),
                 'count': count,
                 'entry': price,
+                'entry_total': round(price * count, 2),
                 'current_bid': current,
+                'bid_total': round(current * count, 2),
                 'unrealized': unrealized,
                 'gain_pct': gain_pct,
             })
@@ -650,7 +608,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 2-50c &mdash; sell at 50%
+  <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-15c &mdash; sell +35% / stop -25%
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -664,8 +622,8 @@ tr:hover{background:#1a1a1a !important}
 <div class="panel">
   <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Bid</th><th>P&amp;L</th><th>Gain%</th>
-  </tr></thead><tbody id="open-body"><tr><td colspan="7" class="loading">Loading...</td></tr></tbody></table></div>
+    <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Bid</th><th>Value</th><th>P&amp;L</th><th>Gain%</th>
+  </tr></thead><tbody id="open-body"><tr><td colspan="9" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
@@ -683,8 +641,8 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Series: 15M crypto (5 series) | 20min expiry | No stop loss</span>
-  <span>Buy: 2-50c | Sell: 50% | 10/5 contracts | 30% reserve | 10s cycles</span>
+  <span>Series: 15M crypto (5 series) | 20min max | Stop -25% | Fees: ~$0.07/contract</span>
+  <span>Buy: 3-15c | Sell: +35% | 5/20 contracts | 10s cycles | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
 <div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
@@ -744,17 +702,20 @@ async function refresh(){
       var rc=p.gain_pct>2?'row-green':p.gain_pct<-2?'row-red':'';
       var gc=cls(p.gain_pct);
       var bidText=p.current_bid<=0?'EXPIRED':'$'+p.current_bid.toFixed(2);
+      var valText=p.current_bid<=0?'$0.00':'$'+(p.bid_total||0).toFixed(2);
       h+='<tr class="'+rc+'">';
       h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
       h+='<td>'+esc(p.side)+'</td>';
       h+='<td>'+p.count+'</td>';
       h+='<td>$'+p.entry.toFixed(2)+'</td>';
+      h+='<td>$'+(p.entry_total||0).toFixed(2)+'</td>';
       h+='<td>'+bidText+'</td>';
-      h+='<td class="'+gc+'">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(4)+'</td>';
+      h+='<td class="'+gc+'">'+valText+'</td>';
+      h+='<td class="'+gc+'">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(2)+'</td>';
       h+='<td class="'+gc+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
       h+='</tr>';
     });
-    $('open-body').innerHTML=h||'<tr><td colspan="7" class="gray" style="text-align:center">No open positions</td></tr>';
+    $('open-body').innerHTML=h||'<tr><td colspan="9" class="gray" style="text-align:center">No open positions</td></tr>';
   }
 
   if(trades){
@@ -824,10 +785,8 @@ setInterval(updateCountdown,1000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- scalper: ${BUY_MIN}-${BUY_MAX}, sell at {SELL_THRESHOLD*100:.0f}%, 10/5 contracts, {CYCLE_SECONDS}s cycles")
+    logger.info(f"Bot starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, sell +{SELL_THRESHOLD*100:.0f}%, stop {STOP_LOSS*100:.0f}%, reserve {CASH_RESERVE*100:.0f}%, max {MAX_MINS_TO_EXPIRY}min")
     logger.info(f"Series: {CRYPTO_SERIES}")
-
-    init_bot()
 
     while True:
         try:
