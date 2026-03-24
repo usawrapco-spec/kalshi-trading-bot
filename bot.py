@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY: CHEAP ENTRIES, SELL ALL AT TARGET ===
 BUY_MIN = 0.03
-BUY_MAX = 0.20
+BUY_MAX = 0.12
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts
 # No stop loss — let cheap entries ride to settlement
 MAX_ADDS = 2                # can add to a GREEN position twice (max 15 contracts)
@@ -33,7 +33,7 @@ CYCLE_SECONDS = 10
 STARTING_BALANCE = 100.00
 CASH_RESERVE = 0.25
 MAX_BUYS_PER_CYCLE = 5
-CONTRACTS = 5                 # always 5, no auto-scaling
+CONTRACTS = 100               # go big on cheap entries
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
