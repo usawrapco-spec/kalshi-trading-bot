@@ -412,36 +412,34 @@ def buy_candidates(markets):
     for market in markets:
         ticker = market.get('ticker', '')
 
-        # Only buy contracts settling within 20 minutes
+        # Skip if more than 20 min to settlement (not a 15M contract window)
         close_time = market.get('close_time') or market.get('expected_expiration_time')
         if close_time:
             try:
                 close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
                 mins_left = (close_dt - now).total_seconds() / 60
-                if mins_left > MAX_MINS_TO_EXPIRY or mins_left < 5:
+                if mins_left > MAX_MINS_TO_EXPIRY:
                     continue
             except:
-                continue
-        else:
-            continue
+                pass
 
         yes_ask = float(market.get('yes_ask_dollars') or '999')
         yes_bid = float(market.get('yes_bid_dollars') or '0')
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
+        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f}")
 
         # Buy the CHEAPEST side — stop-loss & trailing stop provide protection
-        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        if yes_ask <= no_ask and yes_ask < 0.99 and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'cheap_yes'
-        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            strategy = 'yes'
+        elif no_ask < 0.99 and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
-            strategy = 'cheap_no'
-        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            strategy = 'no'
+        elif yes_ask < 0.99 and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'cheap_yes'
+            strategy = 'yes'
         else:
             continue
 
