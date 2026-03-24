@@ -33,9 +33,7 @@ CYCLE_SECONDS = 10
 STARTING_BALANCE = 20.00
 CASH_RESERVE = 0.50
 MAX_BUYS_PER_CYCLE = 5
-CONTRACTS_DEFAULT = 3
-CONTRACTS_HOT = 10            # reduced from 20 to cut fees
-HOT_STREAK_WINS = 3
+CONTRACTS = 5                 # always 5, no auto-scaling
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
@@ -160,14 +158,6 @@ def get_owned_tickers():
     except Exception as e:
         logger.error(f"get_owned_tickers failed: {e}")
         return set()
-
-
-def get_contracts(price):
-    recent = db.table('trades').select('pnl').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(5).execute()
-    recent_wins = sum(1 for t in recent.data if t['pnl'] > 0)
-    if recent_wins >= HOT_STREAK_WINS and price <= BUY_MAX:
-        return CONTRACTS_HOT
-    return CONTRACTS_DEFAULT
 
 
 # === SELL LOGIC ===
@@ -434,7 +424,7 @@ def buy_candidates(markets):
         if bought >= MAX_BUYS_PER_CYCLE:
             break
 
-        contracts = get_contracts(c['price'])
+        contracts = CONTRACTS
         cost = c['price'] * contracts
         if cost > deployable:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f}")
