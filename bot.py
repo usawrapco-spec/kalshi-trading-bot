@@ -29,7 +29,7 @@ SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat
 STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
 TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
 MOMENTUM_THRESHOLD = 0.02   # 2% price change = momentum signal (was 5%, too strict)
-MAX_ADDS = 0                # one big buy per ticker, no adds
+MAX_ADDS = 999              # unlimited adds on green positions
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10          # 10 sec cycles — don't overtrade
@@ -442,22 +442,9 @@ def get_recent_losers():
 
 
 def buy_candidates(markets):
-    global daily_loss, daily_loss_date
-
-    # Reset daily loss counter at midnight UTC
-    today = datetime.now(timezone.utc).date()
-    if daily_loss_date != today:
-        daily_loss = 0.0
-        daily_loss_date = today
-
-    # Check daily loss limit
-    if daily_loss >= MAX_DAILY_LOSS:
-        logger.info(f"DAILY LOSS LIMIT HIT: ${daily_loss:.2f} >= ${MAX_DAILY_LOSS:.2f} -- no new buys")
-        return
-
     balance = get_balance()
     open_positions = get_open_positions()
-    logger.info(f"Balance: ${balance:.2f} | {len(open_positions)} positions open | Daily loss: ${daily_loss:.2f}")
+    logger.info(f"Balance: ${balance:.2f} | {len(open_positions)} positions open")
 
     deployable = balance * (1.0 - CASH_RESERVE)
     if deployable <= 1.0:
