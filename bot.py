@@ -315,48 +315,10 @@ def check_sells():
                 pass
 
         # === GUT FEELING SCORE ===
-        score = 0
-        signals = []
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} {mins_left:.0f}min x{count}")
 
-        raw_gain = (current_bid - entry_price) / entry_price if entry_price > 0 else 0
-
-        # Losers ride to settlement — no cutting
-        if real_profit <= 0:
-            logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} loss=${real_profit:.4f} {mins_left:.0f}min — riding to settlement x{count}")
-            continue
-
-        # === PROFIT SCORE: when to take gains ===
-        score += 1
-        signals.append('profitable')
-
-        if current_bid >= 0.70:
-            score += 1
-            signals.append('bid>=70c')
-        if current_bid >= 0.90:
-            score += 2
-            signals.append('bid>=90c')
-        if dropping:
-            score += 1
-            signals.append('dropping')
-        if mins_left <= 3:
-            score += 2
-            signals.append(f'{mins_left:.0f}m<=3')
-        if mins_left <= 1:
-            score += 1
-            signals.append(f'{mins_left:.0f}m<=1')
-
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} SCORE={score} [{', '.join(signals)}] {mins_left:.0f}min x{count}")
-
-        should_sell = False
-        reason = ''
-
-        # Score 4+ = take profit
-        if score >= 4:
-            should_sell = True
-            reason = f"GUT SELL score={score} [{', '.join(signals)}] profit=${real_profit:.4f}"
-
-        if not should_sell:
-            continue
+        # No selling — everything rides to settlement
+        continue
 
         # === SELL ALL CONTRACTS ===
         pnl = net_pnl(entry_price, current_bid, count)
