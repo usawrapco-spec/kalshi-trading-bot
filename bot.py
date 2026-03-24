@@ -35,7 +35,7 @@ MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10          # 10 sec cycles — don't overtrade
 STARTING_BALANCE = 1000.00
 CASH_RESERVE = 0.20         # keep 20% cash reserve ($20 buffer)
-MAX_BUYS_PER_CYCLE = 2      # max 2 buys per cycle — don't flood
+MAX_BUYS_PER_CYCLE = 999    # unlimited buys per cycle
 CONTRACTS = 3
 MAX_DAILY_LOSS = float(os.environ.get('MAX_DAILY_LOSS', '10.00'))  # stop buying after $10 daily loss
 
