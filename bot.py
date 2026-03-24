@@ -24,7 +24,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === DUAL STRATEGY ===
 # Favorites: steady wins betting with the market
 FAV_MIN = 0.55
-FAV_MAX = 0.85
+FAV_MAX = 0.95
 FAV_SELL = 0.12             # +12% take profit
 FAV_PROTECT = 0.05          # +5% protect floor
 FAV_STOP = -0.10            # -10% stop loss
