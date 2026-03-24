@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY: CHEAP ENTRIES, SELL ALL AT TARGET ===
 BUY_MIN = 0.03
-BUY_MAX = 0.12
+BUY_MAX = 0.20
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts
 # No stop loss — let cheap entries ride to settlement
 MAX_ADDS = 2                # can add to a GREEN position twice (max 15 contracts)
