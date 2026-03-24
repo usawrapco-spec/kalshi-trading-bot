@@ -577,6 +577,7 @@ tr:hover{background:#1a1a1a !important}
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
   <span id="mode-label">PAPER MODE</span> &mdash; crypto scalper &mdash; 15M only &mdash; 3-35c &mdash; sell at 30%
+  &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
 <div class="top-bar" style="flex-direction:column;gap:6px">
@@ -717,6 +718,24 @@ async function refresh(){
 
 refresh();
 setInterval(refresh,15000);
+
+function getNextSettlement(){
+  var now=new Date();
+  var mins=now.getMinutes();
+  var nextQuarter=Math.ceil((mins+1)/15)*15;
+  var next=new Date(now);
+  next.setMinutes(nextQuarter,0,0);
+  if(nextQuarter>=60){next.setHours(next.getHours()+1);next.setMinutes(0,0,0)}
+  return next;
+}
+function updateCountdown(){
+  var secs=Math.floor((getNextSettlement()-new Date())/1000);
+  var m=Math.floor(secs/60);
+  var s=secs%60;
+  $('countdown').textContent=m+':'+s.toString().padStart(2,'0');
+}
+updateCountdown();
+setInterval(updateCountdown,1000);
 </script>
 </body>
 </html>"""
