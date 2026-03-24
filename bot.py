@@ -26,13 +26,13 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 BUY_MIN = 0.03
 BUY_MAX = 0.20
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts (must stay >= 30% to beat Kalshi fees)
-STOP_LOSS_PCT = -0.40       # -40%: cut losses before full wipeout
+STOP_LOSS_PCT = -0.30       # -30%: cut losses before total wipeout
 TRAIL_DROP_PCT = 0.15       # sell if price drops 15% from peak (lock in gains)
 MOMENTUM_THRESHOLD = 0.05   # 5% price change = momentum signal
 MAX_ADDS = 2                # can add to a GREEN position twice (max 15 contracts)
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
-CYCLE_SECONDS = 10
+CYCLE_SECONDS = 5           # faster polling = stop-loss triggers sooner
 STARTING_BALANCE = 100.00
 CASH_RESERVE = 0.20         # keep 20% cash reserve ($20 buffer)
 MAX_BUYS_PER_CYCLE = 3      # slower entry pace, less overexposure
@@ -233,18 +233,23 @@ def check_sells():
         except:
             pass
 
-        # If bid is $0, don't book a loss -- wait for settlement
+        # If bid is $0 and market is still open — force stop-loss, don't wait
         if current_bid <= 0:
-            close_time = market.get('close_time') or market.get('expected_expiration_time')
-            if close_time:
+            if status == 'open':
+                # Market is open but bid is $0 — this IS a total loss, book it now
+                pnl = round(-entry_price * count, 4)
+                logger.info(f"STOP LOSS ($0 bid): {ticker} {side} x{count} entry=${entry_price:.2f} | pnl=${pnl:.4f}")
+                if pnl < 0:
+                    daily_loss += abs(pnl)
                 try:
-                    close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                    if close_dt < datetime.now(timezone.utc):
-                        logger.info(f"LIKELY EXPIRED: {ticker} bid=$0, past close_time, waiting for settlement")
-                        continue
-                except:
-                    pass
-            logger.info(f"SKIP: {ticker} bid=$0, waiting")
+                    db.table('trades').update({'pnl': float(pnl), 'current_bid': 0.0}).eq('id', trade['id']).execute()
+                except Exception as e:
+                    logger.error(f"$0 stop DB error: {e}")
+                peak_bids.pop(trade['id'], None)
+                expired += 1
+            else:
+                # Market closed/settled — wait for Kalshi to finalize
+                logger.info(f"WAITING: {ticker} bid=$0, status={status}, waiting for settlement")
             continue
 
         gain = (current_bid - entry_price) / entry_price
@@ -413,7 +418,7 @@ def buy_candidates(markets):
             try:
                 close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
                 mins_left = (close_dt - now).total_seconds() / 60
-                if mins_left > MAX_MINS_TO_EXPIRY or mins_left < 1:
+                if mins_left > MAX_MINS_TO_EXPIRY or mins_left < 5:
                     continue
             except:
                 continue
@@ -435,47 +440,44 @@ def buy_candidates(markets):
         else:
             price_change = 0
 
+        # Update price history for next cycle's momentum detection
+        last_cycle_prices[ticker] = yes_ask
+
+        # REQUIRE price history — skip on first scan, don't buy blind
+        if old_yes is None:
+            continue  # need at least 1 prior cycle to detect momentum
+
         # Buy the CHEAPEST side with directional confirmation
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             if price_change >= MOMENTUM_THRESHOLD:
                 side, price, bid = 'yes', yes_ask, yes_bid
-                strategy = 'cheap_yes_trend_up'
+                strategy = 'momentum_yes_up'
             elif price_change <= -MOMENTUM_THRESHOLD:
                 # Price dropping = NO side getting stronger
                 if BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
                     side, price, bid = 'no', no_ask, no_bid
-                    strategy = 'cheap_no_trend_down'
+                    strategy = 'momentum_no_down'
                 else:
                     continue
-            elif old_yes is None:
-                # First cycle, no history yet — buy cheapest side
-                side, price, bid = 'yes', yes_ask, yes_bid
-                strategy = 'cheap_yes_first_scan'
             else:
                 continue  # no clear direction, skip
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             if price_change <= -MOMENTUM_THRESHOLD:
                 side, price, bid = 'no', no_ask, no_bid
-                strategy = 'cheap_no_trend_down'
-            elif old_yes is None:
-                side, price, bid = 'no', no_ask, no_bid
-                strategy = 'cheap_no_first_scan'
+                strategy = 'momentum_no_down'
+            elif price_change >= MOMENTUM_THRESHOLD:
+                # Price rising but NO is still cheap — skip, YES is the play
+                continue
             else:
-                continue  # no directional confirmation
+                continue
         elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             if price_change >= MOMENTUM_THRESHOLD:
                 side, price, bid = 'yes', yes_ask, yes_bid
-                strategy = 'cheap_yes_trend_up'
-            elif old_yes is None:
-                side, price, bid = 'yes', yes_ask, yes_bid
-                strategy = 'cheap_yes_first_scan'
+                strategy = 'momentum_yes_up'
             else:
                 continue
         else:
             continue
-
-        # Update price history for next cycle's momentum detection
-        last_cycle_prices[ticker] = yes_ask
 
         # Dedup: check if we already own this ticker
         ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
