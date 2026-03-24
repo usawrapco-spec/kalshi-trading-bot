@@ -637,17 +637,14 @@ def api_status():
         wins = sum(1 for t in resolved_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in resolved_data if sf(t['pnl']) <= 0)
 
-        # Fee tracking: Kalshi formula ceil(0.07 * count * P * (1-P)), max $0.02/contract
-        all_buys = db.table('trades').select('count,price').eq('action', 'buy').execute()
-        total_contracts = sum((t.get('count') or 1) for t in (all_buys.data or []))
-        total_fees = 0.0
-        for t in (all_buys.data or []):
-            p = sf(t.get('price'))
-            c = t.get('count') or 1
-            fee_cents = min(0.07 * c * p * (1 - p), 0.02 * c)
-            total_fees += fee_cents
-        total_fees = round(total_fees, 2)
-        pnl_after_fees = round(total_pnl - total_fees, 4)
+        # Fee tracking from DB columns
+        all_trades = db.table('trades').select('count,buy_fee,sell_fee,gross_pnl,net_pnl').eq('action', 'buy').execute()
+        total_contracts = sum((t.get('count') or 1) for t in (all_trades.data or []))
+        total_buy_fees = sum(sf(t.get('buy_fee')) for t in (all_trades.data or []))
+        total_sell_fees = sum(sf(t.get('sell_fee')) for t in (all_trades.data or []))
+        total_fees = round(total_buy_fees + total_sell_fees, 4)
+        total_gross = sum(sf(t.get('gross_pnl')) for t in (all_trades.data or []) if t.get('gross_pnl') is not None)
+        total_net = sum(sf(t.get('net_pnl')) for t in (all_trades.data or []) if t.get('net_pnl') is not None)
 
         mode = "PAPER" if not ENABLE_TRADING else "LIVE"
 
@@ -655,9 +652,11 @@ def api_status():
             'portfolio': round(portfolio, 2),
             'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
-            'net_pnl': round(total_pnl, 4),
+            'gross_pnl': round(total_gross, 4),
+            'buy_fees': round(total_buy_fees, 4),
+            'sell_fees': round(total_sell_fees, 4),
             'total_fees': total_fees,
-            'pnl_after_fees': pnl_after_fees,
+            'net_pnl': round(total_net, 4),
             'total_contracts': total_contracts,
             'wins': wins,
             'losses': losses,
@@ -710,16 +709,24 @@ def api_trades():
         for t in (result.data or []):
             entry = sf(t.get('price'))
             exit_price = sf(t.get('current_bid'))
-            gain_pct = round(((exit_price - entry) / entry) * 100, 1) if entry > 0 else 0
+            count = t.get('count', 1)
+            gross = sf(t.get('gross_pnl'))
+            b_fee = sf(t.get('buy_fee'))
+            s_fee = sf(t.get('sell_fee'))
+            net = sf(t.get('net_pnl')) or sf(t.get('pnl'))
+            net_pct = round(net_gain_pct(entry, exit_price, count) * 100, 1) if entry > 0 else 0
             trades.append({
                 'created_at': t.get('created_at', ''),
                 'ticker': t.get('ticker', ''),
                 'side': t.get('side', ''),
-                'count': t.get('count', 1),
+                'count': count,
                 'entry': entry,
                 'exit': exit_price,
-                'pnl': sf(t.get('pnl')),
-                'gain_pct': gain_pct,
+                'gross_pnl': gross,
+                'buy_fee': b_fee,
+                'sell_fee': s_fee,
+                'net_pnl': net,
+                'gain_pct': net_pct,
             })
         return jsonify(trades)
     except Exception as e:
@@ -781,14 +788,14 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; all 15M crypto &mdash; sell +30% / stop -30% / trail -15%
+  <span id="mode-label">PAPER MODE</span> &mdash; all 15M crypto &mdash; take +10% net / stop -30% / +100% instant
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
 <div class="top-bar" style="flex-direction:column;gap:6px">
   <div style="font-size:16px">PORTFOLIO: <span id="tb-portfolio">...</span></div>
   <div style="font-size:12px;color:#888">Positions: <span id="tb-positions">...</span> &nbsp;&nbsp; Cash: <span id="tb-cash">...</span></div>
-  <div style="font-size:12px">P&amp;L: <span id="tb-pnl">...</span> &nbsp;&nbsp; Fees: <span id="tb-fees" class="red">...</span> &nbsp;&nbsp; Net: <span id="tb-net">...</span></div>
+  <div style="font-size:12px">Gross: <span id="tb-gross">...</span> &nbsp;&nbsp; Buy Fees: <span id="tb-bfees" class="red">...</span> &nbsp;&nbsp; Sell Fees: <span id="tb-sfees" class="red">...</span> &nbsp;&nbsp; Net: <span id="tb-net">...</span></div>
   <div style="font-size:12px">RECORD: <span id="tb-record">...</span></div>
 </div>
 
@@ -802,8 +809,8 @@ tr:hover{background:#1a1a1a !important}
 <div class="panel">
   <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Gain%</th>
-  </tr></thead><tbody id="trades-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
+    <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Gross</th><th>Buy Fee</th><th>Sell Fee</th><th>Net P&amp;L</th><th>Net%</th>
+  </tr></thead><tbody id="trades-body"><tr><td colspan="11" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
@@ -854,12 +861,14 @@ async function refresh(){
     $('tb-positions').textContent='$'+(status.positions_value||0).toFixed(2);
     $('tb-cash').textContent='$'+(status.cash||0).toFixed(2);
 
-    var pnl=status.net_pnl||0;
-    $('tb-pnl').innerHTML='<span class="'+cls(pnl)+'">'+(pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(2)+'</span>';
-    var fees=status.total_fees||0;
-    $('tb-fees').textContent='-$'+fees.toFixed(2)+' ('+( status.total_contracts||0)+'c)';
-    var net=status.pnl_after_fees||0;
-    $('tb-net').innerHTML='<span class="'+cls(net)+'">'+(net>=0?'+$':'-$')+Math.abs(net).toFixed(2)+'</span>';
+    var gross=status.gross_pnl||0;
+    $('tb-gross').innerHTML='<span class="'+cls(gross)+'">'+(gross>=0?'+$':'-$')+Math.abs(gross).toFixed(4)+'</span>';
+    var bf=status.buy_fees||0;
+    $('tb-bfees').textContent='-$'+bf.toFixed(4)+' ('+(status.total_contracts||0)+'c)';
+    var sf2=status.sell_fees||0;
+    $('tb-sfees').textContent='-$'+sf2.toFixed(4);
+    var net=status.net_pnl||0;
+    $('tb-net').innerHTML='<span class="'+cls(net)+'" style="font-weight:700">'+(net>=0?'+$':'-$')+Math.abs(net).toFixed(4)+'</span>';
     $('tb-record').innerHTML='<span class="green">'+(status.wins||0)+'W</span> <span class="gray">/</span> <span class="red">'+(status.losses||0)+'L</span>';
 
     var mode=status.mode||'PAPER';
@@ -898,8 +907,9 @@ async function refresh(){
     $('trades-count').textContent=trades.length+' trades';
     var h='';
     trades.forEach(function(t){
-      var pc=cls(t.pnl);
-      var rc=t.pnl>0?'row-green':t.pnl<0?'row-red':'';
+      var net=t.net_pnl||0;
+      var pc=cls(net);
+      var rc=net>0?'row-green':net<0?'row-red':'';
       h+='<tr class="'+rc+'">';
       h+='<td>'+timeAgo(t.created_at)+'</td>';
       h+='<td style="font-size:10px">'+esc(t.ticker||'')+'</td>';
@@ -907,12 +917,15 @@ async function refresh(){
       h+='<td>'+(t.count||1)+'</td>';
       h+='<td>$'+(t.entry||0).toFixed(2)+'</td>';
       h+='<td>$'+(t.exit||0).toFixed(2)+'</td>';
-      h+='<td class="'+pc+'">'+(t.pnl>=0?'+':'')+t.pnl.toFixed(4)+'</td>';
+      h+='<td class="'+cls(t.gross_pnl||0)+'">'+(t.gross_pnl>=0?'+':'')+( t.gross_pnl||0).toFixed(4)+'</td>';
+      h+='<td class="red">-'+(t.buy_fee||0).toFixed(4)+'</td>';
+      h+='<td class="red">-'+(t.sell_fee||0).toFixed(4)+'</td>';
+      h+='<td class="'+pc+'" style="font-weight:700">'+(net>=0?'+':'')+net.toFixed(4)+'</td>';
       var gc2=cls(t.gain_pct||0);
-      h+='<td class="'+gc2+'">'+(t.gain_pct>=0?'+':'')+(t.gain_pct||0).toFixed(0)+'%</td>';
+      h+='<td class="'+gc2+'" style="font-weight:700">'+(t.gain_pct>=0?'+':'')+(t.gain_pct||0).toFixed(1)+'%</td>';
       h+='</tr>';
     });
-    $('trades-body').innerHTML=h||'<tr><td colspan="8" class="gray" style="text-align:center">No trades yet</td></tr>';
+    $('trades-body').innerHTML=h||'<tr><td colspan="11" class="gray" style="text-align:center">No trades yet</td></tr>';
   }
 
   if(hot){
