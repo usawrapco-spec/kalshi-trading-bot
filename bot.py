@@ -1,5 +1,5 @@
 """
-Live scalper. Buy cheap crypto, sell at tiered thresholds, take loss on expiry.
+Live scalper. Buy cheap crypto, sell at 30%, take loss on expiry.
 15M series only, $0.03-$0.35, 5 contracts, 10s cycles.
 """
 
@@ -235,11 +235,10 @@ def check_sells():
         gain_pct = gain * 100
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}%")
 
-        # Tiered take profit: 20% for entries >= $0.20, 30% for cheaper
-        threshold = 0.20 if entry_price >= 0.20 else 0.30
-        if gain >= threshold:
+        # Flat 30% take profit
+        if gain >= 0.30:
             pnl = round((current_bid - entry_price) * count, 4)
-            reason = f"+{gain_pct:.0f}% PROFIT (threshold {threshold*100:.0f}%)"
+            reason = f"+{gain_pct:.0f}% PROFIT"
         else:
             # Expiry save — sell 2min before expiry at ANY bid
             close_time = market.get('close_time') or market.get('expected_expiration_time')
@@ -401,17 +400,12 @@ def update_hot_markets(markets):
     ]
 
 
-# === STARTUP: CLEAR DB ===
+# === STARTUP ===
 
-def clear_database():
+def init_bot():
     global BOT_START_TIME
     BOT_START_TIME = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     logger.info(f"BOT_START_TIME set to {BOT_START_TIME}")
-    try:
-        db.table('trades').delete().neq('id', 0).execute()
-        logger.info("Database cleared: all trades deleted")
-    except Exception as e:
-        logger.error(f"DB clear failed: {e}")
 
 
 # === MAIN CYCLE ===
@@ -732,7 +726,7 @@ def bot_loop():
     logger.info(f"Bot starting [{mode}] -- scalper: ${BUY_MIN}-${BUY_MAX}, sell at {SELL_THRESHOLD*100:.0f}%, {CYCLE_SECONDS}s cycles")
     logger.info(f"Series: {CRYPTO_SERIES}")
 
-    clear_database()
+    init_bot()
 
     while True:
         try:
