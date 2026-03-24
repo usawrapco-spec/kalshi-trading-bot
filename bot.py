@@ -21,11 +21,12 @@ SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
-# === STRATEGY: CHEAP ENTRIES, TRAILING STOP ON WINNERS ===
+# === STRATEGY: CHEAP ENTRIES, TIERED PROFIT TAKING ===
 BUY_MIN = 0.03
 BUY_MAX = 0.20
-TRAILING_ACTIVATE = 1.00    # trailing stop activates once gain > +100%
-TRAILING_DROP = 0.25        # sell if price drops 25% from peak bid
+TIER1_GAIN = 0.30           # +30%: sell 1 of 3 contracts
+TIER2_GAIN = 1.00           # +100%: sell 1 more
+# Last contract rides to settlement for moonshot
 MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
@@ -250,65 +251,60 @@ def check_sells():
 
         gain = (current_bid - entry_price) / entry_price
         gain_pct = gain * 100
-        trade_id = trade['id']
 
-        # Track peak bid
-        prev_peak_bid = peak_bids.get(trade_id, current_bid)
-        if current_bid > prev_peak_bid:
-            peak_bids[trade_id] = current_bid
-        peak_bid = peak_bids.get(trade_id, current_bid)
-        peak_gain = (peak_bid - entry_price) / entry_price if entry_price > 0 else 0
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% x{count}")
 
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% (peak ${peak_bid:.2f} +{peak_gain*100:.0f}%)")
+        # Tiered profit taking: sell 1 contract at each tier
+        sell_count = 0
+        reason = ''
 
-        # Trailing stop: only activates once gain was > +50%
-        # Then sells if price drops 25% from peak bid
-        if peak_gain < TRAILING_ACTIVATE:
+        if count >= 3 and gain >= TIER1_GAIN:
+            sell_count = 1
+            reason = f"TIER1 +{gain_pct:.0f}% (sell 1/{count})"
+        elif count == 2 and gain >= TIER2_GAIN:
+            sell_count = 1
+            reason = f"TIER2 +{gain_pct:.0f}% (sell 1/{count})"
+        # count == 1: ride to settlement, no sell
+
+        if sell_count == 0:
             continue
 
-        drop_from_peak = (peak_bid - current_bid) / peak_bid if peak_bid > 0 else 0
-        if drop_from_peak < TRAILING_DROP:
-            continue  # still riding, hasn't dropped enough
+        # === SELL 1 CONTRACT, KEEP REST ===
+        pnl = round((current_bid - entry_price) * sell_count, 4)
+        original_count = trade.get('count') or 1
 
-        reason = f"TRAIL STOP +{gain_pct:.0f}% (peak ${peak_bid:.2f} +{peak_gain*100:.0f}%, dropped {drop_from_peak*100:.0f}%)"
+        logger.info(f"SELL ATTEMPT: {ticker} {side} x{sell_count} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% reason={reason}")
 
-        # === SELL ORDER ===
-        pnl = round((current_bid - entry_price) * count, 4)
-
-        logger.info(f"SELL ATTEMPT: {ticker} {side} x{count} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% reason={reason}")
-
-        result = place_order(ticker, side, 'sell', current_bid, count)
+        result = place_order(ticker, side, 'sell', current_bid, sell_count)
         if not result:
             logger.error(f"SELL FAILED: {ticker} -- order not filled")
             continue
 
         order_id, filled = result
+        if filled <= 0:
+            continue
 
-        if filled < count:
-            logger.warning(f"PARTIAL SELL: {ticker} filled {filled}/{count}")
-            pnl = round((current_bid - entry_price) * filled, 4)
+        pnl = round((current_bid - entry_price) * filled, 4)
+        remaining = original_count - filled
 
-        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | pnl=${pnl:.4f}")
+        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | pnl=${pnl:.4f} | {remaining} remaining")
         try:
-            if filled >= count:
-                db.table('trades').update({
-                    'pnl': float(pnl),
-                    'current_bid': float(current_bid),
-                }).eq('id', trade['id']).execute()
-            else:
-                # Partial: reduce count, record sold portion separately
-                db.table('trades').update({
-                    'count': count - filled,
-                    'current_bid': float(current_bid),
-                }).eq('id', trade['id']).execute()
-                db.table('trades').insert({
-                    'ticker': ticker, 'side': side, 'action': 'buy',
-                    'price': float(entry_price), 'count': filled,
-                    'current_bid': float(current_bid), 'pnl': float(pnl),
-                }).execute()
+            # Reduce count on original position, record sold portion
+            db.table('trades').update({
+                'count': remaining,
+                'current_bid': float(current_bid),
+            }).eq('id', trade['id']).execute()
+            # Record the sold contract as a resolved trade
+            db.table('trades').insert({
+                'ticker': ticker, 'side': side, 'action': 'buy',
+                'price': float(entry_price), 'count': filled,
+                'current_bid': float(current_bid), 'pnl': float(pnl),
+            }).execute()
+            # If no contracts left, mark original as resolved too
+            if remaining <= 0:
+                db.table('trades').update({'pnl': 0.0}).eq('id', trade['id']).execute()
         except Exception as e:
             logger.error(f"Sell DB error: {e}")
-        peak_bids.pop(trade_id, None)
         sold += 1
 
     logger.info(f"SELL SUMMARY: sold={sold} expired={expired}")
@@ -683,7 +679,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-20c &mdash; trailing stop &mdash; let winners ride
+  <span id="mode-label">PAPER MODE</span> &mdash; cheap scalper &mdash; 3-20c &mdash; tiered selling (+30%/+100%/ride)
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -716,7 +712,7 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>Buy cheap 3-20c | Trailing stop: activates +50%, sells on 25% drop from peak</span>
+  <span>Buy cheap 3-20c | Sell: 1 at +30%, 1 at +100%, 1 rides to settlement</span>
   <span>20min max | 3 contracts | Double down winners | 50% reserve</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
