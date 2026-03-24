@@ -320,60 +320,40 @@ def check_sells():
 
         raw_gain = (current_bid - entry_price) / entry_price if entry_price > 0 else 0
 
-        if real_profit > 0:
-            # === PROFIT SCORE: when to take gains ===
+        # Losers ride to settlement — no cutting
+        if real_profit <= 0:
+            logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} loss=${real_profit:.4f} {mins_left:.0f}min — riding to settlement x{count}")
+            continue
+
+        # === PROFIT SCORE: when to take gains ===
+        score += 1
+        signals.append('profitable')
+
+        if current_bid >= 0.70:
             score += 1
-            signals.append('profitable')
-
-            if current_bid >= 0.70:
-                score += 1
-                signals.append(f'bid>=$0.70')
-            if current_bid >= 0.90:
-                score += 2
-                signals.append(f'bid>=$0.90')
-            if dropping:
-                score += 1
-                signals.append('dropping')
-            if mins_left <= 3:
-                score += 2
-                signals.append(f'{mins_left:.0f}m<=3')
-            if mins_left <= 1:
-                score += 1
-                signals.append(f'{mins_left:.0f}m<=1')
-
-            logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} TAKE_SCORE={score} [{', '.join(signals)}] x{count}")
-
-        else:
-            # === LOSS SCORE: when to cut losses ===
+            signals.append('bid>=70c')
+        if current_bid >= 0.90:
+            score += 2
+            signals.append('bid>=90c')
+        if dropping:
             score += 1
-            signals.append('losing')
+            signals.append('dropping')
+        if mins_left <= 3:
+            score += 2
+            signals.append(f'{mins_left:.0f}m<=3')
+        if mins_left <= 1:
+            score += 1
+            signals.append(f'{mins_left:.0f}m<=1')
 
-            if raw_gain <= -0.30:
-                score += 1
-                signals.append(f'down{raw_gain*100:.0f}%')
-            if raw_gain <= -0.50:
-                score += 2
-                signals.append(f'down50%+')
-            if dropping:
-                score += 1
-                signals.append('dropping')
-            if mins_left <= 3:
-                score += 2
-                signals.append(f'{mins_left:.0f}m<=3')
-            if mins_left <= 1:
-                score += 1
-                signals.append(f'{mins_left:.0f}m<=1')
-
-            logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} loss=${real_profit:.4f} CUT_SCORE={score} [{', '.join(signals)}] x{count}")
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} profit=${real_profit:.4f} SCORE={score} [{', '.join(signals)}] {mins_left:.0f}min x{count}")
 
         should_sell = False
         reason = ''
 
-        # Score 4+ = sell (works for both profit-taking and loss-cutting)
+        # Score 4+ = take profit
         if score >= 4:
             should_sell = True
-            label = "GUT SELL" if real_profit > 0 else "CUT LOSS"
-            reason = f"{label} score={score} [{', '.join(signals)}] pnl=${real_profit:.4f}"
+            reason = f"GUT SELL score={score} [{', '.join(signals)}] profit=${real_profit:.4f}"
 
         if not should_sell:
             continue
@@ -720,6 +700,12 @@ def api_open():
                 s_fee = 0
                 real_profit = 0
                 gain_pct = 0
+            # Calculate gut score for display
+            pos_score = 0
+            if real_profit > 0:
+                pos_score += 1
+                if current >= 0.70: pos_score += 1
+                if current >= 0.90: pos_score += 2
             positions.append({
                 'ticker': t.get('ticker', ''),
                 'side': t.get('side', ''),
@@ -733,6 +719,7 @@ def api_open():
                 'sell_fee': round(s_fee, 4),
                 'unrealized': real_profit,
                 'gain_pct': gain_pct,
+                'score': pos_score,
             })
         positions.sort(key=lambda x: x['gain_pct'], reverse=True)
         return jsonify(positions)
@@ -828,7 +815,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; all 15M crypto &mdash; gut score sell (4+) / loss score cut (4+)
+  <span id="mode-label">PAPER MODE</span> &mdash; all 15M crypto &mdash; gut score 4+ = sell / losers ride to settlement
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -842,7 +829,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="panel">
   <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Buy Fee</th><th>Bid</th><th>Value</th><th>Sell Fee</th><th>Net P&amp;L</th><th>Gain%</th>
+    <th>Score</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Buy Fee</th><th>Bid</th><th>Value</th><th>Sell Fee</th><th>Net P&amp;L</th><th>Net%</th>
   </tr></thead><tbody id="open-body"><tr><td colspan="12" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
@@ -925,10 +912,10 @@ async function refresh(){
       var gc=cls(p.gain_pct);
       var bidText=p.current_bid<=0?'EXPIRED':'$'+p.current_bid.toFixed(2);
       var valText=p.current_bid<=0?'$0.00':'$'+(p.bid_total||0).toFixed(2);
-      var strat=p.strategy||'FAV';
-      var sc=strat==='LONG'?'color:#ffaa00':'color:#00d673';
+      var pscore=p.score||0;
+      var scoreColor=pscore>=4?'#00d673':pscore>=2?'#ffaa00':'#555';
       h+='<tr class="'+rc+'">';
-      h+='<td style="'+sc+';font-weight:700;font-size:9px">'+strat+'</td>';
+      h+='<td style="color:'+scoreColor+';font-weight:700;font-size:14px;text-align:center">'+pscore+'</td>';
       h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
       h+='<td>'+esc(p.side)+'</td>';
       h+='<td>'+p.count+'</td>';
