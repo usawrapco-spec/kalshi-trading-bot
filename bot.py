@@ -301,11 +301,11 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # No take profit — let cheap contracts ride to settlement for max payout
+        # No take profit — let contracts ride to settlement for max payout
         # Only sell on stop loss below
 
         # Smart stop loss — check momentum before cutting
-        elif raw_gain <= STOP_LOSS_PCT:
+        if raw_gain <= STOP_LOSS_PCT:
             # Check how close to settlement
             close_time = market.get('close_time') or market.get('expected_expiration_time')
             mins_to_settle = 999
