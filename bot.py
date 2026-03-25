@@ -527,6 +527,9 @@ def api_status():
         wins = sum(1 for t in resolved_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in resolved_data if sf(t['pnl']) <= 0)
         win_pnl = sum(sf(t['pnl']) for t in resolved_data if sf(t['pnl']) > 0)
+        avg_return = round((total_pnl / len(resolved_data) * 100), 1) if resolved_data else 0
+        avg_win = round(sum(sf(t['pnl']) for t in resolved_data if sf(t['pnl']) > 0) / max(wins, 1), 4)
+        avg_loss = round(sum(sf(t['pnl']) for t in resolved_data if sf(t['pnl']) <= 0) / max(losses, 1), 4)
         savings = round(win_pnl * SAVINGS_RATE, 4)
         expired = sum(1 for t in open_positions if sf(t.get('current_bid', 0)) <= 0)
 
@@ -551,6 +554,9 @@ def api_status():
             'savings': savings,
             'open_count': len(open_positions),
             'mode': mode,
+            'avg_return': avg_return,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
         })
     except Exception as e:
         logger.error(f"API status error: {e}")
@@ -669,7 +675,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; buy $0.03-$0.12 &mdash; sell +30% &mdash; ride losers to settlement
+  <span id="mode-label">PAPER MODE</span> &mdash; buy $0.01-$0.40 &mdash; sell +50% &mdash; ride losers to settlement
   &mdash; NEXT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -678,6 +684,7 @@ tr:hover{background:#1a1a1a !important}
   <div style="font-size:12px;color:#888">Positions: <span id="tb-positions">...</span> &nbsp;&nbsp; Cash: <span id="tb-cash">...</span></div>
   <div style="font-size:12px">P&amp;L: <span id="tb-pnl">...</span> &nbsp;&nbsp; Fees: <span id="tb-fees" class="red">...</span> &nbsp;&nbsp; Net: <span id="tb-net">...</span></div>
   <div style="font-size:12px">RECORD: <span id="tb-record">...</span> &nbsp;&nbsp; SAVINGS: <span id="tb-savings" class="green">...</span></div>
+  <div style="font-size:12px">AVG RETURN: <span id="tb-avgret">...</span> &nbsp;&nbsp; AVG WIN: <span id="tb-avgwin" class="green">...</span> &nbsp;&nbsp; AVG LOSS: <span id="tb-avgloss" class="red">...</span></div>
 </div>
 
 <div class="panel">
@@ -737,6 +744,10 @@ async function refresh(){
     $('tb-net').innerHTML='<span class="'+cls(net)+'">'+(net>=0?'+$':'-$')+Math.abs(net).toFixed(4)+'</span>';
     $('tb-record').innerHTML='<span class="green">'+(status.wins||0)+'W</span> / <span class="red">'+(status.losses||0)+'L</span> / <span style="color:#ffaa00">'+(status.expired||0)+'E</span>';
     $('tb-savings').textContent='$'+(status.savings||0).toFixed(4);
+    var ar=status.avg_return||0;
+    $('tb-avgret').innerHTML='<span class="'+cls(ar)+'">'+(ar>=0?'+':'')+ar.toFixed(1)+'%</span>';
+    $('tb-avgwin').textContent='+$'+(status.avg_win||0).toFixed(4);
+    $('tb-avgloss').textContent='-$'+Math.abs(status.avg_loss||0).toFixed(4);
     var mode=status.mode||'PAPER';
     $('mode-label').textContent=mode==='LIVE'?'LIVE TRADING':'PAPER MODE';
     $('mode-dot').className='live-dot '+(mode==='LIVE'?'dot-live':'dot-paper');
