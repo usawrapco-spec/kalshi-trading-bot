@@ -7,7 +7,8 @@ import os, time, logging, traceback, math
 from datetime import datetime, timezone
 from flask import Flask, jsonify, render_template_string
 from threading import Thread
-from supabase import create_client
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from kalshi_auth import KalshiAuth
 import requests
 from requests.adapters import HTTPAdapter
@@ -18,8 +19,7 @@ logger = logging.getLogger(__name__)
 
 # === CONFIG ===
 KALSHI_HOST = os.environ.get('KALSHI_API_HOST', 'https://api.elections.kalshi.com')
-SUPABASE_URL = os.environ.get('SUPABASE_URL')
-SUPABASE_KEY = os.environ.get('SUPABASE_KEY')
+DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://kalshi:kalshi@localhost:5432/kalshi')
 PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
@@ -39,8 +39,37 @@ CONTRACTS = 1
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
+# === DATABASE ===
+
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True
+    return conn
+
+
+def init_db():
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id SERIAL PRIMARY KEY,
+                    ticker TEXT,
+                    side TEXT,
+                    action TEXT,
+                    price NUMERIC,
+                    count INTEGER,
+                    current_bid NUMERIC,
+                    pnl NUMERIC,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """)
+    finally:
+        conn.close()
+
+
 # === INIT ===
-db = create_client(SUPABASE_URL, SUPABASE_KEY)
+init_db()
 auth = KalshiAuth()
 app = Flask(__name__)
 
@@ -136,27 +165,36 @@ def get_balance():
         real = get_kalshi_balance()
         if real is not None:
             return real
+    conn = get_db()
     try:
-        buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
-        buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
-        pnls = db.table('trades').select('pnl').not_.is_('pnl', 'null').execute()
-        pnl_data = pnls.data or []
-        wins = sum(sf(t['pnl']) for t in pnl_data if sf(t['pnl']) > 0)
-        losses = sum(sf(t['pnl']) for t in pnl_data if sf(t['pnl']) <= 0)
-        deployable_pnl = wins * (1 - SAVINGS_RATE) + losses
-        return max(0, STARTING_BALANCE - buy_cost + deployable_pnl)
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT price, count FROM trades WHERE action = 'buy'")
+            buys = cur.fetchall()
+            buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in buys)
+            cur.execute("SELECT pnl FROM trades WHERE pnl IS NOT NULL")
+            pnl_data = cur.fetchall()
+            wins = sum(sf(t['pnl']) for t in pnl_data if sf(t['pnl']) > 0)
+            losses = sum(sf(t['pnl']) for t in pnl_data if sf(t['pnl']) <= 0)
+            deployable_pnl = wins * (1 - SAVINGS_RATE) + losses
+            return max(0, STARTING_BALANCE - buy_cost + deployable_pnl)
     except Exception as e:
         logger.error(f"Balance calc failed: {e}")
         return 0.0
+    finally:
+        conn.close()
 
 
 def get_open_positions():
+    conn = get_db()
     try:
-        result = db.table('trades').select('*').eq('action', 'buy').is_('pnl', 'null').execute()
-        return result.data or []
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM trades WHERE action = 'buy' AND pnl IS NULL")
+            return cur.fetchall()
     except Exception as e:
         logger.error(f"get_open_positions failed: {e}")
         return []
+    finally:
+        conn.close()
 
 
 # === SELL LOGIC ===
@@ -199,10 +237,14 @@ def check_sells():
                 pnl = round(-entry_price * count - buy_fee, 4)
                 reason = "LOSS settled"
             logger.info(f"SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
+            conn = get_db()
             try:
-                db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE trades SET pnl = %s WHERE id = %s", (float(pnl), trade['id']))
             except Exception as e:
                 logger.error(f"Settle DB error: {e}")
+            finally:
+                conn.close()
             expired += 1
             continue
 
@@ -218,10 +260,14 @@ def check_sells():
             current_bid = sf(market.get('no_bid_dollars', '0'))
 
         # Update bid in DB for dashboard
+        conn = get_db()
         try:
-            db.table('trades').update({'current_bid': float(current_bid)}).eq('id', trade['id']).execute()
+            with conn.cursor() as cur:
+                cur.execute("UPDATE trades SET current_bid = %s WHERE id = %s", (float(current_bid), trade['id']))
         except:
             pass
+        finally:
+            conn.close()
 
         if current_bid <= 0:
             logger.info(f"SKIP: {ticker} bid=$0, waiting for settlement")
@@ -250,13 +296,15 @@ def check_sells():
             if filled < count:
                 pnl = round((current_bid - entry_price) * filled - kalshi_fee(entry_price, filled) - kalshi_fee(current_bid, filled), 4)
 
+            conn = get_db()
             try:
-                db.table('trades').update({
-                    'pnl': float(pnl),
-                    'current_bid': float(current_bid),
-                }).eq('id', trade['id']).execute()
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE trades SET pnl = %s, current_bid = %s WHERE id = %s",
+                                (float(pnl), float(current_bid), trade['id']))
             except Exception as e:
                 logger.error(f"Sell DB error: {e}")
+            finally:
+                conn.close()
             sold += 1
 
     logger.info(f"SELL SUMMARY: sold={sold} expired={expired}")
@@ -368,17 +416,20 @@ def buy_candidates(markets):
             continue
 
         logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f}")
+        conn = get_db()
         try:
-            db.table('trades').insert({
-                'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
-                'price': float(c['price']), 'count': filled,
-                'current_bid': float(c['bid']),
-            }).execute()
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO trades (ticker, side, action, price, count, current_bid) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (c['ticker'], c['side'], 'buy', float(c['price']), filled, float(c['bid']))
+                )
             open_positions.append({'ticker': c['ticker'], 'price': c['price']})
             deployable -= cost
             bought += 1
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
+        finally:
+            conn.close()
 
     logger.info(f"Bought {bought} positions")
 
@@ -434,8 +485,17 @@ def api_status():
         positions_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_positions)
         portfolio = cash + positions_value
 
-        resolved = db.table('trades').select('pnl,count').eq('action', 'buy').not_.is_('pnl', 'null').execute()
-        resolved_data = resolved.data or []
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT pnl, count FROM trades WHERE action = 'buy' AND pnl IS NOT NULL")
+                resolved_data = cur.fetchall()
+
+                cur.execute("SELECT count, price FROM trades WHERE action = 'buy'")
+                all_buys = cur.fetchall()
+        finally:
+            conn.close()
+
         total_pnl = sum(sf(t['pnl']) for t in resolved_data)
         wins = sum(1 for t in resolved_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in resolved_data if sf(t['pnl']) <= 0)
@@ -443,9 +503,8 @@ def api_status():
         savings = round(win_pnl * SAVINGS_RATE, 4)
         expired = sum(1 for t in open_positions if sf(t.get('current_bid', 0)) <= 0)
 
-        all_buys = db.table('trades').select('count,price').eq('action', 'buy').execute()
-        total_contracts = sum((t.get('count') or 1) for t in (all_buys.data or []))
-        total_fees = sum(kalshi_fee(sf(t.get('price')), t.get('count') or 1) for t in (all_buys.data or []))
+        total_contracts = sum((t.get('count') or 1) for t in all_buys)
+        total_fees = sum(kalshi_fee(sf(t.get('price')), t.get('count') or 1) for t in all_buys)
         total_fees = round(total_fees, 4)
         pnl_after_fees = round(total_pnl, 4)  # fees already deducted from PnL
 
@@ -507,9 +566,15 @@ def api_open():
 @app.route('/api/trades')
 def api_trades():
     try:
-        result = db.table('trades').select('*').eq('action', 'buy').not_.is_('pnl', 'null').order('created_at', desc=True).limit(50).execute()
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM trades WHERE action = 'buy' AND pnl IS NOT NULL ORDER BY created_at DESC LIMIT 50")
+                result_data = cur.fetchall()
+        finally:
+            conn.close()
         trades = []
-        for t in (result.data or []):
+        for t in result_data:
             entry = sf(t.get('price'))
             exit_price = sf(t.get('current_bid'))
             gain_pct = round(((exit_price - entry) / entry) * 100, 1) if entry > 0 else 0
