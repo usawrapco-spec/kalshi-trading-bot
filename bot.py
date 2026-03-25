@@ -24,14 +24,14 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
-BUY_MIN = 0.03
-BUY_MAX = 0.12
+BUY_MIN = 0.01
+BUY_MAX = 0.99
 SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts
 MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
-STARTING_BALANCE = 20.00
+STARTING_BALANCE = 100.00
 CASH_RESERVE = 0.50
 SAVINGS_RATE = 0.25
 MAX_BUYS_PER_CYCLE = 5
