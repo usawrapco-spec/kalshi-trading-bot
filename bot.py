@@ -26,7 +26,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY ===
 BUY_MIN = 0.01
 BUY_MAX = 0.40
-SELL_THRESHOLD = 0.50       # +50%: sell ALL contracts
+SELL_THRESHOLD = None        # No profit take — ride everything to settlement
 MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
@@ -285,8 +285,8 @@ def check_sells():
 
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% x{count}")
 
-        # Take profit at +30%
-        if gain >= SELL_THRESHOLD:
+        # Take profit (disabled if SELL_THRESHOLD is None)
+        if SELL_THRESHOLD is not None and gain >= SELL_THRESHOLD:
             buy_fee = kalshi_fee(entry_price, count)
             sell_fee = kalshi_fee(current_bid, count)
             gross = round((current_bid - entry_price) * count, 4)
@@ -675,7 +675,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; buy $0.01-$0.40 &mdash; sell +50% &mdash; ride losers to settlement
+  <span id="mode-label">PAPER MODE</span> &mdash; buy $0.01-$0.40 &mdash; no profit take &mdash; ride everything to settlement
   &mdash; NEXT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
