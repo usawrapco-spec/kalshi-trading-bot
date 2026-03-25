@@ -10,6 +10,8 @@ from threading import Thread
 from supabase import create_client
 from kalshi_auth import KalshiAuth
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -57,12 +59,21 @@ def kalshi_fee(price, count):
     return min(math.ceil(TAKER_FEE_RATE * count * price * (1 - price) * 100) / 100, 0.02 * count)
 
 
-# === KALSHI API ===
+# === KALSHI API (with retry) ===
+
+def _make_session():
+    s = requests.Session()
+    retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+    s.mount('https://', HTTPAdapter(max_retries=retries))
+    return s
+
+session = _make_session()
+
 
 def kalshi_get(path):
     url = f"{KALSHI_HOST}/trade-api/v2{path}"
     headers = auth.get_headers("GET", f"/trade-api/v2{path}")
-    resp = requests.get(url, headers=headers, timeout=10)
+    resp = session.get(url, headers=headers, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
@@ -71,7 +82,7 @@ def kalshi_post(path, data):
     url = f"{KALSHI_HOST}/trade-api/v2{path}"
     headers = auth.get_headers("POST", f"/trade-api/v2{path}")
     headers['Content-Type'] = 'application/json'
-    resp = requests.post(url, headers=headers, json=data, timeout=10)
+    resp = session.post(url, headers=headers, json=data, timeout=15)
     resp.raise_for_status()
     return resp.json()
 
