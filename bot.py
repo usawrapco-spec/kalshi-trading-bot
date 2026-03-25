@@ -1,10 +1,9 @@
 """
-Kalshi 15M crypto scalper.
-Majority vote: pick ONE side (YES or NO) per window, buy all tickers same direction.
-Take profit at $0.90+ bid. Losers ride to settlement. $1000 balance, 20% reserve.
+Crypto scalper. Buy cheap 15M contracts settling within 20min.
+Sell at +30%. No stop loss — ride to settlement. Keep it simple.
 """
 
-import os, time, logging, traceback
+import os, time, logging, traceback, math
 from datetime import datetime, timezone
 from flask import Flask, jsonify, render_template_string
 from threading import Thread
@@ -23,17 +22,18 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
-BUY_MIN = 0.01              # no minimum
-BUY_MAX = 0.97              # no cap — let majority vote decide
-TAKE_PROFIT_BID = 0.90      # sell when bid hits $0.90+ (contract 90% decided)
-MAX_ADDS = 0                # 1 buy per ticker, no adds
+BUY_MIN = 0.03
+BUY_MAX = 0.12
+SELL_THRESHOLD = 0.30       # +30%: sell ALL contracts
+MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
 STARTING_BALANCE = 20.00
-CASH_RESERVE = 0.50         # never risk more than half
-MAX_BUYS_PER_CYCLE = 5      # one per ticker max
-CONTRACTS = 2               # 2 contracts per trade
+CASH_RESERVE = 0.50
+SAVINGS_RATE = 0.25
+MAX_BUYS_PER_CYCLE = 5
+CONTRACTS = 1
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
@@ -43,31 +43,6 @@ auth = KalshiAuth()
 app = Flask(__name__)
 
 current_hot_markets = []
-last_cycle_prices = {}   # ticker -> yes_ask
-peak_bids = {}           # trade_id -> tracking data
-
-
-def kalshi_fee(price, count):
-    """Calculate Kalshi taker fee for a trade. Fee applies on both buy and sell."""
-    p = float(price)
-    c = int(count)
-    return min(TAKER_FEE_RATE * c * p * (1 - p), 0.02 * c)
-
-
-def net_pnl(entry_price, exit_price, count):
-    """Calculate PnL after Kalshi fees (buy + sell side)."""
-    gross = (exit_price - entry_price) * count
-    buy_fee = kalshi_fee(entry_price, count)
-    sell_fee = kalshi_fee(exit_price, count)
-    return round(gross - buy_fee - sell_fee, 4)
-
-
-def net_gain_pct(entry_price, exit_price, count):
-    """Net gain % after fees, relative to total cost (entry + buy fee)."""
-    total_cost = entry_price * count + kalshi_fee(entry_price, count)
-    if total_cost <= 0:
-        return 0
-    return net_pnl(entry_price, exit_price, count) / total_cost
 
 
 def sf(val):
@@ -75,6 +50,11 @@ def sf(val):
         return float(val) if val is not None else 0.0
     except:
         return 0.0
+
+
+def kalshi_fee(price, count):
+    """Kalshi taker fee: 7% of P*(1-P) per contract, max $0.02/contract."""
+    return min(math.ceil(TAKER_FEE_RATE * count * price * (1 - price) * 100) / 100, 0.02 * count)
 
 
 # === KALSHI API ===
@@ -105,7 +85,6 @@ def get_market(ticker):
 
 
 def place_order(ticker, side, action, price, count):
-    """Place order and return (order_id, filled_count) or None on failure."""
     if not ENABLE_TRADING:
         logger.info(f"PAPER {action.upper()}: {ticker} {side} x{count} @ ${price:.2f}")
         return ('paper', count)
@@ -113,28 +92,20 @@ def place_order(ticker, side, action, price, count):
     price_cents = int(round(price * 100))
     try:
         resp = kalshi_post('/portfolio/orders', {
-            'ticker': ticker,
-            'action': action,
-            'side': side,
-            'type': 'limit',
-            'count': count,
+            'ticker': ticker, 'action': action, 'side': side,
+            'type': 'limit', 'count': count,
             'yes_price' if side == 'yes' else 'no_price': price_cents,
         })
         order = resp.get('order', {})
         order_id = order.get('order_id', '')
         status = order.get('status', '')
-
-        # Only count actually filled contracts
         filled = order.get('place_count', 0) - order.get('remaining_count', 0)
         if filled <= 0:
             filled = count if status in ('executed', 'filled') else 0
-
         logger.info(f"ORDER {action.upper()}: {ticker} status={status} filled={filled}/{count} id={order_id}")
         return (order_id, filled) if filled > 0 else None
     except Exception as e:
         logger.error(f"ORDER FAILED: {action.upper()} {ticker} -- {e}")
-        if hasattr(e, 'response') and e.response is not None:
-            logger.error(f"ERROR BODY: {e.response.text}")
         return None
 
 
@@ -155,14 +126,14 @@ def get_balance():
         if real is not None:
             return real
     try:
-        # Only subtract cost of OPEN positions (closed ones returned their money)
-        # Include buy fees — they're paid immediately
-        open_buys = db.table('trades').select('price,count,buy_fee').eq('action', 'buy').is_('pnl', 'null').execute()
-        open_cost = sum(sf(t['price']) * (t.get('count') or 1) + sf(t.get('buy_fee', 0)) for t in (open_buys.data or []))
-        # Add realized P&L from closed positions
+        buys = db.table('trades').select('price,count').eq('action', 'buy').execute()
+        buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in (buys.data or []))
         pnls = db.table('trades').select('pnl').not_.is_('pnl', 'null').execute()
-        total_pnl = sum(sf(t['pnl']) for t in (pnls.data or []))
-        return max(0, STARTING_BALANCE - open_cost + total_pnl)
+        pnl_data = pnls.data or []
+        wins = sum(sf(t['pnl']) for t in pnl_data if sf(t['pnl']) > 0)
+        losses = sum(sf(t['pnl']) for t in pnl_data if sf(t['pnl']) <= 0)
+        deployable_pnl = wins * (1 - SAVINGS_RATE) + losses
+        return max(0, STARTING_BALANCE - buy_cost + deployable_pnl)
     except Exception as e:
         logger.error(f"Balance calc failed: {e}")
         return 0.0
@@ -175,15 +146,6 @@ def get_open_positions():
     except Exception as e:
         logger.error(f"get_open_positions failed: {e}")
         return []
-
-
-def get_owned_tickers():
-    try:
-        result = db.table('trades').select('ticker').eq('action', 'buy').is_('pnl', 'null').execute()
-        return {t['ticker'] for t in (result.data or [])}
-    except Exception as e:
-        logger.error(f"get_owned_tickers failed: {e}")
-        return set()
 
 
 # === SELL LOGIC ===
@@ -216,33 +178,26 @@ def check_sells():
         status = market.get('status', '')
         result_val = market.get('result', '')
 
-        # === SETTLED: Kalshi has a final result ===
+        # === SETTLED ===
         if result_val:
-            settle_price = 1.0 if result_val == side else 0.0
-            gross = round((settle_price - entry_price) * count, 4)
-            b_fee = kalshi_fee(entry_price, count)
-            s_fee = 0.0  # no sell fee on settlement
-            net = round(gross - b_fee, 4)
-            reason = f"{'WIN' if result_val == side else 'LOSS'} settled @${settle_price:.2f}"
-            logger.info(f"SETTLED: {ticker} {side} | {reason} | gross=${gross:.4f} buy_fee=${b_fee:.4f} net=${net:.4f}")
+            buy_fee = kalshi_fee(entry_price, count)
+            if result_val == side:
+                pnl = round((1.0 - entry_price) * count - buy_fee, 4)
+                reason = "WIN settled @$1.00"
+            else:
+                pnl = round(-entry_price * count - buy_fee, 4)
+                reason = "LOSS settled"
+            logger.info(f"SETTLED: {ticker} {side} | {reason} | pnl=${pnl:.4f}")
             try:
-                db.table('trades').update({
-                    'pnl': float(net),
-                    'gross_pnl': float(gross),
-                    'net_pnl': float(net),
-                    'buy_fee': float(b_fee),
-                    'sell_fee': float(s_fee),
-                    'current_bid': float(settle_price),
-                }).eq('id', trade['id']).execute()
+                db.table('trades').update({'pnl': float(pnl)}).eq('id', trade['id']).execute()
             except Exception as e:
                 logger.error(f"Settle DB error: {e}")
-            peak_bids.pop(trade['id'], None)
             expired += 1
             continue
 
-        # === CLOSED but no result yet: wait for Kalshi to settle ===
+        # === CLOSED but no result yet ===
         if status in ('closed', 'settled', 'finalized'):
-            logger.info(f"WAITING: {ticker} status={status} but no result yet, skipping")
+            logger.info(f"WAITING: {ticker} status={status}, no result yet")
             continue
 
         # Get current bid
@@ -251,130 +206,47 @@ def check_sells():
         else:
             current_bid = sf(market.get('no_bid_dollars', '0'))
 
-        # Update current_bid in DB for dashboard
+        # Update bid in DB for dashboard
         try:
             db.table('trades').update({'current_bid': float(current_bid)}).eq('id', trade['id']).execute()
         except:
             pass
 
-        # If bid is $0 and market is still open — force stop-loss, don't wait
         if current_bid <= 0:
-            if status == 'open':
-                # Market is open but bid is $0 — this IS a total loss, book it now
-                b_fee = kalshi_fee(entry_price, count)
-                gross = round(-entry_price * count, 4)
-                pnl = round(gross - b_fee, 4)
-                logger.info(f"$0 BID LOSS: {ticker} {side} x{count} entry=${entry_price:.2f} | gross=${gross:.4f} fee=${b_fee:.4f} net=${pnl:.4f}")
-                try:
-                    db.table('trades').update({
-                        'pnl': float(pnl),
-                        'gross_pnl': float(gross),
-                        'net_pnl': float(pnl),
-                        'buy_fee': float(b_fee),
-                        'sell_fee': 0.0,
-                        'current_bid': 0.0,
-                    }).eq('id', trade['id']).execute()
-                except Exception as e:
-                    logger.error(f"$0 stop DB error: {e}")
-                peak_bids.pop(trade['id'], None)
-                expired += 1
-            else:
-                # Market closed/settled — wait for Kalshi to finalize
-                logger.info(f"WAITING: {ticker} bid=$0, status={status}, waiting for settlement")
+            logger.info(f"SKIP: {ticker} bid=$0, waiting for settlement")
             continue
 
-        # Calculate net gain AFTER Kalshi fees
-        raw_gain = (current_bid - entry_price) / entry_price
-        raw_gain_pct = raw_gain * 100
-        net = net_gain_pct(entry_price, current_bid, count)
-        net_pct = net * 100
-        net_profit = net_pnl(entry_price, current_bid, count)
-        fees = kalshi_fee(entry_price, count) + kalshi_fee(current_bid, count)
+        gain = (current_bid - entry_price) / entry_price
+        gain_pct = gain * 100
 
-        # Track momentum
-        trade_id = trade['id']
-        prev_bid = peak_bids.get(f"{trade_id}_prev", current_bid)
-        peak_bids[f"{trade_id}_prev"] = current_bid
+        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} {gain_pct:+.0f}% x{count}")
 
-        # Calculate real profit after all fees
-        b_fee = kalshi_fee(entry_price, count)
-        s_fee = kalshi_fee(current_bid, count)
-        real_profit = (current_bid - entry_price) * count - b_fee - s_fee
-        dropping = current_bid < prev_bid
+        # Take profit at +30%
+        if gain >= SELL_THRESHOLD:
+            buy_fee = kalshi_fee(entry_price, count)
+            sell_fee = kalshi_fee(current_bid, count)
+            gross = round((current_bid - entry_price) * count, 4)
+            pnl = round(gross - buy_fee - sell_fee, 4)
 
-        # Time to settlement
-        close_time = market.get('close_time') or market.get('expected_expiration_time')
-        mins_left = 999
-        if close_time:
+            logger.info(f"SELL: {ticker} {side} x{count} @ ${current_bid:.2f} | gross=${gross:.4f} fees=${buy_fee+sell_fee:.4f} net=${pnl:.4f}")
+
+            result = place_order(ticker, side, 'sell', current_bid, count)
+            if not result:
+                logger.error(f"SELL FAILED: {ticker}")
+                continue
+
+            order_id, filled = result
+            if filled < count:
+                pnl = round((current_bid - entry_price) * filled - kalshi_fee(entry_price, filled) - kalshi_fee(current_bid, filled), 4)
+
             try:
-                close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
-                mins_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 60
-            except:
-                pass
-
-        raw_gain = (current_bid - entry_price) / entry_price if entry_price > 0 else 0
-
-        logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} gain={raw_gain*100:+.0f}% profit=${real_profit:.4f} x{count}")
-
-        should_sell = False
-        reason = ''
-
-        # Take profit at +30% gain
-        if raw_gain >= 0.30 and real_profit > 0:
-            should_sell = True
-            reason = f"TAKE PROFIT bid=${current_bid:.2f} (>=90c) profit=${real_profit:.4f}"
-
-        if not should_sell:
-            continue
-
-        # === SELL ALL CONTRACTS ===
-        pnl = net_pnl(entry_price, current_bid, count)
-
-        logger.info(f"SELL ATTEMPT: {ticker} {side} x{count} entry=${entry_price:.2f} bid=${current_bid:.2f} net={net_pct:+.1f}% reason={reason}")
-
-        result = place_order(ticker, side, 'sell', current_bid, count)
-        if not result:
-            logger.error(f"SELL FAILED: {ticker} -- order not filled")
-            continue
-
-        order_id, filled = result
-        if filled < count:
-            logger.warning(f"PARTIAL SELL: {ticker} filled {filled}/{count}")
-            pnl = net_pnl(entry_price, current_bid, filled)
-
-        s_fee = kalshi_fee(current_bid, filled)
-        b_fee = kalshi_fee(entry_price, filled)
-        gross = round((current_bid - entry_price) * filled, 4)
-
-        logger.info(f"SOLD ({reason}): {ticker} {side} x{filled} @ ${current_bid:.2f} | gross=${gross:.4f} buy_fee=${b_fee:.4f} sell_fee=${s_fee:.4f} net=${pnl:.4f}")
-        try:
-            if filled >= count:
                 db.table('trades').update({
                     'pnl': float(pnl),
-                    'gross_pnl': float(gross),
-                    'net_pnl': float(pnl),
-                    'buy_fee': float(b_fee),
-                    'sell_fee': float(s_fee),
                     'current_bid': float(current_bid),
                 }).eq('id', trade['id']).execute()
-            else:
-                db.table('trades').update({
-                    'count': count - filled,
-                    'current_bid': float(current_bid),
-                }).eq('id', trade['id']).execute()
-                db.table('trades').insert({
-                    'ticker': ticker, 'side': side, 'action': 'buy',
-                    'price': float(entry_price), 'count': filled,
-                    'current_bid': float(current_bid),
-                    'pnl': float(pnl),
-                    'gross_pnl': float(gross),
-                    'net_pnl': float(pnl),
-                    'buy_fee': float(b_fee),
-                    'sell_fee': float(s_fee),
-                }).execute()
-        except Exception as e:
-            logger.error(f"Sell DB error: {e}")
-        sold += 1
+            except Exception as e:
+                logger.error(f"Sell DB error: {e}")
+            sold += 1
 
     logger.info(f"SELL SUMMARY: sold={sold} expired={expired}")
 
@@ -385,7 +257,6 @@ def fetch_all_markets():
     all_markets = []
     for series in CRYPTO_SERIES:
         cursor = None
-        pages = 0
         try:
             while True:
                 url = f'/markets?series_ticker={series}&status=open&limit=200'
@@ -394,17 +265,13 @@ def fetch_all_markets():
                 resp = kalshi_get(url)
                 batch = resp.get('markets', [])
                 all_markets.extend(batch)
-                pages += 1
                 cursor = resp.get('cursor')
                 if not cursor or not batch:
                     break
-            if pages > 1:
-                logger.info(f"  {series}: {pages} pages fetched")
         except Exception as e:
             logger.error(f"Fetch {series} failed: {e}")
     logger.info(f"Fetched {len(all_markets)} markets from {len(CRYPTO_SERIES)} series")
     return all_markets
-
 
 
 def buy_candidates(markets):
@@ -420,46 +287,54 @@ def buy_candidates(markets):
     candidates = []
     now = datetime.now(timezone.utc)
 
-    # === YES ONLY — data shows NO has 0 wins out of 25 trades ===
-    direction = 'yes'
-    logger.info(f"DIRECTION: YES only (NO had 0W/25L historically)")
-
     for market in markets:
         ticker = market.get('ticker', '')
 
-        # Skip if more than 20 min to settlement (not a 15M contract window)
+        # Only buy contracts settling within 20 minutes
         close_time = market.get('close_time') or market.get('expected_expiration_time')
         if close_time:
             try:
                 close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
                 mins_left = (close_dt - now).total_seconds() / 60
-                if mins_left > MAX_MINS_TO_EXPIRY:
+                if mins_left > MAX_MINS_TO_EXPIRY or mins_left < 1:
                     continue
             except:
-                pass
+                continue
+        else:
+            continue
 
         yes_ask = float(market.get('yes_ask_dollars') or '999')
         yes_bid = float(market.get('yes_bid_dollars') or '0')
         no_ask = float(market.get('no_ask_dollars') or '999')
         no_bid = float(market.get('no_bid_dollars') or '0')
 
-        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f}")
+        logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # YES only
-        if BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        # Dedup: check existing positions
+        ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
+        if len(ticker_positions) > MAX_ADDS:
+            continue
+        if ticker_positions:
+            pos = ticker_positions[0]
+            pos_entry = sf(pos.get('price'))
+            pos_bid = sf(pos.get('current_bid'))
+            if pos_entry <= 0 or pos_bid <= pos_entry:
+                continue
+            logger.info(f"  DOUBLE DOWN: {ticker} is up, adding")
+
+        # Buy cheapest side in range
+        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            strategy = 'yes'
+        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            side, price, bid = 'no', no_ask, no_bid
+        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            side, price, bid = 'yes', yes_ask, yes_bid
         else:
             continue
 
-        # Skip if we already own this ticker
-        ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
-        if ticker_positions:
-            continue
+        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
 
-        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'strategy': strategy})
-
-    candidates.sort(key=lambda x: x['price'])  # cheapest first
+    candidates.sort(key=lambda x: x['price'])
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
 
@@ -468,13 +343,12 @@ def buy_candidates(markets):
         if bought >= MAX_BUYS_PER_CYCLE:
             break
 
-        contracts = CONTRACTS
-        cost = c['price'] * contracts
+        cost = c['price'] * CONTRACTS
         if cost > deployable:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f}")
             continue
 
-        result = place_order(c['ticker'], c['side'], 'buy', c['price'], contracts)
+        result = place_order(c['ticker'], c['side'], 'buy', c['price'], CONTRACTS)
         if not result:
             continue
 
@@ -482,20 +356,15 @@ def buy_candidates(markets):
         if filled <= 0:
             continue
 
-        actual_cost = c['price'] * filled
-        b_fee = kalshi_fee(c['price'], filled)
-        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f} | buy_fee=${b_fee:.4f}")
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f}")
         try:
             db.table('trades').insert({
                 'ticker': c['ticker'], 'side': c['side'], 'action': 'buy',
                 'price': float(c['price']), 'count': filled,
                 'current_bid': float(c['bid']),
-                'strategy': c.get('strategy'),
-                'buy_fee': float(b_fee),
-                'order_id': order_id,
             }).execute()
             open_positions.append({'ticker': c['ticker'], 'price': c['price']})
-            deployable -= actual_cost
+            deployable -= cost
             bought += 1
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
@@ -516,16 +385,11 @@ def _get_volume(market):
 
 def update_hot_markets(markets):
     global current_hot_markets
-    # Filter out settled markets ($1.00 yes = already decided)
     active = [m for m in markets if sf(m.get('yes_ask_dollars', '0')) < 0.99]
     by_vol = sorted(active, key=lambda m: _get_volume(m), reverse=True)[:10]
     current_hot_markets = [
-        {
-            'ticker': m.get('ticker', ''),
-            'yes_ask': sf(m.get('yes_ask_dollars', '0')),
-            'no_ask': sf(m.get('no_ask_dollars', '0')),
-            'volume': _get_volume(m),
-        }
+        {'ticker': m.get('ticker', ''), 'yes_ask': sf(m.get('yes_ask_dollars', '0')),
+         'no_ask': sf(m.get('no_ask_dollars', '0')), 'volume': _get_volume(m)}
         for m in by_vol
     ]
 
@@ -536,13 +400,10 @@ def run_cycle():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
     balance = get_balance()
     logger.info(f"=== CYCLE START [{mode}] === Balance: ${balance:.2f}")
-
     check_sells()
-
     markets = fetch_all_markets()
     update_hot_markets(markets)
     buy_candidates(markets)
-
     balance = get_balance()
     logger.info(f"=== CYCLE END [{mode}] === Balance: ${balance:.2f}")
 
@@ -567,15 +428,15 @@ def api_status():
         total_pnl = sum(sf(t['pnl']) for t in resolved_data)
         wins = sum(1 for t in resolved_data if sf(t['pnl']) > 0)
         losses = sum(1 for t in resolved_data if sf(t['pnl']) <= 0)
+        win_pnl = sum(sf(t['pnl']) for t in resolved_data if sf(t['pnl']) > 0)
+        savings = round(win_pnl * SAVINGS_RATE, 4)
+        expired = sum(1 for t in open_positions if sf(t.get('current_bid', 0)) <= 0)
 
-        # Fee tracking from DB columns
-        all_trades = db.table('trades').select('count,buy_fee,sell_fee,gross_pnl,net_pnl').eq('action', 'buy').execute()
-        total_contracts = sum((t.get('count') or 1) for t in (all_trades.data or []))
-        total_buy_fees = sum(sf(t.get('buy_fee')) for t in (all_trades.data or []))
-        total_sell_fees = sum(sf(t.get('sell_fee')) for t in (all_trades.data or []))
-        total_fees = round(total_buy_fees + total_sell_fees, 4)
-        total_gross = sum(sf(t.get('gross_pnl')) for t in (all_trades.data or []) if t.get('gross_pnl') is not None)
-        total_net = sum(sf(t.get('net_pnl')) for t in (all_trades.data or []) if t.get('net_pnl') is not None)
+        all_buys = db.table('trades').select('count,price').eq('action', 'buy').execute()
+        total_contracts = sum((t.get('count') or 1) for t in (all_buys.data or []))
+        total_fees = sum(kalshi_fee(sf(t.get('price')), t.get('count') or 1) for t in (all_buys.data or []))
+        total_fees = round(total_fees, 4)
+        pnl_after_fees = round(total_pnl, 4)  # fees already deducted from PnL
 
         mode = "PAPER" if not ENABLE_TRADING else "LIVE"
 
@@ -583,20 +444,20 @@ def api_status():
             'portfolio': round(portfolio, 2),
             'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
-            'gross_pnl': round(total_gross, 4),
-            'buy_fees': round(total_buy_fees, 4),
-            'sell_fees': round(total_sell_fees, 4),
+            'net_pnl': round(total_pnl, 4),
             'total_fees': total_fees,
-            'net_pnl': round(total_net, 4),
+            'pnl_after_fees': pnl_after_fees,
             'total_contracts': total_contracts,
             'wins': wins,
             'losses': losses,
+            'expired': expired,
+            'savings': savings,
             'open_count': len(open_positions),
             'mode': mode,
         })
     except Exception as e:
         logger.error(f"API status error: {e}")
-        return jsonify({'portfolio': 0, 'cash': 0, 'positions_value': 0, 'net_pnl': 0, 'total_fees': 0, 'pnl_after_fees': 0, 'total_contracts': 0, 'wins': 0, 'losses': 0, 'open_count': 0, 'mode': 'PAPER'})
+        return jsonify({'portfolio': 0, 'cash': 0, 'positions_value': 0, 'net_pnl': 0, 'total_fees': 0, 'pnl_after_fees': 0, 'total_contracts': 0, 'wins': 0, 'losses': 0, 'expired': 0, 'savings': 0, 'open_count': 0, 'mode': 'PAPER'})
 
 
 @app.route('/api/open')
@@ -607,28 +468,22 @@ def api_open():
             price = sf(t.get('price'))
             current = sf(t.get('current_bid'))
             count = int(t.get('count') or 1)
-            b_fee = sf(t.get('buy_fee')) or kalshi_fee(price, count)
-            real_cost = round(price * count + b_fee, 4)
             if price > 0 and current > 0:
-                s_fee = kalshi_fee(current, count)
-                real_profit = round((current - price) * count - b_fee - s_fee, 4)
-                gain_pct = round((real_profit / real_cost) * 100, 1) if real_cost > 0 else 0
+                unrealized = round((current - price) * count, 4)
+                gain_pct = round(((current - price) / price) * 100, 1)
             else:
-                s_fee = 0
-                real_profit = 0
+                unrealized = 0
                 gain_pct = 0
             positions.append({
                 'ticker': t.get('ticker', ''),
                 'side': t.get('side', ''),
-                'strategy': (t.get('strategy') or '').upper(),
+                'strategy': 'FAV',
                 'count': count,
                 'entry': price,
-                'entry_total': real_cost,
+                'entry_total': round(price * count, 2),
                 'current_bid': current,
                 'bid_total': round(current * count, 2),
-                'buy_fee': round(b_fee, 4),
-                'sell_fee': round(s_fee, 4),
-                'unrealized': real_profit,
+                'unrealized': unrealized,
                 'gain_pct': gain_pct,
             })
         positions.sort(key=lambda x: x['gain_pct'], reverse=True)
@@ -646,24 +501,16 @@ def api_trades():
         for t in (result.data or []):
             entry = sf(t.get('price'))
             exit_price = sf(t.get('current_bid'))
-            count = t.get('count', 1)
-            gross = sf(t.get('gross_pnl'))
-            b_fee = sf(t.get('buy_fee'))
-            s_fee = sf(t.get('sell_fee'))
-            net = sf(t.get('net_pnl')) or sf(t.get('pnl'))
-            net_pct = round(net_gain_pct(entry, exit_price, count) * 100, 1) if entry > 0 else 0
+            gain_pct = round(((exit_price - entry) / entry) * 100, 1) if entry > 0 else 0
             trades.append({
                 'created_at': t.get('created_at', ''),
                 'ticker': t.get('ticker', ''),
                 'side': t.get('side', ''),
-                'count': count,
+                'count': t.get('count', 1),
                 'entry': entry,
                 'exit': exit_price,
-                'gross_pnl': gross,
-                'buy_fee': b_fee,
-                'sell_fee': s_fee,
-                'net_pnl': net,
-                'gain_pct': net_pct,
+                'pnl': sf(t.get('pnl')),
+                'gain_pct': gain_pct,
             })
         return jsonify(trades)
     except Exception as e:
@@ -691,15 +538,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap');
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#0a0a0a;color:#e0e0e0;font-family:'JetBrains Mono','SF Mono','Fira Code',monospace;padding:16px 20px;font-size:13px}
-
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
 .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;animation:pulse 2s infinite}
-.dot-paper{background:#ffaa00}
-.dot-live{background:#00d673}
-
+.dot-paper{background:#ffaa00}.dot-live{background:#00d673}
 .top-bar{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:14px 20px;margin-bottom:14px;display:flex;justify-content:center;align-items:center;gap:32px;flex-wrap:wrap;font-size:14px;font-weight:700}
-.top-bar .sep{color:#333}
-
 .panel{background:#111;border:1px solid #1a1a1a;border-radius:6px;overflow:hidden;margin-bottom:14px}
 .panel-header{padding:10px 14px;border-bottom:1px solid #1a1a1a;display:flex;justify-content:space-between;align-items:center}
 .panel-header h2{color:#ffaa00;font-size:12px;text-transform:uppercase;letter-spacing:1px}
@@ -712,7 +554,6 @@ tr.row-green{background:rgba(0,214,115,.04)}
 tr.row-red{background:rgba(255,68,68,.04)}
 tr:hover{background:#1a1a1a !important}
 .green{color:#00d673}.red{color:#ff4444}.gray{color:#555}
-
 .status-bar{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:10px 16px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:10px;color:#555}
 .footer{text-align:center;color:#333;font-size:9px;margin-top:8px}
 .loading{color:#555;text-align:center;padding:20px}
@@ -725,29 +566,29 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; majority vote &mdash; take profit $0.90+ bid &mdash; losers ride to settlement
-  &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
+  <span id="mode-label">PAPER MODE</span> &mdash; buy $0.03-$0.12 &mdash; sell +30% &mdash; ride losers to settlement
+  &mdash; NEXT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
 <div class="top-bar" style="flex-direction:column;gap:6px">
   <div style="font-size:16px">PORTFOLIO: <span id="tb-portfolio">...</span></div>
   <div style="font-size:12px;color:#888">Positions: <span id="tb-positions">...</span> &nbsp;&nbsp; Cash: <span id="tb-cash">...</span></div>
-  <div style="font-size:12px">Gross: <span id="tb-gross">...</span> &nbsp;&nbsp; Buy Fees: <span id="tb-bfees" class="red">...</span> &nbsp;&nbsp; Sell Fees: <span id="tb-sfees" class="red">...</span> &nbsp;&nbsp; Net: <span id="tb-net">...</span></div>
-  <div style="font-size:12px">RECORD: <span id="tb-record">...</span></div>
+  <div style="font-size:12px">P&amp;L: <span id="tb-pnl">...</span> &nbsp;&nbsp; Fees: <span id="tb-fees" class="red">...</span> &nbsp;&nbsp; Net: <span id="tb-net">...</span></div>
+  <div style="font-size:12px">RECORD: <span id="tb-record">...</span> &nbsp;&nbsp; SAVINGS: <span id="tb-savings" class="green">...</span></div>
 </div>
 
 <div class="panel">
   <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Buy Fee</th><th>Bid</th><th>Value</th><th>Sell Fee</th><th>Net P&amp;L</th><th>Net%</th>
-  </tr></thead><tbody id="open-body"><tr><td colspan="12" class="loading">Loading...</td></tr></tbody></table></div>
+    <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Bid</th><th>Value</th><th>P&amp;L</th><th>Gain%</th>
+  </tr></thead><tbody id="open-body"><tr><td colspan="9" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
   <div class="panel-header"><h2>Recent Trades</h2><div class="count" id="trades-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Gross</th><th>Buy Fee</th><th>Sell Fee</th><th>Net P&amp;L</th><th>Net%</th>
-  </tr></thead><tbody id="trades-body"><tr><td colspan="11" class="loading">Loading...</td></tr></tbody></table></div>
+    <th>Time</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Gain%</th>
+  </tr></thead><tbody id="trades-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
@@ -758,60 +599,44 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="status-bar">
-  <span>All 15M crypto | 2% momentum gate | Sell +30% | Stop -30% | Trail -15%</span>
-  <span>20min max | 3 contracts | 20% reserve | $100 balance</span>
+  <span>Buy $0.03-$0.12 | Sell +30% | No stop loss</span>
+  <span>1 contract | 50% reserve | 25% savings</span>
   <span>Last: <span id="last-update">&mdash;</span></span>
 </div>
-<div class="footer">Simple Scalper &mdash; auto-refresh 15s</div>
+<div class="footer">Kalshi Scalper v7 &mdash; auto-refresh 15s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
 function cls(v){return v>0?'green':v<0?'red':'gray'}
 function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML}
-
-async function fetchJSON(url){
-  try{var r=await fetch(url);return await r.json()}
-  catch(e){console.error(url,e);return null}
-}
-
+async function fetchJSON(url){try{var r=await fetch(url);return await r.json()}catch(e){return null}}
 function fmtVol(v){if(v>=1e6)return(v/1e6).toFixed(1)+'M';if(v>=1e3)return(v/1e3).toFixed(1)+'K';return v.toString()}
-
 function timeAgo(iso){
   if(!iso)return '--';
   var diff=Math.floor((Date.now()-new Date(iso).getTime())/1000);
-  if(diff<60)return diff+'s ago';
-  if(diff<3600)return Math.floor(diff/60)+'m ago';
-  if(diff<86400)return Math.floor(diff/3600)+'h ago';
-  return Math.floor(diff/86400)+'d ago';
+  if(diff<60)return diff+'s ago';if(diff<3600)return Math.floor(diff/60)+'m ago';
+  if(diff<86400)return Math.floor(diff/3600)+'h ago';return Math.floor(diff/86400)+'d ago';
 }
 
 async function refresh(){
   var [status,open,trades,hot]=await Promise.all([
-    fetchJSON('/api/status'),
-    fetchJSON('/api/open'),
-    fetchJSON('/api/trades'),
-    fetchJSON('/api/hot')
+    fetchJSON('/api/status'),fetchJSON('/api/open'),fetchJSON('/api/trades'),fetchJSON('/api/hot')
   ]);
 
   if(status){
     $('tb-portfolio').textContent='$'+(status.portfolio||0).toFixed(2);
     $('tb-positions').textContent='$'+(status.positions_value||0).toFixed(2);
     $('tb-cash').textContent='$'+(status.cash||0).toFixed(2);
-
-    var gross=status.gross_pnl||0;
-    $('tb-gross').innerHTML='<span class="'+cls(gross)+'">'+(gross>=0?'+$':'-$')+Math.abs(gross).toFixed(4)+'</span>';
-    var bf=status.buy_fees||0;
-    $('tb-bfees').textContent='-$'+bf.toFixed(4)+' ('+(status.total_contracts||0)+'c)';
-    var sf2=status.sell_fees||0;
-    $('tb-sfees').textContent='-$'+sf2.toFixed(4);
-    var net=status.net_pnl||0;
-    $('tb-net').innerHTML='<span class="'+cls(net)+'" style="font-weight:700">'+(net>=0?'+$':'-$')+Math.abs(net).toFixed(4)+'</span>';
-    $('tb-record').innerHTML='<span class="green">'+(status.wins||0)+'W</span> <span class="gray">/</span> <span class="red">'+(status.losses||0)+'L</span>';
-
+    var pnl=status.net_pnl||0;
+    $('tb-pnl').innerHTML='<span class="'+cls(pnl)+'">'+(pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(4)+'</span>';
+    $('tb-fees').textContent='-$'+(status.total_fees||0).toFixed(4)+' ('+(status.total_contracts||0)+'c)';
+    var net=status.pnl_after_fees||0;
+    $('tb-net').innerHTML='<span class="'+cls(net)+'">'+(net>=0?'+$':'-$')+Math.abs(net).toFixed(4)+'</span>';
+    $('tb-record').innerHTML='<span class="green">'+(status.wins||0)+'W</span> / <span class="red">'+(status.losses||0)+'L</span> / <span style="color:#ffaa00">'+(status.expired||0)+'E</span>';
+    $('tb-savings').textContent='$'+(status.savings||0).toFixed(4);
     var mode=status.mode||'PAPER';
-    var isLive=mode==='LIVE';
-    $('mode-label').textContent=isLive?'LIVE TRADING':'PAPER MODE';
-    $('mode-dot').className='live-dot '+(isLive?'dot-live':'dot-paper');
+    $('mode-label').textContent=mode==='LIVE'?'LIVE TRADING':'PAPER MODE';
+    $('mode-dot').className='live-dot '+(mode==='LIVE'?'dot-live':'dot-paper');
   }
 
   if(open){
@@ -822,32 +647,26 @@ async function refresh(){
       var gc=cls(p.gain_pct);
       var bidText=p.current_bid<=0?'EXPIRED':'$'+p.current_bid.toFixed(2);
       var valText=p.current_bid<=0?'$0.00':'$'+(p.bid_total||0).toFixed(2);
-      var strat=p.strategy||'';
       h+='<tr class="'+rc+'">';
-      h+='<td style="color:#00d673;font-weight:700;font-size:9px">'+strat+'</td>';
       h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
       h+='<td>'+esc(p.side)+'</td>';
       h+='<td>'+p.count+'</td>';
       h+='<td>$'+p.entry.toFixed(2)+'</td>';
       h+='<td>$'+(p.entry_total||0).toFixed(2)+'</td>';
-      h+='<td class="red">-$'+(p.buy_fee||0).toFixed(4)+'</td>';
       h+='<td>'+bidText+'</td>';
       h+='<td class="'+gc+'">'+valText+'</td>';
-      h+='<td class="red">-$'+(p.sell_fee||0).toFixed(4)+'</td>';
-      h+='<td class="'+gc+'" style="font-weight:700">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(2)+'</td>';
-      h+='<td class="'+gc+'" style="font-weight:700">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
+      h+='<td class="'+gc+'">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(4)+'</td>';
+      h+='<td class="'+gc+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
       h+='</tr>';
     });
-    $('open-body').innerHTML=h||'<tr><td colspan="12" class="gray" style="text-align:center">No open positions</td></tr>';
+    $('open-body').innerHTML=h||'<tr><td colspan="9" class="gray" style="text-align:center">No open positions</td></tr>';
   }
 
   if(trades){
     $('trades-count').textContent=trades.length+' trades';
     var h='';
     trades.forEach(function(t){
-      var net=t.net_pnl||0;
-      var pc=cls(net);
-      var rc=net>0?'row-green':net<0?'row-red':'';
+      var pc=cls(t.pnl);var rc=t.pnl>0?'row-green':t.pnl<0?'row-red':'';
       h+='<tr class="'+rc+'">';
       h+='<td>'+timeAgo(t.created_at)+'</td>';
       h+='<td style="font-size:10px">'+esc(t.ticker||'')+'</td>';
@@ -855,54 +674,37 @@ async function refresh(){
       h+='<td>'+(t.count||1)+'</td>';
       h+='<td>$'+(t.entry||0).toFixed(2)+'</td>';
       h+='<td>$'+(t.exit||0).toFixed(2)+'</td>';
-      h+='<td class="'+cls(t.gross_pnl||0)+'">'+(t.gross_pnl>=0?'+':'')+( t.gross_pnl||0).toFixed(4)+'</td>';
-      h+='<td class="red">-'+(t.buy_fee||0).toFixed(4)+'</td>';
-      h+='<td class="red">-'+(t.sell_fee||0).toFixed(4)+'</td>';
-      h+='<td class="'+pc+'" style="font-weight:700">'+(net>=0?'+':'')+net.toFixed(4)+'</td>';
-      var gc2=cls(t.gain_pct||0);
-      h+='<td class="'+gc2+'" style="font-weight:700">'+(t.gain_pct>=0?'+':'')+(t.gain_pct||0).toFixed(1)+'%</td>';
+      h+='<td class="'+pc+'">'+(t.pnl>=0?'+':'')+t.pnl.toFixed(4)+'</td>';
+      h+='<td class="'+cls(t.gain_pct||0)+'">'+(t.gain_pct>=0?'+':'')+(t.gain_pct||0).toFixed(0)+'%</td>';
       h+='</tr>';
     });
-    $('trades-body').innerHTML=h||'<tr><td colspan="11" class="gray" style="text-align:center">No trades yet</td></tr>';
+    $('trades-body').innerHTML=h||'<tr><td colspan="8" class="gray" style="text-align:center">No trades yet</td></tr>';
   }
 
   if(hot){
     $('hot-count').textContent='Top '+hot.length+' by volume';
     var h='';
     hot.forEach(function(m){
-      h+='<tr>';
-      h+='<td style="font-size:10px">'+esc(m.ticker)+'</td>';
+      h+='<tr><td style="font-size:10px">'+esc(m.ticker)+'</td>';
       h+='<td>$'+(m.yes_ask||0).toFixed(2)+'</td>';
       h+='<td>$'+(m.no_ask||0).toFixed(2)+'</td>';
-      h+='<td style="color:#ffaa00;font-weight:700">'+fmtVol(m.volume)+'</td>';
-      h+='</tr>';
+      h+='<td style="color:#ffaa00;font-weight:700">'+fmtVol(m.volume)+'</td></tr>';
     });
     $('hot-body').innerHTML=h||'<tr><td colspan="4" class="gray" style="text-align:center">No data yet</td></tr>';
   }
-
   $('last-update').textContent=new Date().toLocaleTimeString();
 }
 
 refresh();
 setInterval(refresh,15000);
 
-function getNextSettlement(){
-  var now=new Date();
-  var mins=now.getMinutes();
-  var nextQuarter=Math.ceil((mins+1)/15)*15;
-  var next=new Date(now.getTime());
-  if(nextQuarter>=60){
-    next.setHours(now.getHours()+1,0,0,0);
-  } else {
-    next.setMinutes(nextQuarter,0,0);
-  }
-  return next;
-}
 function updateCountdown(){
-  var secs=Math.max(0,Math.floor((getNextSettlement()-new Date())/1000));
-  if(secs>900)secs=secs%900;
-  var m=Math.floor(secs/60);
-  var s=secs%60;
+  var now=new Date(),mins=now.getMinutes();
+  var nq=Math.ceil((mins+1)/15)*15;
+  var next=new Date(now);
+  if(nq>=60){next.setHours(now.getHours()+1,0,0,0)}else{next.setMinutes(nq,0,0)}
+  var secs=Math.max(0,Math.floor((next-now)/1000));
+  var m=Math.floor(secs/60),s=secs%60;
   $('countdown').textContent=m+':'+s.toString().padStart(2,'0');
 }
 updateCountdown();
@@ -916,7 +718,7 @@ setInterval(updateCountdown,1000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Bot starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, take profit bid>=${TAKE_PROFIT_BID}, {CONTRACTS} contracts, {CASH_RESERVE*100:.0f}% reserve, majority vote")
+    logger.info(f"Bot starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, sell +{SELL_THRESHOLD*100:.0f}%, {CONTRACTS} contracts, {CASH_RESERVE*100:.0f}% reserve, {SAVINGS_RATE*100:.0f}% savings")
     logger.info(f"Series: {CRYPTO_SERIES}")
 
     while True:
