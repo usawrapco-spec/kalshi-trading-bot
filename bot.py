@@ -31,7 +31,7 @@ TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
 STARTING_BALANCE = 1000.00
-CASH_RESERVE = 0.20         # 20% cash reserve
+CASH_RESERVE = 0.00         # no reserve — deploy full balance
 MAX_BUYS_PER_CYCLE = 999    # unlimited buys per cycle
 CONTRACTS = 5               # 5 contracts per trade
 
@@ -319,8 +319,8 @@ def check_sells():
         should_sell = False
         reason = ''
 
-        # Take profit when bid hits $0.90+ — contract is 90% decided, lock it in
-        if current_bid >= TAKE_PROFIT_BID and real_profit > 0:
+        # Take profit at +50% gain
+        if raw_gain >= 0.50 and real_profit > 0:
             should_sell = True
             reason = f"TAKE PROFIT bid=${current_bid:.2f} (>=90c) profit=${real_profit:.4f}"
 
