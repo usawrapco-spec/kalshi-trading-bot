@@ -25,7 +25,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.40
+BUY_MAX = 0.99
 SELL_THRESHOLD = None        # No profit take — ride everything to settlement
 MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
@@ -675,7 +675,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; buy $0.01-$0.40 &mdash; no profit take &mdash; ride everything to settlement
+  <span id="mode-label">PAPER MODE</span> &mdash; buy $0.01-$0.99 &mdash; no profit take &mdash; ride everything to settlement
   &mdash; NEXT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
