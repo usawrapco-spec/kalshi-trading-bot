@@ -312,7 +312,6 @@ def check_sells():
             except:
                 pass
 
-        # === GUT FEELING SCORE ===
         raw_gain = (current_bid - entry_price) / entry_price if entry_price > 0 else 0
 
         logger.info(f"  POS: {ticker} {side} entry=${entry_price:.2f} bid=${current_bid:.2f} gain={raw_gain*100:+.0f}% profit=${real_profit:.4f} x{count}")
@@ -473,14 +472,17 @@ def buy_candidates(markets):
         # Dedup: check if we already own this ticker
         ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
         if ticker_positions:
-            # Only double down if position is GREEN using LIVE bid
+            # Only add if position is GREEN using LIVE bid
             pos = ticker_positions[0]
             pos_entry = sf(pos.get('price'))
             pos_side = pos.get('side')
             live_bid = yes_bid if pos_side == 'yes' else no_bid
-            if live_bid <= pos_entry or len(ticker_positions) > MAX_ADDS:
-                continue  # red or maxed out, skip
-            logger.info(f"  DOUBLE DOWN: {ticker} {pos_side} entry=${pos_entry:.2f} live_bid=${live_bid:.2f} GREEN, adding")
+            if live_bid <= pos_entry:
+                continue  # red, skip
+            # GREEN — scalp it with 20 contracts
+            logger.info(f"  SCALP: {ticker} {pos_side} entry=${pos_entry:.2f} live_bid=${live_bid:.2f} GREEN, buying 20 to flip")
+            candidates.append({'ticker': ticker, 'side': pos_side, 'price': price, 'bid': bid, 'strategy': 'scalp'})
+            continue
 
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'strategy': strategy})
 
@@ -493,7 +495,7 @@ def buy_candidates(markets):
         if bought >= MAX_BUYS_PER_CYCLE:
             break
 
-        contracts = CONTRACTS
+        contracts = 20 if c.get('strategy') == 'scalp' else CONTRACTS
         cost = c['price'] * contracts
         if cost > deployable:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f}")
@@ -642,16 +644,10 @@ def api_open():
                 s_fee = 0
                 real_profit = 0
                 gain_pct = 0
-            # Calculate gut score for display
-            pos_score = 0
-            if real_profit > 0:
-                pos_score += 1
-                if current >= 0.70: pos_score += 1
-                if current >= 0.90: pos_score += 2
             positions.append({
                 'ticker': t.get('ticker', ''),
                 'side': t.get('side', ''),
-                'strategy': (t.get('strategy') or 'fav').upper(),
+                'strategy': (t.get('strategy') or '').upper(),
                 'count': count,
                 'entry': price,
                 'entry_total': real_cost,
@@ -661,7 +657,6 @@ def api_open():
                 'sell_fee': round(s_fee, 4),
                 'unrealized': real_profit,
                 'gain_pct': gain_pct,
-                'score': pos_score,
             })
         positions.sort(key=lambda x: x['gain_pct'], reverse=True)
         return jsonify(positions)
@@ -757,7 +752,7 @@ tr:hover{background:#1a1a1a !important}
 
 <div style="text-align:center;margin-bottom:10px;color:#555;font-size:11px">
   <span class="live-dot dot-paper" id="mode-dot"></span>
-  <span id="mode-label">PAPER MODE</span> &mdash; all 15M crypto &mdash; gut score 4+ = sell / losers ride to settlement
+  <span id="mode-label">PAPER MODE</span> &mdash; majority vote &mdash; take profit $0.90+ bid &mdash; losers ride to settlement
   &mdash; NEXT SETTLEMENT: <span id="countdown" style="color:#ffaa00;font-weight:700">--:--</span>
 </div>
 
@@ -771,7 +766,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="panel">
   <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Score</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Buy Fee</th><th>Bid</th><th>Value</th><th>Sell Fee</th><th>Net P&amp;L</th><th>Net%</th>
+    <th>Type</th><th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Buy Fee</th><th>Bid</th><th>Value</th><th>Sell Fee</th><th>Net P&amp;L</th><th>Net%</th>
   </tr></thead><tbody id="open-body"><tr><td colspan="12" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
@@ -854,10 +849,9 @@ async function refresh(){
       var gc=cls(p.gain_pct);
       var bidText=p.current_bid<=0?'EXPIRED':'$'+p.current_bid.toFixed(2);
       var valText=p.current_bid<=0?'$0.00':'$'+(p.bid_total||0).toFixed(2);
-      var pscore=p.score||0;
-      var scoreColor=pscore>=4?'#00d673':pscore>=2?'#ffaa00':'#555';
+      var strat=p.strategy||'';
       h+='<tr class="'+rc+'">';
-      h+='<td style="color:'+scoreColor+';font-weight:700;font-size:14px;text-align:center">'+pscore+'</td>';
+      h+='<td style="color:#00d673;font-weight:700;font-size:9px">'+strat+'</td>';
       h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
       h+='<td>'+esc(p.side)+'</td>';
       h+='<td>'+p.count+'</td>';
