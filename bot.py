@@ -36,8 +36,15 @@ CASH_RESERVE = 0.50
 SAVINGS_RATE = 0.25
 MAX_BUYS_PER_CYCLE = 5
 CONTRACTS = 1
+MAX_POSITIONS_PER_SERIES = 3  # max open positions per series (prevents overloading hourly)
 
-CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
+CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M', 'KXBTC1H']
+
+# Hourly contracts need longer expiry window
+SERIES_MAX_EXPIRY = {
+    'KXBTC1H': 60,
+}
+DEFAULT_MAX_EXPIRY = MAX_MINS_TO_EXPIRY  # 20 min for 15M contracts
 
 # === DATABASE ===
 
@@ -346,16 +353,36 @@ def buy_candidates(markets):
     candidates = []
     now = datetime.now(timezone.utc)
 
+    # Count open positions per series for caps
+    series_position_counts = {}
+    for t in open_positions:
+        for s in CRYPTO_SERIES:
+            if t.get('ticker', '').startswith(s.replace('15M', '').replace('1H', '')):
+                series_position_counts[s] = series_position_counts.get(s, 0) + 1
+                break
+
     for market in markets:
         ticker = market.get('ticker', '')
 
-        # Only buy contracts settling within 20 minutes
+        # Determine which series this market belongs to
+        market_series = None
+        for s in CRYPTO_SERIES:
+            if ticker.startswith(s):
+                market_series = s
+                break
+
+        # Per-series position cap
+        if market_series and series_position_counts.get(market_series, 0) >= MAX_POSITIONS_PER_SERIES:
+            continue
+
+        # Expiry filter — hourly gets longer window
+        max_expiry = SERIES_MAX_EXPIRY.get(market_series, DEFAULT_MAX_EXPIRY) if market_series else DEFAULT_MAX_EXPIRY
         close_time = market.get('close_time') or market.get('expected_expiration_time')
         if close_time:
             try:
                 close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
                 mins_left = (close_dt - now).total_seconds() / 60
-                if mins_left > MAX_MINS_TO_EXPIRY or mins_left < 1:
+                if mins_left > max_expiry or mins_left < 1:
                     continue
             except:
                 continue
@@ -369,7 +396,7 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # Dedup: check existing positions
+        # Dedup: check existing positions on same ticker
         ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
         if len(ticker_positions) > MAX_ADDS:
             continue
