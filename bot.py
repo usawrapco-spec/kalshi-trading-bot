@@ -27,7 +27,6 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 BUY_MIN = 0.01
 BUY_MAX = 0.99
 SELL_THRESHOLD = None        # No profit take — ride everything to settlement
-MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
@@ -37,6 +36,9 @@ SAVINGS_RATE = 0.25
 MAX_BUYS_PER_CYCLE = 5
 CONTRACTS = 10
 MAX_POSITIONS_PER_SERIES = 3  # max open positions per series (prevents overloading hourly)
+MAX_ADDS = 5                  # can add to a winning position up to 5 times
+ADD_CONTRACTS = 20            # double down with more contracts on momentum plays
+ADD_MAX_AGE_MINS = 5          # only double down if position is < 5 min old
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M', 'KXBTC1H']
 
@@ -398,15 +400,34 @@ def buy_candidates(markets):
 
         # Dedup: check existing positions on same ticker
         ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
+        is_addon = False
         if len(ticker_positions) > MAX_ADDS:
             continue
         if ticker_positions:
             pos = ticker_positions[0]
             pos_entry = sf(pos.get('price'))
             pos_bid = sf(pos.get('current_bid'))
+            # Must be green
             if pos_entry <= 0 or pos_bid <= pos_entry:
                 continue
-            logger.info(f"  DOUBLE DOWN: {ticker} is up, adding")
+            # Must be bought within last 5 minutes
+            created = pos.get('created_at')
+            if created:
+                try:
+                    if isinstance(created, str):
+                        created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                    else:
+                        created_dt = created.replace(tzinfo=timezone.utc) if created.tzinfo is None else created
+                    age_mins = (now - created_dt).total_seconds() / 60
+                    if age_mins > ADD_MAX_AGE_MINS:
+                        continue
+                except:
+                    continue
+            else:
+                continue
+            gain_pct = ((pos_bid - pos_entry) / pos_entry) * 100
+            logger.info(f"  MOMENTUM ADD: {ticker} +{gain_pct:.0f}% in {age_mins:.1f}min, stacking")
+            is_addon = True
 
         # Buy cheapest side in range
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
@@ -418,7 +439,7 @@ def buy_candidates(markets):
         else:
             continue
 
-        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
+        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'is_addon': is_addon})
 
     candidates.sort(key=lambda x: x['price'])
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
@@ -429,12 +450,13 @@ def buy_candidates(markets):
         if bought >= MAX_BUYS_PER_CYCLE:
             break
 
-        cost = c['price'] * CONTRACTS
+        buy_count = ADD_CONTRACTS if c.get('is_addon') else CONTRACTS
+        cost = c['price'] * buy_count
         if cost > deployable:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f}")
             continue
 
-        result = place_order(c['ticker'], c['side'], 'buy', c['price'], CONTRACTS)
+        result = place_order(c['ticker'], c['side'], 'buy', c['price'], buy_count)
         if not result:
             continue
 
