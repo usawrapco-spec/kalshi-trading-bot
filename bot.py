@@ -26,14 +26,14 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 BUY_MIN = 0.01              # no minimum
 BUY_MAX = 0.97              # no cap — let majority vote decide
 TAKE_PROFIT_BID = 0.90      # sell when bid hits $0.90+ (contract 90% decided)
-MAX_ADDS = 999              # unlimited adds on green positions
+MAX_ADDS = 0                # 1 buy per ticker, no adds
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
-STARTING_BALANCE = 1000.00
+STARTING_BALANCE = 20.00
 CASH_RESERVE = 0.50         # never risk more than half
-MAX_BUYS_PER_CYCLE = 999    # unlimited buys per cycle
-CONTRACTS = 5               # 5 contracts per trade
+MAX_BUYS_PER_CYCLE = 5      # one per ticker max
+CONTRACTS = 2               # 2 contracts per trade
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
@@ -452,19 +452,9 @@ def buy_candidates(markets):
         else:
             continue
 
-        # Dedup: check if we already own this ticker
+        # Skip if we already own this ticker
         ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
         if ticker_positions:
-            # Only add if position is GREEN using LIVE bid
-            pos = ticker_positions[0]
-            pos_entry = sf(pos.get('price'))
-            pos_side = pos.get('side')
-            live_bid = yes_bid if pos_side == 'yes' else no_bid
-            if live_bid <= pos_entry:
-                continue  # red, skip
-            # GREEN — scalp it with 20 contracts
-            logger.info(f"  SCALP: {ticker} {pos_side} entry=${pos_entry:.2f} live_bid=${live_bid:.2f} GREEN, buying 20 to flip")
-            candidates.append({'ticker': ticker, 'side': pos_side, 'price': price, 'bid': bid, 'strategy': 'scalp'})
             continue
 
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'strategy': strategy})
@@ -478,7 +468,7 @@ def buy_candidates(markets):
         if bought >= MAX_BUYS_PER_CYCLE:
             break
 
-        contracts = 20 if c.get('strategy') == 'scalp' else CONTRACTS
+        contracts = CONTRACTS
         cost = c['price'] * contracts
         if cost > deployable:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f}")
