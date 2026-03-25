@@ -31,7 +31,7 @@ TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 10
 STARTING_BALANCE = 1000.00
-CASH_RESERVE = 0.00         # no reserve — deploy full balance
+CASH_RESERVE = 0.50         # never risk more than half
 MAX_BUYS_PER_CYCLE = 999    # unlimited buys per cycle
 CONTRACTS = 5               # 5 contracts per trade
 
