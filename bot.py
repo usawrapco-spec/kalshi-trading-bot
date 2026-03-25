@@ -25,7 +25,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.99
+BUY_MAX = 0.40
 SELL_THRESHOLD = 0.50       # +50%: sell ALL contracts
 MAX_ADDS = 2                # can add to a winning position twice
 TAKER_FEE_RATE = 0.07
