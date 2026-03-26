@@ -419,15 +419,16 @@ def get_balance():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT price, count FROM trades WHERE action = 'buy'")
-            buys = cur.fetchall()
-            buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in buys)
-            cur.execute("SELECT pnl FROM trades WHERE pnl IS NOT NULL")
-            pnl_data = cur.fetchall()
-            wins = sum(sf(t['pnl']) for t in pnl_data if sf(t['pnl']) > 0)
-            losses = sum(sf(t['pnl']) for t in pnl_data if sf(t['pnl']) <= 0)
-            deployable_pnl = wins * (1 - SAVINGS_RATE) + losses
-            return max(0, STARTING_BALANCE - buy_cost + deployable_pnl)
+            # Cost of positions still open (money tied up)
+            cur.execute("SELECT price, count FROM trades WHERE action = 'buy' AND pnl IS NULL")
+            open_buys = cur.fetchall()
+            open_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_buys)
+            # Total P&L from resolved trades (profit + cost recovery already happened)
+            cur.execute("SELECT pnl, price, count FROM trades WHERE action = 'buy' AND pnl IS NOT NULL")
+            resolved = cur.fetchall()
+            total_pnl = sum(sf(t['pnl']) for t in resolved)
+            # Cash = starting - money in open positions + net profit from resolved
+            return max(0, STARTING_BALANCE - open_cost + total_pnl)
     except Exception as e:
         logger.error(f"Balance calc failed: {e}")
         return 0.0
