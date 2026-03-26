@@ -70,11 +70,132 @@ def init_db():
                     count INTEGER,
                     current_bid NUMERIC,
                     pnl NUMERIC,
+                    series TEXT,
+                    mins_to_expiry NUMERIC,
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            # Add columns if they don't exist (for existing tables)
+            for col, typ in [('series', 'TEXT'), ('mins_to_expiry', 'NUMERIC')]:
+                try:
+                    cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
+                except:
+                    pass
     finally:
         conn.close()
+
+
+# === LEARNING ENGINE ===
+
+MIN_HISTORY = 20          # need at least 20 resolved trades before learning kicks in
+MIN_WIN_RATE = 0.40       # only buy combos with 40%+ historical win rate
+
+def get_win_rates():
+    """Analyze last 1000 resolved trades and return win rates by price bucket, side, and series."""
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT price, side, series, mins_to_expiry, pnl
+                FROM trades
+                WHERE action = 'buy' AND pnl IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT 1000
+            """)
+            trades = cur.fetchall()
+    finally:
+        conn.close()
+
+    if len(trades) < MIN_HISTORY:
+        return None  # not enough data yet, skip learning
+
+    stats = {
+        'price_bucket': {},   # '0.00-0.10' -> {wins, total}
+        'side': {},           # 'yes' -> {wins, total}
+        'series': {},         # 'KXBTC15M' -> {wins, total}
+        'time_bucket': {},    # 'early'/'mid'/'late' -> {wins, total}
+    }
+
+    for t in trades:
+        price = float(t['price'] or 0)
+        side = t['side'] or ''
+        series = t['series'] or ''
+        mins = float(t['mins_to_expiry'] or 10)
+        won = float(t['pnl'] or 0) > 0
+
+        # Price bucket
+        if price < 0.10:
+            pb = '0.00-0.10'
+        elif price < 0.20:
+            pb = '0.10-0.20'
+        elif price < 0.30:
+            pb = '0.20-0.30'
+        elif price < 0.50:
+            pb = '0.30-0.50'
+        else:
+            pb = '0.50-1.00'
+
+        # Time bucket
+        if mins > 10:
+            tb = 'early'
+        elif mins > 5:
+            tb = 'mid'
+        else:
+            tb = 'late'
+
+        for key, val in [('price_bucket', pb), ('side', side), ('series', series), ('time_bucket', tb)]:
+            if val not in stats[key]:
+                stats[key][val] = {'wins': 0, 'total': 0}
+            stats[key][val]['total'] += 1
+            if won:
+                stats[key][val]['wins'] += 1
+
+    # Convert to win rates
+    rates = {}
+    for category, buckets in stats.items():
+        rates[category] = {}
+        for bucket, data in buckets.items():
+            rates[category][bucket] = data['wins'] / data['total'] if data['total'] > 0 else 0.5
+
+    return rates
+
+
+def score_candidate(price, side, series, mins_left, win_rates):
+    """Score a candidate based on historical win rates. Returns average win rate across all factors."""
+    if win_rates is None:
+        return 1.0  # no history, allow everything
+
+    scores = []
+
+    # Price bucket score
+    if price < 0.10:
+        pb = '0.00-0.10'
+    elif price < 0.20:
+        pb = '0.10-0.20'
+    elif price < 0.30:
+        pb = '0.20-0.30'
+    elif price < 0.50:
+        pb = '0.30-0.50'
+    else:
+        pb = '0.50-1.00'
+    scores.append(win_rates.get('price_bucket', {}).get(pb, 0.5))
+
+    # Side score
+    scores.append(win_rates.get('side', {}).get(side, 0.5))
+
+    # Series score
+    scores.append(win_rates.get('series', {}).get(series, 0.5))
+
+    # Time bucket score
+    if mins_left > 10:
+        tb = 'early'
+    elif mins_left > 5:
+        tb = 'mid'
+    else:
+        tb = 'late'
+    scores.append(win_rates.get('time_bucket', {}).get(tb, 0.5))
+
+    return sum(scores) / len(scores)
 
 
 # === INIT ===
@@ -83,6 +204,7 @@ auth = KalshiAuth()
 app = Flask(__name__)
 
 current_hot_markets = []
+current_win_rates = None
 
 
 def sf(val):
@@ -410,9 +532,16 @@ def buy_candidates(markets):
         else:
             continue
 
-        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
+        # Score candidate using learning engine
+        win_score = score_candidate(price, side, market_series or '', mins_left, current_win_rates)
+        if current_win_rates and win_score < MIN_WIN_RATE:
+            logger.info(f"  SKIP: {ticker} {side} score={win_score:.2f} below {MIN_WIN_RATE}")
+            continue
 
-    candidates.sort(key=lambda x: x['price'])
+        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'series': market_series or '', 'mins_left': mins_left, 'score': win_score})
+
+    # Sort by score (best first), then by price (cheapest)
+    candidates.sort(key=lambda x: (-x['score'], x['price']))
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
 
@@ -434,13 +563,13 @@ def buy_candidates(markets):
         if filled <= 0:
             continue
 
-        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f}")
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f} score={c.get('score',0):.2f}")
         conn = get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO trades (ticker, side, action, price, count, current_bid) VALUES (%s, %s, %s, %s, %s, %s)",
-                    (c['ticker'], c['side'], 'buy', float(c['price']), filled, float(c['bid']))
+                    "INSERT INTO trades (ticker, side, action, price, count, current_bid, series, mins_to_expiry) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (c['ticker'], c['side'], 'buy', float(c['price']), filled, float(c['bid']), c.get('series', ''), round(c.get('mins_left', 0), 1))
                 )
             open_positions.append({'ticker': c['ticker'], 'price': c['price']})
             deployable -= cost
@@ -477,7 +606,21 @@ def update_hot_markets(markets):
 
 # === MAIN CYCLE ===
 
+_cycle_count = 0
+
 def run_cycle():
+    global current_win_rates, _cycle_count
+    _cycle_count += 1
+
+    # Refresh learning data every 10 cycles (~30 sec)
+    if _cycle_count % 10 == 1:
+        try:
+            current_win_rates = get_win_rates()
+            if current_win_rates:
+                logger.info(f"LEARNING: updated win rates from history -- sides={current_win_rates.get('side',{})}")
+        except Exception as e:
+            logger.error(f"Learning update failed: {e}")
+
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
     balance = get_balance()
     logger.info(f"=== CYCLE START [{mode}] === Balance: ${balance:.2f}")
