@@ -26,7 +26,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY ===
 BUY_MIN = 0.01
 BUY_MAX = 0.99
-SELL_THRESHOLD = None         # individual take profit disabled — using portfolio sell
+SELL_THRESHOLD = None         # no individual take profit
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 2
@@ -36,7 +36,7 @@ SAVINGS_RATE = 0.00
 MAX_BUYS_PER_CYCLE = 5
 CONTRACTS = 1
 MAX_POSITIONS = 25            # stop buying after this many open positions
-PORTFOLIO_TAKE_PROFIT = None  # disabled — ride everything to settlement
+PORTFOLIO_TAKE_PROFIT = 0.10  # sell all open positions when combined +10%
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M', 'KXBTC1H']
 
@@ -950,12 +950,43 @@ def run_cycle():
     balance = get_balance()
     logger.info(f"=== CYCLE START [{mode}] === Balance: ${balance:.2f}")
 
-    # Liquidation disabled — ride everything to settlement
-    # if _cycle_count % LIQUIDATE_CHECK_INTERVAL == 0:
-    #     try:
-    #         check_batch_liquidations()
-    #     except Exception as e:
-    #         logger.error(f"Batch liquidation check failed: {e}")
+    # Portfolio-level take profit: sell all if open positions are +10% combined
+    if PORTFOLIO_TAKE_PROFIT:
+        try:
+            open_pos = get_open_positions()
+            if len(open_pos) >= 5:  # need at least 5 positions
+                total_cost = sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_pos)
+                total_value = sum(sf(t.get('current_bid')) * (t.get('count') or 1) for t in open_pos)
+                if total_cost > 0:
+                    port_pct = (total_value - total_cost) / total_cost
+                    logger.info(f"PORTFOLIO CHECK: cost=${total_cost:.2f} value=${total_value:.2f} {port_pct*100:+.1f}%")
+                    if port_pct >= PORTFOLIO_TAKE_PROFIT:
+                        logger.info(f"PORTFOLIO TAKE PROFIT: +{port_pct*100:.1f}% — selling all {len(open_pos)} positions")
+                        sold = 0
+                        total_pnl = 0
+                        for trade in open_pos:
+                            entry = sf(trade['price'])
+                            bid = sf(trade.get('current_bid'))
+                            count = trade.get('count') or 1
+                            if bid <= 0:
+                                bid = 0.001
+                            buy_fee = kalshi_fee(entry, count)
+                            sell_fee = kalshi_fee(bid, count)
+                            pnl = round((bid - entry) * count - buy_fee - sell_fee, 4)
+                            place_order(trade['ticker'], trade['side'], 'sell', bid, count)
+                            conn = get_db()
+                            try:
+                                with conn.cursor() as cur:
+                                    cur.execute("UPDATE trades SET pnl = %s, current_bid = %s WHERE id = %s",
+                                                (float(pnl), float(bid), trade['id']))
+                            finally:
+                                conn.close()
+                            total_pnl += pnl
+                            sold += 1
+                        logger.info(f"SOLD ALL: {sold} positions, P&L=${total_pnl:.2f}")
+                        _save_round(sold, total_cost, total_value, total_pnl, round(port_pct*100, 1), total_pnl, 'portfolio_take_profit')
+        except Exception as e:
+            logger.error(f"Portfolio take profit check failed: {e}")
 
     check_sells()
     markets = fetch_all_markets()
@@ -1376,7 +1407,7 @@ tr:hover{background:var(--bg3) !important}
   <div class="header-right">
     <span>Buy $0.01 - $0.99</span>
     <span class="status-sep">|</span>
-    <span>Ride to Settlement</span>
+    <span>Portfolio +10% Take Profit</span>
     <span class="status-sep">|</span>
     <span>Next cycle: <span class="countdown-box" id="countdown">--:--</span></span>
   </div>
