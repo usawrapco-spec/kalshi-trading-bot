@@ -37,7 +37,7 @@ SAVINGS_RATE = 0.00
 MAX_BUYS_PER_CYCLE = 5
 CONTRACTS = 10
 MAX_POSITIONS = 25
-PORTFOLIO_TAKE_PROFIT = None  # disabled — using individual take profit
+PORTFOLIO_TAKE_PROFIT = 1.00  # sell all if open positions combined +100%
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M', 'KXBTC1H']
 
@@ -768,11 +768,16 @@ def update_hot_markets(markets):
     global current_hot_markets
     active = [m for m in markets if sf(m.get('yes_ask_dollars', '0')) < 0.99]
     by_vol = sorted(active, key=lambda m: _get_volume(m), reverse=True)[:10]
-    current_hot_markets = [
-        {'ticker': m.get('ticker', ''), 'yes_ask': sf(m.get('yes_ask_dollars', '0')),
-         'no_ask': sf(m.get('no_ask_dollars', '0')), 'volume': _get_volume(m)}
-        for m in by_vol
-    ]
+    current_hot_markets = []
+    for m in by_vol:
+        ya = sf(m.get('yes_ask_dollars', '0'))
+        na = sf(m.get('no_ask_dollars', '0'))
+        spread = round(ya + na, 3)
+        arb = spread < 1.0
+        current_hot_markets.append({
+            'ticker': m.get('ticker', ''), 'yes_ask': ya, 'no_ask': na,
+            'volume': _get_volume(m), 'spread': spread, 'arb': arb
+        })
 
 
 # === SMART LIQUIDATION ===
@@ -1648,7 +1653,7 @@ tr:hover{background:var(--bg3) !important}
 <div class="panel full-width">
   <div class="panel-header"><h2>Hot Markets</h2><div class="count" id="hot-count"></div></div>
   <div class="panel-body" style="max-height:240px"><table><thead><tr>
-    <th>Ticker</th><th>Yes Price</th><th>No Price</th><th>Volume</th>
+    <th>Ticker</th><th>Yes Ask</th><th>No Ask</th><th>Spread</th><th>Arb?</th><th>Volume</th>
   </tr></thead><tbody id="hot-body"><tr><td colspan="4" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
@@ -1657,7 +1662,7 @@ tr:hover{background:var(--bg3) !important}
 
 <!-- Status Bar -->
 <div class="status-bar">
-  <span id="sb-config">Buy $0.15-$0.40 | Sell +150% | 5-15min window | 1 per ticker</span>
+  <span id="sb-config">Buy $0.01-$0.40 | Sell +150% / Portfolio +100% | 10-15min window | 1 per ticker + dip buys</span>
   <span class="status-sep">|</span>
   <span id="sb-mode">Mode: <span class="gold" id="mode-label">PAPER</span></span>
   <span class="status-sep">|</span>
@@ -1774,14 +1779,18 @@ async function refresh(){
     $('hot-count').textContent='Top '+hot.length+' by volume';
     var h='';
     hot.forEach(function(m){
-      h+='<tr>';
+      var spread=m.spread||((m.yes_ask||0)+(m.no_ask||0));
+      var isArb=spread<1.0;
+      h+='<tr'+(isArb?' style="background:rgba(0,230,138,0.15)"':'')+'>';
       h+='<td style="font-size:10px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+esc(m.ticker)+'">'+esc(m.ticker)+'</td>';
       h+='<td class="green">$'+(m.yes_ask||0).toFixed(2)+'</td>';
       h+='<td class="red">$'+(m.no_ask||0).toFixed(2)+'</td>';
+      h+='<td style="color:'+(spread<1.0?'var(--green)':spread<1.02?'var(--gold)':'var(--text2)')+'">$'+spread.toFixed(3)+'</td>';
+      h+='<td>'+(isArb?'<span style="color:var(--green);font-weight:700">YES!</span>':'<span style="color:var(--text3)">no</span>')+'</td>';
       h+='<td style="color:var(--gold);font-weight:700">'+fmtVol(m.volume)+'</td>';
       h+='</tr>';
     });
-    $('hot-body').innerHTML=h||'<tr><td colspan="4" class="empty-state">No data yet</td></tr>';
+    $('hot-body').innerHTML=h||'<tr><td colspan="6" class="empty-state">No data yet</td></tr>';
   }
 
   if(batches){
