@@ -676,7 +676,7 @@ def smart_liquidate():
 
     # Peak must be meaningful — at least 5% of total cost
     peak_pct = (_peak_pnl / total_cost * 100) if total_cost > 0 else 0
-    if peak_pct < 5:
+    if peak_pct < 20:
         return False  # peak was too small, don't trigger anything yet
 
     # SELL if: we were profitable AND P&L dropped 30% from peak
