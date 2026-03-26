@@ -1554,19 +1554,19 @@ tr:hover{background:var(--bg3) !important}
   <div class="hero-value animate-num" id="tb-overall">...</div>
   <div class="hero-sub">
     <div class="hero-sub-item">
-      <div class="hero-sub-label">Completed Rounds</div>
-      <div class="hero-sub-value animate-num"><span id="tb-rounds-pnl">...</span> <span style="font-size:10px;color:var(--text3)">(<span id="tb-rounds-count">0</span> rounds)</span></div>
+      <div class="hero-sub-label">Cash</div>
+      <div class="hero-sub-value animate-num" id="tb-hero-cash">...</div>
     </div>
     <div class="hero-sub-item">
-      <div class="hero-sub-label">Current Round</div>
-      <div class="hero-sub-value animate-num" id="tb-thisround">...</div>
+      <div class="hero-sub-label">Open Positions</div>
+      <div class="hero-sub-value animate-num" id="tb-hero-positions">...</div>
     </div>
     <div class="hero-sub-item">
-      <div class="hero-sub-label">Total Fees Paid</div>
-      <div class="hero-sub-value animate-num red" id="tb-net-pnl">...</div>
+      <div class="hero-sub-label">Fees Paid</div>
+      <div class="hero-sub-value animate-num red" id="tb-hero-fees">...</div>
     </div>
     <div class="hero-sub-item">
-      <div class="hero-sub-label">If You Cash Out Now</div>
+      <div class="hero-sub-label">Cash Out Value</div>
       <div class="hero-sub-value animate-num" id="tb-cashout" style="font-size:14px;font-weight:700">...</div>
     </div>
   </div>
@@ -1707,12 +1707,9 @@ async function refresh(){
     var topGlow=ov>0?'linear-gradient(90deg,transparent,var(--green),transparent)':ov<0?'linear-gradient(90deg,transparent,var(--red),transparent)':'linear-gradient(90deg,transparent,var(--gold),transparent)';
     $('hero-card').querySelector('.hero-label').parentElement.style.setProperty('--top-glow',topGlow);
     document.querySelector('.hero-card::before');
-    var arp=status.all_rounds_pnl||0;
-    $('tb-rounds-pnl').innerHTML='<span class="'+cls(arp)+'">'+fmtPnl(arp)+'</span>';
-    $('tb-rounds-count').textContent=status.all_rounds_count||0;
-    var trp=status.round_pnl||0;
-    $('tb-thisround').innerHTML='<span class="'+cls(trp)+'">'+fmtPnl(trp)+'</span>';
-    $('tb-net-pnl').innerHTML='<span class="red">-$'+(status.total_fees||0).toFixed(2)+'</span>';
+    $('tb-hero-cash').innerHTML='<span style="color:var(--blue)">$'+(status.cash||0).toFixed(2)+'</span>';
+    $('tb-hero-positions').innerHTML='<span style="color:var(--gold)">$'+(status.positions_value||0).toFixed(2)+'</span>';
+    $('tb-hero-fees').innerHTML='-$'+(status.total_fees||0).toFixed(2);
     var cashout=(status.cash||0)+(status.positions_value||0);
     var cashoutProfit=status.overall_pnl||0;
     $('tb-cashout').innerHTML='$'+cashout.toFixed(2)+' <span style="font-size:11px" class="'+cls(cashoutProfit)+'">('+fmtPnl(cashoutProfit)+')</span>';
