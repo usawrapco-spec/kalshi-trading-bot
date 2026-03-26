@@ -81,6 +81,21 @@ def init_db():
                     cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
                 except:
                     pass
+            # Rounds tracking table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS rounds (
+                    id SERIAL PRIMARY KEY,
+                    started_at TIMESTAMPTZ DEFAULT NOW(),
+                    ended_at TIMESTAMPTZ,
+                    positions INTEGER,
+                    total_cost NUMERIC,
+                    total_value NUMERIC,
+                    pnl NUMERIC,
+                    pnl_pct NUMERIC,
+                    peak_pnl NUMERIC,
+                    exit_reason TEXT
+                )
+            """)
     finally:
         conn.close()
 
@@ -720,6 +735,12 @@ def liquidate_all():
 
     logger.info(f"LIQUIDATED: {sold} positions, total P&L=${total_pnl:.4f}")
 
+    # Save round data
+    total_cost = sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_positions)
+    total_value = total_cost + total_pnl
+    pnl_pct = round((total_pnl / total_cost * 100), 1) if total_cost > 0 else 0
+    _save_round(sold, total_cost, total_value, total_pnl, pnl_pct, _peak_pnl, 'liquidation')
+
     # Reset tracking for next window
     _pnl_history = []
     _peak_pnl = 0
@@ -727,6 +748,21 @@ def liquidate_all():
     _green_streak = 0
 
     return sold
+
+
+def _save_round(positions, cost, value, pnl, pnl_pct, peak, reason):
+    """Save completed round to database."""
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO rounds (ended_at, positions, total_cost, total_value, pnl, pnl_pct, peak_pnl, exit_reason) VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s)",
+                (positions, float(cost), float(value), float(pnl), float(pnl_pct), float(peak), reason)
+            )
+    except Exception as e:
+        logger.error(f"Save round failed: {e}")
+    finally:
+        conn.close()
 
 
 # === MAIN CYCLE ===
@@ -911,6 +947,34 @@ def api_hot():
     return jsonify(current_hot_markets)
 
 
+@app.route('/api/rounds')
+def api_rounds():
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM rounds ORDER BY ended_at DESC LIMIT 50")
+                rounds = cur.fetchall()
+        finally:
+            conn.close()
+        result = []
+        for r in rounds:
+            result.append({
+                'ended_at': str(r.get('ended_at', '')),
+                'positions': r.get('positions', 0),
+                'cost': float(r.get('total_cost') or 0),
+                'value': float(r.get('total_value') or 0),
+                'pnl': float(r.get('pnl') or 0),
+                'pnl_pct': float(r.get('pnl_pct') or 0),
+                'peak': float(r.get('peak_pnl') or 0),
+                'exit_reason': r.get('exit_reason', ''),
+            })
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"API rounds error: {e}")
+        return jsonify([])
+
+
 @app.route('/dashboard')
 def dashboard():
     return DASHBOARD_HTML
@@ -987,6 +1051,13 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="panel">
+  <div class="panel-header"><h2>Round History</h2><div class="count" id="rounds-count"></div></div>
+  <div class="panel-body"><table><thead><tr>
+    <th>Time</th><th>Positions</th><th>Cost</th><th>Value</th><th>P&amp;L</th><th>Return</th><th>Peak</th><th>Exit</th>
+  </tr></thead><tbody id="rounds-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
+</div>
+
+<div class="panel">
   <div class="panel-header"><h2>Hot Markets</h2><div class="count" id="hot-count"></div></div>
   <div class="panel-body"><table><thead><tr>
     <th>Ticker</th><th>Yes Price</th><th>No Price</th><th>Volume</th>
@@ -1014,8 +1085,8 @@ function timeAgo(iso){
 }
 
 async function refresh(){
-  var [status,open,trades,hot]=await Promise.all([
-    fetchJSON('/api/status'),fetchJSON('/api/open'),fetchJSON('/api/trades'),fetchJSON('/api/hot')
+  var [status,open,trades,hot,rounds]=await Promise.all([
+    fetchJSON('/api/status'),fetchJSON('/api/open'),fetchJSON('/api/trades'),fetchJSON('/api/hot'),fetchJSON('/api/rounds')
   ]);
 
   if(status){
@@ -1097,6 +1168,24 @@ async function refresh(){
       h+='<td style="color:#ffaa00;font-weight:700">'+fmtVol(m.volume)+'</td></tr>';
     });
     $('hot-body').innerHTML=h||'<tr><td colspan="4" class="gray" style="text-align:center">No data yet</td></tr>';
+  }
+  if(rounds){
+    $('rounds-count').textContent=rounds.length+' rounds';
+    var h='';
+    rounds.forEach(function(r){
+      var pc=cls(r.pnl);var rc=r.pnl>0?'row-green':r.pnl<0?'row-red':'';
+      h+='<tr class="'+rc+'">';
+      h+='<td>'+timeAgo(r.ended_at)+'</td>';
+      h+='<td>'+r.positions+'</td>';
+      h+='<td>$'+(r.cost||0).toFixed(2)+'</td>';
+      h+='<td>$'+(r.value||0).toFixed(2)+'</td>';
+      h+='<td class="'+pc+'">'+(r.pnl>=0?'+':'')+r.pnl.toFixed(2)+'</td>';
+      h+='<td class="'+pc+'">'+(r.pnl_pct>=0?'+':'')+(r.pnl_pct||0).toFixed(1)+'%</td>';
+      h+='<td class="green">+$'+(r.peak||0).toFixed(2)+'</td>';
+      h+='<td>'+esc(r.exit_reason||'')+'</td>';
+      h+='</tr>';
+    });
+    $('rounds-body').innerHTML=h||'<tr><td colspan="8" class="gray" style="text-align:center">No rounds yet</td></tr>';
   }
   $('last-update').textContent=new Date().toLocaleTimeString();
 }
