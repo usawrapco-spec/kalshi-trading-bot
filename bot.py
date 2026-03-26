@@ -398,36 +398,10 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # Dedup: check existing positions on same ticker
+        # Skip if we already have a position on this ticker
         ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
-        is_addon = False
-        if len(ticker_positions) > MAX_ADDS:
-            continue
         if ticker_positions:
-            pos = ticker_positions[0]
-            pos_entry = sf(pos.get('price'))
-            pos_bid = sf(pos.get('current_bid'))
-            # Must be green
-            if pos_entry <= 0 or pos_bid <= pos_entry:
-                continue
-            # Must be bought within last 5 minutes
-            created = pos.get('created_at')
-            if created:
-                try:
-                    if isinstance(created, str):
-                        created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                    else:
-                        created_dt = created.replace(tzinfo=timezone.utc) if created.tzinfo is None else created
-                    age_mins = (now - created_dt).total_seconds() / 60
-                    if age_mins > ADD_MAX_AGE_MINS:
-                        continue
-                except:
-                    continue
-            else:
-                continue
-            gain_pct = ((pos_bid - pos_entry) / pos_entry) * 100
-            logger.info(f"  MOMENTUM ADD: {ticker} +{gain_pct:.0f}% in {age_mins:.1f}min, stacking")
-            is_addon = True
+            continue
 
         # Buy cheapest side in range
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
@@ -439,7 +413,7 @@ def buy_candidates(markets):
         else:
             continue
 
-        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'is_addon': is_addon})
+        candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid})
 
     candidates.sort(key=lambda x: x['price'])
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
@@ -450,13 +424,12 @@ def buy_candidates(markets):
         if bought >= MAX_BUYS_PER_CYCLE:
             break
 
-        buy_count = ADD_CONTRACTS if c.get('is_addon') else CONTRACTS
-        cost = c['price'] * buy_count
+        cost = c['price'] * CONTRACTS
         if cost > deployable:
             logger.info(f"OUT OF CASH: need ${cost:.2f}, deployable ${deployable:.2f}")
             continue
 
-        result = place_order(c['ticker'], c['side'], 'buy', c['price'], buy_count)
+        result = place_order(c['ticker'], c['side'], 'buy', c['price'], CONTRACTS)
         if not result:
             continue
 
