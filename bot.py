@@ -1398,6 +1398,10 @@ tr:hover{background:var(--bg3) !important}
       <div class="hero-sub-label">Net After Fees</div>
       <div class="hero-sub-value animate-num" id="tb-net-pnl">...</div>
     </div>
+    <div class="hero-sub-item">
+      <div class="hero-sub-label">If You Cash Out Now</div>
+      <div class="hero-sub-value animate-num" id="tb-cashout" style="font-size:14px;font-weight:700">...</div>
+    </div>
   </div>
 </div>
 
@@ -1520,6 +1524,7 @@ async function refresh(){
   ]);
 
   if(status){
+    checkCelebrations(status);
     var ov=status.overall_pnl||0;
     var ovCls=cls(ov);
     $('tb-overall').innerHTML='<span class="'+ovCls+'">'+fmtPnl(ov)+'</span>';
@@ -1534,6 +1539,9 @@ async function refresh(){
     $('tb-thisround').innerHTML='<span class="'+cls(trp)+'">'+fmtPnl(trp)+'</span>';
     var naf=status.pnl_after_fees||status.net_pnl||ov;
     $('tb-net-pnl').innerHTML='<span class="'+cls(naf)+'">'+fmtPnl(naf)+'</span>';
+    var cashout=(status.cash||0)+(status.positions_value||0);
+    var cashoutProfit=cashout-100000;
+    $('tb-cashout').innerHTML='$'+cashout.toFixed(2)+' <span style="font-size:11px" class="'+cls(cashoutProfit)+'">('+fmtPnl(cashoutProfit)+')</span>';
     $('tb-positions').innerHTML='<span style="color:var(--gold)">$'+(status.positions_value||0).toFixed(2)+'</span>';
     $('tb-cash').innerHTML='<span style="color:var(--blue)">$'+(status.cash||0).toFixed(2)+'</span>';
     $('tb-fees').innerHTML='<span class="red">-$'+(status.total_fees||0).toFixed(2)+'</span> <span style="font-size:9px;color:var(--text3)">'+(status.total_contracts||0)+'c</span>';
@@ -1698,6 +1706,53 @@ async function refresh(){
     }
   }
   $('last-update').textContent=new Date().toLocaleTimeString();
+}
+
+var _prevRoundsCount=0;
+var _prevOverall=0;
+
+function confetti(){
+  var colors=['#00e68a','#f0b040','#4488ff','#40d0e0','#ff4466','#fff'];
+  var container=document.createElement('div');
+  container.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9999;overflow:hidden';
+  document.body.appendChild(container);
+  for(var i=0;i<80;i++){
+    var p=document.createElement('div');
+    var c=colors[Math.floor(Math.random()*colors.length)];
+    var x=Math.random()*100;
+    var d=Math.random()*3+2;
+    var r=Math.random()*360;
+    p.style.cssText='position:absolute;left:'+x+'%;top:-20px;width:'+Math.random()*8+4+'px;height:'+Math.random()*12+4+'px;background:'+c+';opacity:0.9;border-radius:2px;transform:rotate('+r+'deg);animation:confetti-fall '+d+'s ease-out forwards;animation-delay:'+Math.random()*0.5+'s';
+    container.appendChild(p);
+  }
+  setTimeout(function(){container.remove()},4000);
+}
+
+function flashProfit(amount){
+  var el=document.createElement('div');
+  el.innerHTML='+$'+Math.abs(amount).toFixed(2);
+  el.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);font-size:72px;font-weight:800;color:#00e68a;text-shadow:0 0 40px rgba(0,230,138,0.6),0 0 80px rgba(0,230,138,0.3);z-index:9998;pointer-events:none;animation:profit-flash 2s ease-out forwards;font-family:JetBrains Mono,monospace';
+  document.body.appendChild(el);
+  setTimeout(function(){el.remove()},2500);
+}
+
+// Add confetti + flash animations
+var style=document.createElement('style');
+style.textContent='@keyframes confetti-fall{0%{top:-20px;opacity:1;transform:rotate(0deg) translateX(0)}100%{top:110vh;opacity:0;transform:rotate(720deg) translateX('+(Math.random()>0.5?'':'-')+'100px)}}@keyframes profit-flash{0%{opacity:0;transform:translate(-50%,-50%) scale(0.5)}20%{opacity:1;transform:translate(-50%,-50%) scale(1.1)}40%{transform:translate(-50%,-50%) scale(1)}100%{opacity:0;transform:translate(-50%,-60%) scale(1)}}';
+document.head.appendChild(style);
+
+function checkCelebrations(status){
+  var rc=status.all_rounds_count||0;
+  if(_prevRoundsCount>0 && rc>_prevRoundsCount){
+    // New round completed — check if it was profitable
+    var diff=(status.all_rounds_pnl||0)-_prevOverall;
+    if(diff>0){
+      confetti();
+      flashProfit(diff);
+    }
+  }
+  _prevRoundsCount=rc;
+  _prevOverall=status.all_rounds_pnl||0;
 }
 
 refresh();
