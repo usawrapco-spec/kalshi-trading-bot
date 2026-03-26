@@ -76,7 +76,7 @@ def init_db():
                 )
             """)
             # Add columns if they don't exist (for existing tables)
-            for col, typ in [('series', 'TEXT'), ('mins_to_expiry', 'NUMERIC')]:
+            for col, typ in [('series', 'TEXT'), ('mins_to_expiry', 'NUMERIC'), ('batch_id', 'INTEGER')]:
                 try:
                     cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
                 except:
@@ -104,6 +104,19 @@ def init_db():
                     cur.execute(f"ALTER TABLE rounds ADD COLUMN {col} {typ}")
                 except:
                     pass
+            # Batches table — each cycle's buys are one batch
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS batches (
+                    id SERIAL PRIMARY KEY,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    num_trades INTEGER DEFAULT 0,
+                    total_cost NUMERIC DEFAULT 0,
+                    peak_pnl NUMERIC DEFAULT 0,
+                    status TEXT DEFAULT 'open',
+                    closed_pnl NUMERIC,
+                    closed_at TIMESTAMPTZ
+                )
+            """)
             # Shadow trades table — copies of trades that never get sold
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS shadow_trades (
@@ -579,6 +592,9 @@ def buy_candidates(markets):
     logger.info(f"Found {len(candidates)} buy candidates")
 
     bought = 0
+    batch_id = None
+    batch_cost = 0
+
     for c in candidates:
         if bought >= MAX_BUYS_PER_CYCLE:
             break
@@ -596,23 +612,44 @@ def buy_candidates(markets):
         if filled <= 0:
             continue
 
-        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f} score={c.get('score',0):.2f}")
+        # Create batch on first buy of this cycle
+        if batch_id is None:
+            conn = get_db()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO batches (num_trades, total_cost) VALUES (0, 0) RETURNING id")
+                    batch_id = cur.fetchone()[0]
+            finally:
+                conn.close()
+
+        logger.info(f"BUY: {c['ticker']} {c['side']} x{filled} @ ${c['price']:.2f} batch={batch_id}")
         conn = get_db()
         try:
             with conn.cursor() as cur:
                 cur.execute(
-                    "INSERT INTO trades (ticker, side, action, price, count, current_bid, series, mins_to_expiry) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                    (c['ticker'], c['side'], 'buy', float(c['price']), filled, float(c['bid']), c.get('series', ''), round(c.get('mins_left', 0), 1))
+                    "INSERT INTO trades (ticker, side, action, price, count, current_bid, series, mins_to_expiry, batch_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (c['ticker'], c['side'], 'buy', float(c['price']), filled, float(c['bid']), c.get('series', ''), round(c.get('mins_left', 0), 1), batch_id)
                 )
             open_positions.append({'ticker': c['ticker'], 'price': c['price']})
             deployable -= cost
+            batch_cost += cost
             bought += 1
         except Exception as e:
             logger.error(f"Buy DB insert failed: {e}")
         finally:
             conn.close()
 
-    logger.info(f"Bought {bought} positions")
+    # Update batch totals
+    if batch_id and bought > 0:
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE batches SET num_trades = %s, total_cost = %s WHERE id = %s",
+                            (bought, float(batch_cost), batch_id))
+        finally:
+            conn.close()
+
+    logger.info(f"Bought {bought} positions" + (f" batch={batch_id}" if batch_id else ""))
 
 
 def _get_volume(market):
@@ -649,80 +686,96 @@ _peak_pnl = 0                  # highest unrealized P&L seen
 _was_profitable = False        # whether we've been profitable this window
 _green_streak = 0              # consecutive checks where P&L is positive
 
-def smart_liquidate():
-    """Check if we should sell everything based on portfolio momentum."""
-    global _pnl_history, _peak_pnl, _was_profitable, _green_streak
+def check_batch_liquidations():
+    """Check each open batch independently for liquidation."""
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Get all open batches
+            cur.execute("SELECT * FROM batches WHERE status = 'open'")
+            open_batches = cur.fetchall()
+    finally:
+        conn.close()
 
-    open_positions = get_open_positions()
-    if len(open_positions) < LIQUIDATE_MIN_POSITIONS:
-        return False
+    for batch in open_batches:
+        batch_id = batch['id']
 
-    # Calculate total unrealized P&L
-    total_cost = 0
-    total_value = 0
-    for t in open_positions:
-        price = sf(t.get('price'))
-        bid = sf(t.get('current_bid'))
-        count = t.get('count') or 1
-        total_cost += price * count
-        total_value += bid * count
+        # Get trades for this batch
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM trades WHERE batch_id = %s AND action = 'buy' AND pnl IS NULL", (batch_id,))
+                batch_trades = cur.fetchall()
+        finally:
+            conn.close()
 
-    if total_cost <= 0:
-        return False
+        if not batch_trades:
+            # All trades settled, close the batch
+            conn = get_db()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE batches SET status = 'settled' WHERE id = %s", (batch_id,))
+            finally:
+                conn.close()
+            continue
 
-    unrealized_pnl = total_value - total_cost
-    pnl_pct = (unrealized_pnl / total_cost) * 100
+        if len(batch_trades) < 2:
+            continue
 
-    _pnl_history.append(unrealized_pnl)
+        # Calculate batch P&L
+        batch_cost = sum(sf(t.get('price')) * (t.get('count') or 1) for t in batch_trades)
+        batch_value = sum(sf(t.get('current_bid')) * (t.get('count') or 1) for t in batch_trades)
 
-    # Track peak
-    if unrealized_pnl > _peak_pnl:
-        _peak_pnl = unrealized_pnl
+        if batch_cost <= 0:
+            continue
 
-    # Track green streak
-    if unrealized_pnl > 0:
-        _green_streak += 1
-        _was_profitable = True
-    else:
-        _green_streak = 0
+        batch_pnl = batch_value - batch_cost
+        batch_pct = (batch_pnl / batch_cost) * 100
+        peak = float(batch.get('peak_pnl') or 0)
 
-    logger.info(f"LIQUIDATION CHECK: pnl=${unrealized_pnl:.2f} ({pnl_pct:+.1f}%) peak=${_peak_pnl:.2f} streak={_green_streak}")
+        # Update peak
+        if batch_pnl > peak:
+            peak = batch_pnl
+            conn = get_db()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE batches SET peak_pnl = %s WHERE id = %s", (float(peak), batch_id))
+            finally:
+                conn.close()
 
-    # Don't sell if we've never been profitable
-    if not _was_profitable:
-        return False
+        peak_pct = (peak / batch_cost * 100) if batch_cost > 0 else 0
 
-    # Don't sell if below minimum profit threshold
-    if _peak_pnl <= 0:
-        return False
+        logger.info(f"BATCH {batch_id}: {len(batch_trades)} trades pnl=${batch_pnl:.2f} ({batch_pct:+.1f}%) peak=${peak:.2f} ({peak_pct:+.1f}%)")
 
-    # Peak must be meaningful — at least 5% of total cost
-    peak_pct = (_peak_pnl / total_cost * 100) if total_cost > 0 else 0
-    if peak_pct < 20:
-        return False  # peak was too small, don't trigger anything yet
+        # Skip if peak hasn't reached 20%
+        if peak_pct < 20:
+            continue
 
-    # SELL if: we were profitable AND P&L dropped 30% from peak
-    if _peak_pnl > 0 and unrealized_pnl < _peak_pnl * (1 - LIQUIDATE_DROP_TRIGGER):
-        logger.info(f"TRAILING STOP HIT: pnl=${unrealized_pnl:.2f} dropped from peak=${_peak_pnl:.2f} (peak was {peak_pct:.1f}%)")
-        return True
+        should_sell = False
+        reason = ''
 
-    # SELL if: green streak 3+ and pnl_pct above threshold (lock in confirmed profit)
-    if _green_streak >= 3 and pnl_pct >= LIQUIDATE_MIN_PROFIT_PCT:
-        logger.info(f"PROFIT LOCK: {_green_streak} green checks, +{pnl_pct:.1f}% unrealized")
-        return True
+        # Trailing stop: dropped 30% from peak
+        if peak > 0 and batch_pnl < peak * (1 - LIQUIDATE_DROP_TRIGGER):
+            should_sell = True
+            reason = 'trailing_stop'
+            logger.info(f"BATCH {batch_id} TRAILING STOP: pnl=${batch_pnl:.2f} dropped from peak=${peak:.2f}")
 
-    return False
+        # Profit lock: currently above 10%
+        if batch_pct >= LIQUIDATE_MIN_PROFIT_PCT:
+            should_sell = True
+            reason = 'profit_lock'
+            logger.info(f"BATCH {batch_id} PROFIT LOCK: +{batch_pct:.1f}%")
+
+        if should_sell:
+            liquidate_batch(batch_id, batch_trades, batch_cost, peak, reason)
 
 
-def liquidate_all():
-    """Sell all open positions."""
-    global _pnl_history, _peak_pnl, _was_profitable, _green_streak
-
-    open_positions = get_open_positions()
+def liquidate_batch(batch_id, trades, total_cost, peak, reason):
+    """Sell all positions in a specific batch."""
     sold = 0
     total_pnl = 0
 
-    for trade in open_positions:
+    for trade in trades:
         ticker = trade['ticker']
         side = trade['side']
         entry_price = sf(trade['price'])
@@ -755,25 +808,23 @@ def liquidate_all():
         total_pnl += pnl
         sold += 1
 
-    logger.info(f"LIQUIDATED: {sold} positions, total P&L=${total_pnl:.4f}")
+    # Close the batch
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE batches SET status = 'closed', closed_pnl = %s, closed_at = NOW() WHERE id = %s",
+                        (float(total_pnl), batch_id))
+    finally:
+        conn.close()
 
-    # Save round data
-    total_cost = sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_positions)
     total_value = total_cost + total_pnl
     pnl_pct = round((total_pnl / total_cost * 100), 1) if total_cost > 0 else 0
-    round_id = _save_round(sold, total_cost, total_value, total_pnl, pnl_pct, _peak_pnl, 'liquidation')
+    logger.info(f"BATCH {batch_id} LIQUIDATED: {sold} trades, P&L=${total_pnl:.2f} ({pnl_pct:+.1f}%)")
 
-    # Save shadow copies for hold comparison
+    # Save to rounds
+    round_id = _save_round(sold, total_cost, total_value, total_pnl, pnl_pct, peak, reason)
     if round_id:
-        _save_shadow_trades(open_positions, round_id)
-
-    # Reset tracking for next window
-    _pnl_history = []
-    _peak_pnl = 0
-    _was_profitable = False
-    _green_streak = 0
-
-    return sold
+        _save_shadow_trades(trades, round_id)
 
 
 def _save_round(positions, cost, value, pnl, pnl_pct, peak, reason):
@@ -896,10 +947,12 @@ def run_cycle():
     balance = get_balance()
     logger.info(f"=== CYCLE START [{mode}] === Balance: ${balance:.2f}")
 
-    # Smart liquidation check
+    # Per-batch liquidation check
     if _cycle_count % LIQUIDATE_CHECK_INTERVAL == 0:
-        if smart_liquidate():
-            liquidate_all()
+        try:
+            check_batch_liquidations()
+        except Exception as e:
+            logger.error(f"Batch liquidation check failed: {e}")
 
     check_sells()
     markets = fetch_all_markets()
@@ -1070,6 +1123,57 @@ def api_hot():
     return jsonify(current_hot_markets)
 
 
+@app.route('/api/batches')
+def api_batches():
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Open batches with live P&L
+                cur.execute("""
+                    SELECT b.id, b.created_at, b.num_trades, b.total_cost, b.peak_pnl, b.status,
+                           COALESCE(SUM(CASE WHEN t.pnl IS NULL THEN t.current_bid * t.count ELSE 0 END), 0) as live_value,
+                           COALESCE(SUM(CASE WHEN t.pnl IS NULL THEN t.price * t.count ELSE 0 END), 0) as live_cost,
+                           COUNT(CASE WHEN t.pnl IS NULL THEN 1 END) as open_trades
+                    FROM batches b
+                    LEFT JOIN trades t ON t.batch_id = b.id AND t.action = 'buy'
+                    WHERE b.status = 'open'
+                    GROUP BY b.id
+                    ORDER BY b.created_at DESC
+                    LIMIT 20
+                """)
+                open_batches = cur.fetchall()
+
+                cur.execute("SELECT * FROM batches WHERE status != 'open' ORDER BY closed_at DESC LIMIT 20")
+                closed_batches = cur.fetchall()
+        finally:
+            conn.close()
+
+        result = []
+        for b in open_batches:
+            cost = float(b.get('live_cost') or 0)
+            value = float(b.get('live_value') or 0)
+            pnl = round(value - cost, 2)
+            pct = round((pnl / cost * 100), 1) if cost > 0 else 0
+            result.append({
+                'id': b['id'], 'status': 'open', 'created_at': str(b.get('created_at', '')),
+                'trades': b.get('open_trades', 0), 'cost': round(cost, 2), 'value': round(value, 2),
+                'pnl': pnl, 'pnl_pct': pct, 'peak': round(float(b.get('peak_pnl') or 0), 2),
+            })
+        for b in closed_batches:
+            result.append({
+                'id': b['id'], 'status': b.get('status', 'closed'), 'created_at': str(b.get('created_at', '')),
+                'trades': b.get('num_trades', 0), 'cost': round(float(b.get('total_cost') or 0), 2),
+                'pnl': round(float(b.get('closed_pnl') or 0), 2),
+                'pnl_pct': round(float(b.get('closed_pnl') or 0) / float(b.get('total_cost') or 1) * 100, 1),
+                'peak': round(float(b.get('peak_pnl') or 0), 2),
+            })
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"API batches error: {e}")
+        return jsonify([])
+
+
 @app.route('/api/learning')
 def api_learning():
     try:
@@ -1181,10 +1285,11 @@ tr:hover{background:#1a1a1a !important}
   <div style="font-size:12px">AVG RETURN: <span id="tb-avgret">...</span> &nbsp;&nbsp; AVG WIN: <span id="tb-avgwin" class="green">...</span> &nbsp;&nbsp; AVG LOSS: <span id="tb-avgloss" class="red">...</span></div>
 </div>
 
-<div class="top-bar" style="flex-direction:column;gap:6px;border:2px solid #ffaa00">
-  <div style="font-size:14px;color:#ffaa00">LIVE ROUND</div>
-  <div style="font-size:20px"><span id="rnd-pnl">...</span> &nbsp; <span id="rnd-pct" style="font-size:14px">...</span></div>
-  <div style="font-size:12px;color:#888">Cost: <span id="rnd-cost">...</span> &nbsp;&nbsp; Value: <span id="rnd-value">...</span> &nbsp;&nbsp; Positions: <span id="rnd-count">...</span> &nbsp;&nbsp; Peak: <span id="rnd-peak" class="green">...</span></div>
+<div class="panel">
+  <div class="panel-header"><h2>Live Batches</h2><div class="count" id="batch-count"></div></div>
+  <div class="panel-body"><table><thead><tr>
+    <th>Batch</th><th>Age</th><th>Trades</th><th>Cost</th><th>Value</th><th>P&amp;L</th><th>Return</th><th>Peak</th><th>Status</th>
+  </tr></thead><tbody id="batch-body"><tr><td colspan="9" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
@@ -1241,8 +1346,8 @@ function timeAgo(iso){
 }
 
 async function refresh(){
-  var [status,open,trades,hot,rounds,learn]=await Promise.all([
-    fetchJSON('/api/status'),fetchJSON('/api/open'),fetchJSON('/api/trades'),fetchJSON('/api/hot'),fetchJSON('/api/rounds'),fetchJSON('/api/learning')
+  var [status,open,trades,hot,rounds,learn,batches]=await Promise.all([
+    fetchJSON('/api/status'),fetchJSON('/api/open'),fetchJSON('/api/trades'),fetchJSON('/api/hot'),fetchJSON('/api/rounds'),fetchJSON('/api/learning'),fetchJSON('/api/batches')
   ]);
 
   if(status){
@@ -1260,12 +1365,7 @@ async function refresh(){
     var ar=status.avg_return||0;
     $('tb-avgret').innerHTML='<span class="'+cls(ar)+'">'+(ar>=0?'+':'')+ar.toFixed(1)+'%</span>';
     var rp=status.round_pnl||0;
-    $('rnd-pnl').innerHTML='<span class="'+cls(rp)+'">'+(rp>=0?'+$':'-$')+Math.abs(rp).toFixed(2)+'</span>';
-    $('rnd-pct').innerHTML='<span class="'+cls(rp)+'">'+(rp>=0?'+':'')+(status.round_pct||0).toFixed(1)+'%</span>';
-    $('rnd-cost').textContent='$'+(status.round_cost||0).toFixed(2);
-    $('rnd-value').textContent='$'+(status.round_value||0).toFixed(2);
-    $('rnd-count').textContent=(status.round_positions||0);
-    $('rnd-peak').textContent='+$'+(status.round_peak||0).toFixed(2);
+    // old round fields removed — now using batches
     $('tb-avgwin').textContent='+$'+(status.avg_win||0).toFixed(4);
     $('tb-avgloss').textContent='-$'+Math.abs(status.avg_loss||0).toFixed(4);
     var mode=status.mode||'PAPER';
@@ -1325,6 +1425,28 @@ async function refresh(){
       h+='<td style="color:#ffaa00;font-weight:700">'+fmtVol(m.volume)+'</td></tr>';
     });
     $('hot-body').innerHTML=h||'<tr><td colspan="4" class="gray" style="text-align:center">No data yet</td></tr>';
+  }
+  if(batches){
+    var openB=batches.filter(function(b){return b.status==='open'});
+    var closedB=batches.filter(function(b){return b.status!=='open'});
+    $('batch-count').textContent=openB.length+' open / '+closedB.length+' closed';
+    var h='';
+    batches.forEach(function(b){
+      var pc=cls(b.pnl);var rc=b.pnl>0?'row-green':b.pnl<0?'row-red':'';
+      var st=b.status==='open'?'<span style="color:#ffaa00">LIVE</span>':'<span class="'+pc+'">'+b.status+'</span>';
+      h+='<tr class="'+rc+'">';
+      h+='<td>#'+b.id+'</td>';
+      h+='<td>'+timeAgo(b.created_at)+'</td>';
+      h+='<td>'+b.trades+'</td>';
+      h+='<td>$'+(b.cost||0).toFixed(2)+'</td>';
+      h+='<td>$'+(b.value||0).toFixed(2)+'</td>';
+      h+='<td class="'+pc+'">'+(b.pnl>=0?'+':'')+b.pnl.toFixed(2)+'</td>';
+      h+='<td class="'+pc+'">'+(b.pnl_pct>=0?'+':'')+(b.pnl_pct||0).toFixed(1)+'%</td>';
+      h+='<td class="green">+$'+(b.peak||0).toFixed(2)+'</td>';
+      h+='<td>'+st+'</td>';
+      h+='</tr>';
+    });
+    $('batch-body').innerHTML=h||'<tr><td colspan="9" class="gray" style="text-align:center">No batches yet</td></tr>';
   }
   if(rounds){
     $('rounds-count').textContent=rounds.length+' rounds';
