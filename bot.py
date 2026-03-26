@@ -678,10 +678,14 @@ def smart_liquidate():
     if _peak_pnl <= 0:
         return False
 
+    # Peak must be meaningful — at least 5% of total cost
+    peak_pct = (_peak_pnl / total_cost * 100) if total_cost > 0 else 0
+    if peak_pct < 5:
+        return False  # peak was too small, don't trigger anything yet
+
     # SELL if: we were profitable AND P&L dropped 30% from peak
-    # This means we caught the upswing and are now on the way down
     if _peak_pnl > 0 and unrealized_pnl < _peak_pnl * (1 - LIQUIDATE_DROP_TRIGGER):
-        logger.info(f"TRAILING STOP HIT: pnl=${unrealized_pnl:.2f} dropped from peak=${_peak_pnl:.2f}")
+        logger.info(f"TRAILING STOP HIT: pnl=${unrealized_pnl:.2f} dropped from peak=${_peak_pnl:.2f} (peak was {peak_pct:.1f}%)")
         return True
 
     # SELL if: green streak 3+ and pnl_pct above threshold (lock in confirmed profit)
