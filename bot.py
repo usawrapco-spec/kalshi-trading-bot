@@ -146,7 +146,7 @@ def init_db():
                 )
             """)
             # Add columns if they don't exist (for existing tables)
-            for col, typ in [('series', 'TEXT'), ('mins_to_expiry', 'NUMERIC'), ('batch_id', 'INTEGER')]:
+            for col, typ in [('series', 'TEXT'), ('mins_to_expiry', 'NUMERIC'), ('batch_id', 'INTEGER'), ('peak_bid', 'NUMERIC')]:
                 try:
                     cur.execute(f"ALTER TABLE trades ADD COLUMN {col} {typ}")
                 except:
@@ -510,11 +510,13 @@ def check_sells():
         else:
             current_bid = sf(market.get('no_bid_dollars', '0'))
 
-        # Update bid in DB for dashboard
+        # Update bid and peak in DB for dashboard
+        current_peak = sf(trade.get('peak_bid') or 0)
+        new_peak = max(current_peak, current_bid)
         conn = get_db()
         try:
             with conn.cursor() as cur:
-                cur.execute("UPDATE trades SET current_bid = %s WHERE id = %s", (float(current_bid), trade['id']))
+                cur.execute("UPDATE trades SET current_bid = %s, peak_bid = %s WHERE id = %s", (float(current_bid), float(new_peak), trade['id']))
         except:
             pass
         finally:
@@ -643,20 +645,43 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # One buy per ticker — no duplicates
+        # Check existing positions on this ticker
         ticker_positions = [t for t in open_positions if t.get('ticker') == ticker]
         if ticker_positions:
-            continue
-
-        # Buy cheapest side in range
-        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            side, price, bid = 'yes', yes_ask, yes_bid
-        elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
-            side, price, bid = 'no', no_ask, no_bid
-        elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            side, price, bid = 'yes', yes_ask, yes_bid
+            # Allow dip buy: position was green at some point (peak > entry + 20%) AND current price is cheaper
+            pos = ticker_positions[0]
+            pos_entry = sf(pos.get('price'))
+            pos_peak = sf(pos.get('peak_bid') or 0)
+            if pos_entry <= 0:
+                continue
+            # Was it ever up 20%+ from entry?
+            was_promising = pos_peak >= pos_entry * 1.20
+            if not was_promising:
+                continue  # never showed promise, don't add
+            # Max 3 buys per ticker
+            if len(ticker_positions) >= 3:
+                continue
+            # Dip buy: must be same side, cheaper than original entry
+            pos_side = pos.get('side', '')
+            if pos_side == 'yes':
+                if not (BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0 and yes_ask < pos_entry):
+                    continue
+                side, price, bid = 'yes', yes_ask, yes_bid
+            else:
+                if not (BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0 and no_ask < pos_entry):
+                    continue
+                side, price, bid = 'no', no_ask, no_bid
+            logger.info(f"  DIP BUY: {ticker} {side} was ${pos_entry:.2f} peaked ${pos_peak:.2f} now ${price:.2f}")
         else:
-            continue
+            # New position — buy cheapest side in range
+            if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+                side, price, bid = 'yes', yes_ask, yes_bid
+            elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+                side, price, bid = 'no', no_ask, no_bid
+            elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+                side, price, bid = 'yes', yes_ask, yes_bid
+            else:
+                continue
 
         # Score candidate (for tracking only — does not block buys)
         win_score = score_candidate(price, side, market_series or '', mins_left, current_win_rates)
