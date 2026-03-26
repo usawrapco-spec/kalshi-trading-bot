@@ -547,16 +547,12 @@ def buy_candidates(markets):
         else:
             continue
 
-        # Score candidate using learning engine
+        # Score candidate (for tracking only — does not block buys)
         win_score = score_candidate(price, side, market_series or '', mins_left, current_win_rates)
-        if current_win_rates and win_score < MIN_WIN_RATE:
-            logger.info(f"  SKIP: {ticker} {side} score={win_score:.2f} below {MIN_WIN_RATE}")
-            continue
 
         candidates.append({'ticker': ticker, 'side': side, 'price': price, 'bid': bid, 'series': market_series or '', 'mins_left': mins_left, 'score': win_score})
 
-    # Sort by score (best first), then by price (cheapest)
-    candidates.sort(key=lambda x: (-x['score'], x['price']))
+    candidates.sort(key=lambda x: x['price'])
     candidates = candidates[:MAX_BUYS_PER_CYCLE]
     logger.info(f"Found {len(candidates)} buy candidates")
 
