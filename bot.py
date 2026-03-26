@@ -604,6 +604,131 @@ def update_hot_markets(markets):
     ]
 
 
+# === SMART LIQUIDATION ===
+
+LIQUIDATE_CHECK_INTERVAL = 5   # check every 5 cycles (~15 sec)
+LIQUIDATE_MIN_POSITIONS = 5    # need at least 5 positions before considering liquidation
+LIQUIDATE_MIN_PROFIT_PCT = 10  # portfolio must be at least +10% unrealized to consider selling
+LIQUIDATE_DROP_TRIGGER = 0.30  # sell if P&L drops 30% from peak (trailing stop)
+
+_pnl_history = []              # track unrealized P&L over time
+_peak_pnl = 0                  # highest unrealized P&L seen
+_was_profitable = False        # whether we've been profitable this window
+_green_streak = 0              # consecutive checks where P&L is positive
+
+def smart_liquidate():
+    """Check if we should sell everything based on portfolio momentum."""
+    global _pnl_history, _peak_pnl, _was_profitable, _green_streak
+
+    open_positions = get_open_positions()
+    if len(open_positions) < LIQUIDATE_MIN_POSITIONS:
+        return False
+
+    # Calculate total unrealized P&L
+    total_cost = 0
+    total_value = 0
+    for t in open_positions:
+        price = sf(t.get('price'))
+        bid = sf(t.get('current_bid'))
+        count = t.get('count') or 1
+        total_cost += price * count
+        total_value += bid * count
+
+    if total_cost <= 0:
+        return False
+
+    unrealized_pnl = total_value - total_cost
+    pnl_pct = (unrealized_pnl / total_cost) * 100
+
+    _pnl_history.append(unrealized_pnl)
+
+    # Track peak
+    if unrealized_pnl > _peak_pnl:
+        _peak_pnl = unrealized_pnl
+
+    # Track green streak
+    if unrealized_pnl > 0:
+        _green_streak += 1
+        _was_profitable = True
+    else:
+        _green_streak = 0
+
+    logger.info(f"LIQUIDATION CHECK: pnl=${unrealized_pnl:.2f} ({pnl_pct:+.1f}%) peak=${_peak_pnl:.2f} streak={_green_streak}")
+
+    # Don't sell if we've never been profitable
+    if not _was_profitable:
+        return False
+
+    # Don't sell if below minimum profit threshold
+    if _peak_pnl <= 0:
+        return False
+
+    # SELL if: we were profitable AND P&L dropped 30% from peak
+    # This means we caught the upswing and are now on the way down
+    if _peak_pnl > 0 and unrealized_pnl < _peak_pnl * (1 - LIQUIDATE_DROP_TRIGGER):
+        logger.info(f"TRAILING STOP HIT: pnl=${unrealized_pnl:.2f} dropped from peak=${_peak_pnl:.2f}")
+        return True
+
+    # SELL if: green streak 3+ and pnl_pct above threshold (lock in confirmed profit)
+    if _green_streak >= 3 and pnl_pct >= LIQUIDATE_MIN_PROFIT_PCT:
+        logger.info(f"PROFIT LOCK: {_green_streak} green checks, +{pnl_pct:.1f}% unrealized")
+        return True
+
+    return False
+
+
+def liquidate_all():
+    """Sell all open positions."""
+    global _pnl_history, _peak_pnl, _was_profitable, _green_streak
+
+    open_positions = get_open_positions()
+    sold = 0
+    total_pnl = 0
+
+    for trade in open_positions:
+        ticker = trade['ticker']
+        side = trade['side']
+        entry_price = sf(trade['price'])
+        count = trade.get('count') or 1
+        current_bid = sf(trade.get('current_bid'))
+
+        if current_bid <= 0:
+            current_bid = 0.001
+
+        buy_fee = kalshi_fee(entry_price, count)
+        sell_fee = kalshi_fee(current_bid, count)
+        pnl = round((current_bid - entry_price) * count - buy_fee - sell_fee, 4)
+
+        result = place_order(ticker, side, 'sell', current_bid, count)
+        if result:
+            order_id, filled = result
+            if filled < count:
+                pnl = round((current_bid - entry_price) * filled - kalshi_fee(entry_price, filled) - kalshi_fee(current_bid, filled), 4)
+
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE trades SET pnl = %s, current_bid = %s WHERE id = %s",
+                            (float(pnl), float(current_bid), trade['id']))
+        except Exception as e:
+            logger.error(f"Liquidate DB error: {e}")
+        finally:
+            conn.close()
+
+        total_pnl += pnl
+        sold += 1
+
+    logger.info(f"LIQUIDATED: {sold} positions, total P&L=${total_pnl:.4f}")
+
+    # Reset tracking for next window
+    _pnl_history = []
+    _peak_pnl = 0
+    _was_profitable = False
+    _green_streak = 0
+
+    return sold
+
+
 # === MAIN CYCLE ===
 
 _cycle_count = 0
@@ -624,6 +749,12 @@ def run_cycle():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
     balance = get_balance()
     logger.info(f"=== CYCLE START [{mode}] === Balance: ${balance:.2f}")
+
+    # Smart liquidation check
+    if _cycle_count % LIQUIDATE_CHECK_INTERVAL == 0:
+        if smart_liquidate():
+            liquidate_all()
+
     check_sells()
     markets = fetch_all_markets()
     update_hot_markets(markets)
