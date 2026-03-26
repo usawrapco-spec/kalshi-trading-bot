@@ -24,19 +24,20 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
-BUY_MIN = 0.01
-BUY_MAX = 0.99
-SELL_THRESHOLD = None         # no individual take profit
+BUY_MIN = 0.15
+BUY_MAX = 0.40
+SELL_THRESHOLD = 1.50         # +150% individual take profit
 TAKER_FEE_RATE = 0.07
-MAX_MINS_TO_EXPIRY = 20
+MAX_MINS_TO_EXPIRY = 15
+MIN_MINS_TO_EXPIRY = 5        # don't buy in last 5 minutes
 CYCLE_SECONDS = 2
 STARTING_BALANCE = 50.00
 CASH_RESERVE = 0.50
 SAVINGS_RATE = 0.00
 MAX_BUYS_PER_CYCLE = 5
 CONTRACTS = 1
-MAX_POSITIONS = 25            # stop buying after this many open positions
-PORTFOLIO_TAKE_PROFIT = 0.10  # sell all open positions when combined +10%
+MAX_POSITIONS = 25
+PORTFOLIO_TAKE_PROFIT = None  # disabled — using individual take profit
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M', 'KXBTC1H']
 
@@ -557,7 +558,7 @@ def buy_candidates(markets):
             try:
                 close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
                 mins_left = (close_dt - now).total_seconds() / 60
-                if mins_left > max_expiry or mins_left < 0:
+                if mins_left > max_expiry or mins_left < MIN_MINS_TO_EXPIRY:
                     continue
             except:
                 continue
@@ -571,7 +572,10 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # Allow duplicate buys on same ticker
+        # One buy per ticker — no duplicates
+        ticker_positions = [t for t in open_positions if t.get('ticker') == ticker]
+        if ticker_positions:
+            continue
 
         # Buy cheapest side in range
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
@@ -1403,9 +1407,9 @@ tr:hover{background:var(--bg3) !important}
     <span class="mode-badge mode-paper" id="mode-badge">PAPER MODE</span>
   </div>
   <div class="header-right">
-    <span>Buy $0.01 - $0.99</span>
+    <span>Buy $0.15 - $0.40</span>
     <span class="status-sep">|</span>
-    <span>Portfolio +10% Take Profit</span>
+    <span>Sell +150%</span>
     <span class="status-sep">|</span>
     <span>Next cycle: <span class="countdown-box" id="countdown">--:--</span></span>
   </div>
@@ -1524,7 +1528,7 @@ tr:hover{background:var(--bg3) !important}
 
 <!-- Status Bar -->
 <div class="status-bar">
-  <span id="sb-config">Buy $0.01-$0.99 | Ride to settlement | No stop loss</span>
+  <span id="sb-config">Buy $0.15-$0.40 | Sell +150% | 5-15min window | 1 per ticker</span>
   <span class="status-sep">|</span>
   <span id="sb-mode">Mode: <span class="gold" id="mode-label">PAPER</span></span>
   <span class="status-sep">|</span>
