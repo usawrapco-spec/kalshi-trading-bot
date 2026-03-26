@@ -24,7 +24,7 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
-BUY_MIN = 0.15
+BUY_MIN = 0.01
 BUY_MAX = 0.40
 SELL_THRESHOLD = 1.50         # +150% individual take profit
 TAKER_FEE_RATE = 0.07
