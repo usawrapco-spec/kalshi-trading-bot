@@ -26,7 +26,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY ===
 BUY_MIN = 0.01
 BUY_MAX = 0.40
-SELL_THRESHOLD = 1.50         # +150% individual take profit
+SELL_THRESHOLD = None         # no individual take profit — ride to settlement
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_EXPIRY = 10       # only buy 10-15 min window (early buys win 60%)
