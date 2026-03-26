@@ -648,32 +648,11 @@ def buy_candidates(markets):
         if ticker_positions:
             continue
 
-        # Determine side using momentum if available
-        coin = SERIES_TO_COIN.get(market_series, '')
-        momentum = get_momentum(coin) if coin else None
-        momentum_side = None
-
-        if momentum and momentum['direction'] != 'flat':
-            if momentum['direction'] == 'up':
-                momentum_side = 'yes'
-            else:
-                momentum_side = 'no'
-
-        # Pick side: momentum-preferred if in range, else cheapest side in range
-        if momentum_side == 'yes' and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        # Buy cheapest side in range
+        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
-            logger.info(f"  MOMENTUM: {coin} {momentum['change_1m']:+.3f}% 1m, {momentum['change_5m']:+.3f}% 5m -> buying YES")
-        elif momentum_side == 'no' and BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
-            side, price, bid = 'no', no_ask, no_bid
-            logger.info(f"  MOMENTUM: {coin} {momentum['change_1m']:+.3f}% 1m, {momentum['change_5m']:+.3f}% 5m -> buying NO")
-        elif yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
-            side, price, bid = 'yes', yes_ask, yes_bid
-            if momentum and coin:
-                logger.info(f"  MOMENTUM: {coin} {momentum['change_1m']:+.3f}% 1m, {momentum['change_5m']:+.3f}% 5m -> FLAT, buying cheapest (YES)")
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
-            if momentum and coin:
-                logger.info(f"  MOMENTUM: {coin} {momentum['change_1m']:+.3f}% 1m, {momentum['change_5m']:+.3f}% 5m -> FLAT, buying cheapest (NO)")
         elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
         else:
