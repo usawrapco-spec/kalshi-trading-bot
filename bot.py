@@ -93,7 +93,29 @@ def init_db():
                     pnl NUMERIC,
                     pnl_pct NUMERIC,
                     peak_pnl NUMERIC,
-                    exit_reason TEXT
+                    exit_reason TEXT,
+                    hold_pnl NUMERIC,
+                    hold_pnl_pct NUMERIC
+                )
+            """)
+            # Add hold columns if they don't exist
+            for col, typ in [('hold_pnl', 'NUMERIC'), ('hold_pnl_pct', 'NUMERIC')]:
+                try:
+                    cur.execute(f"ALTER TABLE rounds ADD COLUMN {col} {typ}")
+                except:
+                    pass
+            # Shadow trades table — copies of trades that never get sold
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS shadow_trades (
+                    id SERIAL PRIMARY KEY,
+                    trade_id INTEGER,
+                    round_id INTEGER,
+                    ticker TEXT,
+                    side TEXT,
+                    price NUMERIC,
+                    count INTEGER,
+                    settled_pnl NUMERIC,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
     finally:
@@ -739,7 +761,11 @@ def liquidate_all():
     total_cost = sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_positions)
     total_value = total_cost + total_pnl
     pnl_pct = round((total_pnl / total_cost * 100), 1) if total_cost > 0 else 0
-    _save_round(sold, total_cost, total_value, total_pnl, pnl_pct, _peak_pnl, 'liquidation')
+    round_id = _save_round(sold, total_cost, total_value, total_pnl, pnl_pct, _peak_pnl, 'liquidation')
+
+    # Save shadow copies for hold comparison
+    if round_id:
+        _save_shadow_trades(open_positions, round_id)
 
     # Reset tracking for next window
     _pnl_history = []
@@ -751,16 +777,93 @@ def liquidate_all():
 
 
 def _save_round(positions, cost, value, pnl, pnl_pct, peak, reason):
-    """Save completed round to database."""
+    """Save completed round to database. Returns round ID."""
     conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO rounds (ended_at, positions, total_cost, total_value, pnl, pnl_pct, peak_pnl, exit_reason) VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s)",
+                "INSERT INTO rounds (ended_at, positions, total_cost, total_value, pnl, pnl_pct, peak_pnl, exit_reason) VALUES (NOW(), %s, %s, %s, %s, %s, %s, %s) RETURNING id",
                 (positions, float(cost), float(value), float(pnl), float(pnl_pct), float(peak), reason)
             )
+            return cur.fetchone()[0]
     except Exception as e:
         logger.error(f"Save round failed: {e}")
+        return None
+    finally:
+        conn.close()
+
+
+def _save_shadow_trades(positions, round_id):
+    """Save copies of trades for hold-to-settlement comparison."""
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            for t in positions:
+                cur.execute(
+                    "INSERT INTO shadow_trades (trade_id, round_id, ticker, side, price, count) VALUES (%s, %s, %s, %s, %s, %s)",
+                    (t.get('id'), round_id, t.get('ticker', ''), t.get('side', ''), float(sf(t.get('price'))), t.get('count') or 1)
+                )
+    except Exception as e:
+        logger.error(f"Save shadow trades failed: {e}")
+    finally:
+        conn.close()
+
+
+def _check_shadow_settlements():
+    """Check if shadow trades have settled and update round hold_pnl."""
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # Find rounds that don't have hold_pnl yet
+            cur.execute("SELECT DISTINCT round_id FROM shadow_trades WHERE settled_pnl IS NULL")
+            pending_rounds = [r['round_id'] for r in cur.fetchall()]
+
+            for round_id in pending_rounds:
+                cur.execute("SELECT * FROM shadow_trades WHERE round_id = %s", (round_id,))
+                shadows = cur.fetchall()
+
+                all_settled = True
+                total_hold_pnl = 0
+
+                for s in shadows:
+                    if s['settled_pnl'] is not None:
+                        total_hold_pnl += float(s['settled_pnl'])
+                        continue
+
+                    # Check if market has settled
+                    try:
+                        market = get_market(s['ticker'])
+                        if not market:
+                            all_settled = False
+                            continue
+
+                        result_val = market.get('result', '')
+                        if not result_val:
+                            all_settled = False
+                            continue
+
+                        entry = float(s['price'])
+                        count = s['count'] or 1
+                        buy_fee = kalshi_fee(entry, count)
+
+                        if result_val == s['side']:
+                            pnl = round((1.0 - entry) * count - buy_fee, 4)
+                        else:
+                            pnl = round(-entry * count - buy_fee, 4)
+
+                        cur.execute("UPDATE shadow_trades SET settled_pnl = %s WHERE id = %s", (float(pnl), s['id']))
+                        total_hold_pnl += pnl
+                    except:
+                        all_settled = False
+
+                if all_settled and shadows:
+                    total_cost = sum(float(s['price']) * (s['count'] or 1) for s in shadows)
+                    hold_pct = round((total_hold_pnl / total_cost * 100), 1) if total_cost > 0 else 0
+                    cur.execute("UPDATE rounds SET hold_pnl = %s, hold_pnl_pct = %s WHERE id = %s",
+                                (float(total_hold_pnl), float(hold_pct), round_id))
+                    logger.info(f"SHADOW SETTLED: round {round_id} hold_pnl=${total_hold_pnl:.2f} ({hold_pct:+.1f}%)")
+    except Exception as e:
+        logger.error(f"Shadow settlement check failed: {e}")
     finally:
         conn.close()
 
@@ -772,6 +875,13 @@ _cycle_count = 0
 def run_cycle():
     global current_win_rates, _cycle_count
     _cycle_count += 1
+
+    # Check shadow trade settlements every 10 cycles (~30 sec)
+    if _cycle_count % 10 == 0:
+        try:
+            _check_shadow_settlements()
+        except Exception as e:
+            logger.error(f"Shadow check failed: {e}")
 
     # Refresh learning data every 10 cycles (~30 sec)
     if _cycle_count % 10 == 1:
@@ -994,6 +1104,8 @@ def api_rounds():
                 'pnl_pct': float(r.get('pnl_pct') or 0),
                 'peak': float(r.get('peak_pnl') or 0),
                 'exit_reason': r.get('exit_reason', ''),
+                'hold_pnl': float(r.get('hold_pnl') or 0) if r.get('hold_pnl') is not None else None,
+                'hold_pnl_pct': float(r.get('hold_pnl_pct') or 0) if r.get('hold_pnl_pct') is not None else None,
             })
         return jsonify(result)
     except Exception as e:
@@ -1084,7 +1196,7 @@ tr:hover{background:#1a1a1a !important}
 <div class="panel">
   <div class="panel-header"><h2>Round History</h2><div class="count" id="rounds-count"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Time</th><th>Positions</th><th>Cost</th><th>Value</th><th>P&amp;L</th><th>Return</th><th>Peak</th><th>Exit</th>
+    <th>Time</th><th>Positions</th><th>Cost</th><th>Sold P&amp;L</th><th>Sold %</th><th>Hold P&amp;L</th><th>Hold %</th><th>Peak</th><th>Exit</th>
   </tr></thead><tbody id="rounds-body"><tr><td colspan="8" class="loading">Loading...</td></tr></tbody></table></div>
 </div>
 
@@ -1205,18 +1317,21 @@ async function refresh(){
     var h='';
     rounds.forEach(function(r){
       var pc=cls(r.pnl);var rc=r.pnl>0?'row-green':r.pnl<0?'row-red':'';
+      var hp=r.hold_pnl!==null?r.hold_pnl:null;
+      var hpc=hp!==null?cls(hp):'gray';
       h+='<tr class="'+rc+'">';
       h+='<td>'+timeAgo(r.ended_at)+'</td>';
       h+='<td>'+r.positions+'</td>';
       h+='<td>$'+(r.cost||0).toFixed(2)+'</td>';
-      h+='<td>$'+(r.value||0).toFixed(2)+'</td>';
       h+='<td class="'+pc+'">'+(r.pnl>=0?'+':'')+r.pnl.toFixed(2)+'</td>';
       h+='<td class="'+pc+'">'+(r.pnl_pct>=0?'+':'')+(r.pnl_pct||0).toFixed(1)+'%</td>';
+      h+='<td class="'+hpc+'">'+(hp!==null?(hp>=0?'+':'')+hp.toFixed(2):'pending...')+'</td>';
+      h+='<td class="'+hpc+'">'+(r.hold_pnl_pct!==null?(r.hold_pnl_pct>=0?'+':'')+(r.hold_pnl_pct||0).toFixed(1)+'%':'...')+'</td>';
       h+='<td class="green">+$'+(r.peak||0).toFixed(2)+'</td>';
       h+='<td>'+esc(r.exit_reason||'')+'</td>';
       h+='</tr>';
     });
-    $('rounds-body').innerHTML=h||'<tr><td colspan="8" class="gray" style="text-align:center">No rounds yet</td></tr>';
+    $('rounds-body').innerHTML=h||'<tr><td colspan="9" class="gray" style="text-align:center">No rounds yet</td></tr>';
   }
   if(learn){
     if(!learn.active){
