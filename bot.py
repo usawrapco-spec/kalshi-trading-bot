@@ -1489,7 +1489,7 @@ tr:hover{background:var(--bg3) !important}
 
 <!-- Open Positions -->
 <div class="panel">
-  <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
+  <div class="panel-header"><h2>Open Positions <span id="open-pct" style="font-size:12px;font-weight:700"></span> <span id="open-target" style="font-size:9px;color:var(--text3)">/ 10% to sell</span></h2><div class="count" id="open-count"></div></div>
   <div class="panel-body"><table><thead><tr>
     <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Bid</th><th>Value</th><th>P&amp;L</th><th>Gain%</th>
   </tr></thead><tbody id="open-body"><tr><td colspan="9" class="loading">Loading...</td></tr></tbody></table></div>
@@ -1594,6 +1594,10 @@ async function refresh(){
 
   if(open){
     $('open-count').textContent=open.length+' positions';
+    var totalCost=0,totalVal=0;
+    open.forEach(function(p){totalCost+=p.entry*(p.count||1);totalVal+=(p.current_bid||0)*(p.count||1)});
+    var openPct=totalCost>0?((totalVal-totalCost)/totalCost*100):0;
+    $('open-pct').innerHTML='<span class="'+cls(openPct)+'">'+(openPct>=0?'+':'')+openPct.toFixed(1)+'%</span>';
     var h='';
     open.forEach(function(p){
       var rc=p.gain_pct>2?'row-green':p.gain_pct<-2?'row-red':'';
