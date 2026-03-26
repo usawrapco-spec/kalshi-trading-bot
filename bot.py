@@ -617,7 +617,7 @@ def update_hot_markets(markets):
 
 # === SMART LIQUIDATION ===
 
-LIQUIDATE_CHECK_INTERVAL = 5   # check every 5 cycles (~15 sec)
+LIQUIDATE_CHECK_INTERVAL = 1   # check every cycle
 LIQUIDATE_MIN_POSITIONS = 5    # need at least 5 positions before considering liquidation
 LIQUIDATE_MIN_PROFIT_PCT = 10  # portfolio must be at least +10% unrealized to consider selling
 LIQUIDATE_DROP_TRIGGER = 0.30  # sell if P&L drops 30% from peak (trailing stop)
