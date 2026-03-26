@@ -1553,8 +1553,8 @@ tr:hover{background:var(--bg3) !important}
       <div class="hero-sub-value animate-num" id="tb-thisround">...</div>
     </div>
     <div class="hero-sub-item">
-      <div class="hero-sub-label">Net After Fees</div>
-      <div class="hero-sub-value animate-num" id="tb-net-pnl">...</div>
+      <div class="hero-sub-label">Total Fees Paid</div>
+      <div class="hero-sub-value animate-num red" id="tb-net-pnl">...</div>
     </div>
     <div class="hero-sub-item">
       <div class="hero-sub-label">If You Cash Out Now</div>
@@ -1703,8 +1703,7 @@ async function refresh(){
     $('tb-rounds-count').textContent=status.all_rounds_count||0;
     var trp=status.round_pnl||0;
     $('tb-thisround').innerHTML='<span class="'+cls(trp)+'">'+fmtPnl(trp)+'</span>';
-    var naf=status.pnl_after_fees||status.net_pnl||ov;
-    $('tb-net-pnl').innerHTML='<span class="'+cls(naf)+'">'+fmtPnl(naf)+'</span>';
+    $('tb-net-pnl').innerHTML='<span class="red">-$'+(status.total_fees||0).toFixed(2)+'</span>';
     var cashout=(status.cash||0)+(status.positions_value||0);
     var cashoutProfit=status.overall_pnl||0;
     $('tb-cashout').innerHTML='$'+cashout.toFixed(2)+' <span style="font-size:11px" class="'+cls(cashoutProfit)+'">('+fmtPnl(cashoutProfit)+')</span>';
