@@ -26,19 +26,17 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY ===
 BUY_MIN = 0.01
 BUY_MAX = 0.99
-SELL_THRESHOLD = 1.50        # +150%: sell contracts
+SELL_THRESHOLD = None         # individual take profit disabled — using portfolio sell
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 2
 STARTING_BALANCE = 50.00
 CASH_RESERVE = 0.50
-SAVINGS_RATE = 0.00         # disabled — was skewing cash balance
+SAVINGS_RATE = 0.00
 MAX_BUYS_PER_CYCLE = 5
 CONTRACTS = 1
-MAX_POSITIONS_PER_SERIES = 99999  # unlimited positions per series for data collection
-MAX_ADDS = 5                  # can add to a winning position up to 5 times
-ADD_CONTRACTS = 20            # double down with more contracts on momentum plays
-ADD_MAX_AGE_MINS = 5          # only double down if position is < 5 min old
+MAX_POSITIONS = 25            # stop buying after this many open positions
+PORTFOLIO_TAKE_PROFIT = None  # disabled — ride everything to settlement
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M', 'KXBTC1H']
 
@@ -518,6 +516,11 @@ def buy_candidates(markets):
     balance = get_balance()
     open_positions = get_open_positions()
     logger.info(f"Balance: ${balance:.2f} | {len(open_positions)} positions open")
+
+    # Stop buying if we have enough positions
+    if len(open_positions) >= MAX_POSITIONS:
+        logger.info(f"MAX POSITIONS ({MAX_POSITIONS}) reached — waiting for settlements")
+        return
 
     deployable = balance * (1.0 - CASH_RESERVE)
     if deployable <= 1.0:
@@ -1373,7 +1376,7 @@ tr:hover{background:var(--bg3) !important}
   <div class="header-right">
     <span>Buy $0.01 - $0.99</span>
     <span class="status-sep">|</span>
-    <span>Sell +150%</span>
+    <span>Ride to Settlement</span>
     <span class="status-sep">|</span>
     <span>Next cycle: <span class="countdown-box" id="countdown">--:--</span></span>
   </div>
