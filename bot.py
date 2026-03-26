@@ -35,7 +35,7 @@ CASH_RESERVE = 0.50
 SAVINGS_RATE = 0.25
 MAX_BUYS_PER_CYCLE = 1000
 CONTRACTS = 1
-MAX_POSITIONS_PER_SERIES = 3  # max open positions per series (prevents overloading hourly)
+MAX_POSITIONS_PER_SERIES = 99999  # unlimited positions per series for data collection
 MAX_ADDS = 5                  # can add to a winning position up to 5 times
 ADD_CONTRACTS = 20            # double down with more contracts on momentum plays
 ADD_MAX_AGE_MINS = 5          # only double down if position is < 5 min old
@@ -506,7 +506,7 @@ def buy_candidates(markets):
             try:
                 close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
                 mins_left = (close_dt - now).total_seconds() / 60
-                if mins_left > max_expiry or mins_left < 1:
+                if mins_left > max_expiry or mins_left < 0:
                     continue
             except:
                 continue
