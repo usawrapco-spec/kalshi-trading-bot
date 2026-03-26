@@ -947,6 +947,32 @@ def api_hot():
     return jsonify(current_hot_markets)
 
 
+@app.route('/api/learning')
+def api_learning():
+    try:
+        rates = get_win_rates()
+        if not rates:
+            return jsonify({'active': False, 'message': 'Not enough data yet (need 20+ resolved trades)'})
+
+        # Format for dashboard
+        result = {'active': True, 'categories': {}}
+        for category, buckets in rates.items():
+            items = []
+            for bucket, rate in sorted(buckets.items()):
+                # Get trade count for this bucket
+                items.append({
+                    'label': bucket,
+                    'win_rate': round(rate * 100, 1),
+                    'pass': rate >= MIN_WIN_RATE,
+                })
+            result['categories'][category] = items
+        result['min_win_rate'] = MIN_WIN_RATE * 100
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"API learning error: {e}")
+        return jsonify({'active': False, 'message': str(e)})
+
+
 @app.route('/api/rounds')
 def api_rounds():
     try:
@@ -1037,6 +1063,11 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="panel">
+  <div class="panel-header"><h2>Learning Engine</h2><div class="count" id="learn-status"></div></div>
+  <div class="panel-body" id="learn-body" style="padding:12px"><span class="loading">Loading...</span></div>
+</div>
+
+<div class="panel">
   <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
   <div class="panel-body"><table><thead><tr>
     <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Bid</th><th>Value</th><th>P&amp;L</th><th>Gain%</th>
@@ -1085,8 +1116,8 @@ function timeAgo(iso){
 }
 
 async function refresh(){
-  var [status,open,trades,hot,rounds]=await Promise.all([
-    fetchJSON('/api/status'),fetchJSON('/api/open'),fetchJSON('/api/trades'),fetchJSON('/api/hot'),fetchJSON('/api/rounds')
+  var [status,open,trades,hot,rounds,learn]=await Promise.all([
+    fetchJSON('/api/status'),fetchJSON('/api/open'),fetchJSON('/api/trades'),fetchJSON('/api/hot'),fetchJSON('/api/rounds'),fetchJSON('/api/learning')
   ]);
 
   if(status){
@@ -1186,6 +1217,28 @@ async function refresh(){
       h+='</tr>';
     });
     $('rounds-body').innerHTML=h||'<tr><td colspan="8" class="gray" style="text-align:center">No rounds yet</td></tr>';
+  }
+  if(learn){
+    if(!learn.active){
+      $('learn-status').textContent='collecting data...';
+      $('learn-body').innerHTML='<span class="gray">'+esc(learn.message||'Waiting for data')+'</span>';
+    }else{
+      $('learn-status').textContent='ACTIVE (min '+learn.min_win_rate+'% win rate)';
+      var h='<div style="display:flex;flex-wrap:wrap;gap:16px">';
+      var labels={'price_bucket':'By Price','side':'By Side','series':'By Series','time_bucket':'By Timing'};
+      for(var cat in learn.categories){
+        h+='<div style="min-width:140px"><div style="color:#ffaa00;font-size:10px;text-transform:uppercase;margin-bottom:6px">'+(labels[cat]||cat)+'</div>';
+        learn.categories[cat].forEach(function(item){
+          var color=item.pass?'#00d673':'#ff4444';
+          var icon=item.pass?'BUY':'SKIP';
+          h+='<div style="font-size:11px;margin-bottom:3px"><span style="color:'+color+';font-weight:700;width:35px;display:inline-block">'+icon+'</span> ';
+          h+=esc(item.label)+' <span style="color:'+color+'">'+item.win_rate+'%</span></div>';
+        });
+        h+='</div>';
+      }
+      h+='</div>';
+      $('learn-body').innerHTML=h;
+    }
   }
   $('last-update').textContent=new Date().toLocaleTimeString();
 }
