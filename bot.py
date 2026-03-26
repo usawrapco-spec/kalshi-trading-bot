@@ -26,7 +26,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY ===
 BUY_MIN = 0.01
 BUY_MAX = 0.99
-SELL_THRESHOLD = None        # No profit take — ride everything to settlement
+SELL_THRESHOLD = 1.50        # +150%: sell contracts
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
 CYCLE_SECONDS = 2
@@ -947,12 +947,12 @@ def run_cycle():
     balance = get_balance()
     logger.info(f"=== CYCLE START [{mode}] === Balance: ${balance:.2f}")
 
-    # Per-batch liquidation check
-    if _cycle_count % LIQUIDATE_CHECK_INTERVAL == 0:
-        try:
-            check_batch_liquidations()
-        except Exception as e:
-            logger.error(f"Batch liquidation check failed: {e}")
+    # Liquidation disabled — ride everything to settlement
+    # if _cycle_count % LIQUIDATE_CHECK_INTERVAL == 0:
+    #     try:
+    #         check_batch_liquidations()
+    #     except Exception as e:
+    #         logger.error(f"Batch liquidation check failed: {e}")
 
     check_sells()
     markets = fetch_all_markets()
@@ -1020,7 +1020,8 @@ def api_status():
         all_rounds_count = rounds_summary['count']
 
         # Overall = completed rounds + current round unrealized
-        overall_pnl = round(all_rounds_pnl + round_pnl, 2)
+        # Real P&L = current portfolio value minus starting balance
+        overall_pnl = round((cash + positions_value) - STARTING_BALANCE, 2)
 
         return jsonify({
             'portfolio': round(portfolio, 2),
@@ -1372,7 +1373,7 @@ tr:hover{background:var(--bg3) !important}
   <div class="header-right">
     <span>Buy $0.01 - $0.99</span>
     <span class="status-sep">|</span>
-    <span>Ride to Settlement</span>
+    <span>Sell +150%</span>
     <span class="status-sep">|</span>
     <span>Next cycle: <span class="countdown-box" id="countdown">--:--</span></span>
   </div>
