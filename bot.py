@@ -48,37 +48,36 @@ SERIES_TO_COIN = {
     'KXBTC15M': 'BTC', 'KXETH15M': 'ETH', 'KXSOL15M': 'SOL',
     'KXXRP15M': 'XRP', 'KXDOGE15M': 'DOGE', 'KXBTC1H': 'BTC',
 }
-COIN_TO_BINANCE = {
-    'BTC': 'BTCUSDT', 'ETH': 'ETHUSDT', 'SOL': 'SOLUSDT',
-    'XRP': 'XRPUSDT', 'DOGE': 'DOGEUSDT',
+COIN_TO_GECKO = {
+    'BTC': 'bitcoin', 'ETH': 'ethereum', 'SOL': 'solana',
+    'XRP': 'ripple', 'DOGE': 'dogecoin',
 }
-BINANCE_API = 'https://api.binance.com/api/v3/ticker/price'
-MAX_PRICE_HISTORY = 300  # 5 min at ~1/sec
+MAX_PRICE_HISTORY = 300
 
-# price_history = {'BTC': [{'time': timestamp, 'price': float}, ...], ...}
-price_history = {coin: [] for coin in COIN_TO_BINANCE}
+price_history = {coin: [] for coin in COIN_TO_GECKO}
 
 # Hourly contracts need longer expiry window
 SERIES_MAX_EXPIRY = {
     'KXBTC1H': 60,
 }
-DEFAULT_MAX_EXPIRY = MAX_MINS_TO_EXPIRY  # 20 min for 15M contracts
+DEFAULT_MAX_EXPIRY = MAX_MINS_TO_EXPIRY
 
 def fetch_crypto_prices():
-    """Fetch real-time prices from Binance for all tracked coins."""
+    """Fetch real-time prices from CoinGecko for all tracked coins."""
     now = time.time()
-    for coin, symbol in COIN_TO_BINANCE.items():
-        try:
-            resp = requests.get(f"{BINANCE_API}?symbol={symbol}", timeout=5)
-            resp.raise_for_status()
-            data = resp.json()
-            price = float(data['price'])
-            price_history[coin].append({'time': now, 'price': price})
-            # Trim to max entries
-            if len(price_history[coin]) > MAX_PRICE_HISTORY:
-                price_history[coin] = price_history[coin][-MAX_PRICE_HISTORY:]
-        except Exception as e:
-            logger.warning(f"Binance price fetch failed for {coin}: {e}")
+    ids = ','.join(COIN_TO_GECKO.values())
+    try:
+        resp = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd", timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        for coin, gecko_id in COIN_TO_GECKO.items():
+            if gecko_id in data and 'usd' in data[gecko_id]:
+                price = float(data[gecko_id]['usd'])
+                price_history[coin].append({'time': now, 'price': price})
+                if len(price_history[coin]) > MAX_PRICE_HISTORY:
+                    price_history[coin] = price_history[coin][-MAX_PRICE_HISTORY:]
+    except Exception as e:
+        logger.warning(f"CoinGecko price fetch failed: {e}")
 
 
 def get_momentum(coin):
