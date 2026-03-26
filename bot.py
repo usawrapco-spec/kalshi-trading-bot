@@ -103,7 +103,7 @@ def init_db():
 # === LEARNING ENGINE ===
 
 MIN_HISTORY = 20          # need at least 20 resolved trades before learning kicks in
-MIN_WIN_RATE = 0.40       # only buy combos with 40%+ historical win rate
+MIN_WIN_RATE = 0.15       # only skip truly terrible combos (15%+ win rate to pass)
 
 def get_win_rates():
     """Analyze last 1000 resolved trades and return win rates by price bucket, side, and series."""
