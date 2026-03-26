@@ -29,12 +29,12 @@ BUY_MAX = 0.99
 SELL_THRESHOLD = None        # No profit take — ride everything to settlement
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 20
-CYCLE_SECONDS = 10
+CYCLE_SECONDS = 3
 STARTING_BALANCE = 100000.00
 CASH_RESERVE = 0.50
 SAVINGS_RATE = 0.25
-MAX_BUYS_PER_CYCLE = 5
-CONTRACTS = 300
+MAX_BUYS_PER_CYCLE = 20
+CONTRACTS = 1
 MAX_POSITIONS_PER_SERIES = 3  # max open positions per series (prevents overloading hourly)
 MAX_ADDS = 5                  # can add to a winning position up to 5 times
 ADD_CONTRACTS = 20            # double down with more contracts on momentum plays
@@ -398,10 +398,7 @@ def buy_candidates(markets):
 
         logger.info(f"  MARKET: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
-        # Skip if we already have a position on this ticker
-        ticker_positions = [t for t in open_positions if t['ticker'] == ticker]
-        if ticker_positions:
-            continue
+        # Allow duplicate buys on same ticker
 
         # Buy cheapest side in range
         if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
