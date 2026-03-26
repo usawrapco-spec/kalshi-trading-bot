@@ -932,6 +932,9 @@ def api_status():
 
                 cur.execute("SELECT count, price FROM trades WHERE action = 'buy'")
                 all_buys = cur.fetchall()
+
+                cur.execute("SELECT COALESCE(SUM(pnl), 0) as total, COUNT(*) as count FROM rounds")
+                rounds_summary = cur.fetchone()
         finally:
             conn.close()
 
@@ -959,10 +962,20 @@ def api_status():
         round_pct = round((round_pnl / round_cost * 100), 1) if round_cost > 0 else 0
         round_peak = round(_peak_pnl, 4)
 
+        # Total P&L across all completed rounds
+        all_rounds_pnl = round(float(rounds_summary['total']), 2)
+        all_rounds_count = rounds_summary['count']
+
+        # Overall = completed rounds + current round unrealized
+        overall_pnl = round(all_rounds_pnl + round_pnl, 2)
+
         return jsonify({
             'portfolio': round(portfolio, 2),
             'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
+            'all_rounds_pnl': all_rounds_pnl,
+            'all_rounds_count': all_rounds_count,
+            'overall_pnl': overall_pnl,
             'round_pnl': round_pnl,
             'round_pct': round_pct,
             'round_cost': round(round_cost, 2),
@@ -1161,10 +1174,10 @@ tr:hover{background:#1a1a1a !important}
 </div>
 
 <div class="top-bar" style="flex-direction:column;gap:6px">
-  <div style="font-size:16px">PORTFOLIO: <span id="tb-portfolio">...</span></div>
+  <div style="font-size:20px">OVERALL P&amp;L: <span id="tb-overall">...</span></div>
+  <div style="font-size:12px;color:#888">Completed Rounds: <span id="tb-rounds-pnl">...</span> (<span id="tb-rounds-count">0</span> rounds) &nbsp;&nbsp; This Round: <span id="tb-thisround">...</span></div>
   <div style="font-size:12px;color:#888">Positions: <span id="tb-positions">...</span> &nbsp;&nbsp; Cash: <span id="tb-cash">...</span></div>
-  <div style="font-size:12px">P&amp;L: <span id="tb-pnl">...</span> &nbsp;&nbsp; Fees: <span id="tb-fees" class="red">...</span> &nbsp;&nbsp; Net: <span id="tb-net">...</span></div>
-  <div style="font-size:12px">RECORD: <span id="tb-record">...</span> &nbsp;&nbsp; SAVINGS: <span id="tb-savings" class="green">...</span></div>
+  <div style="font-size:12px">RECORD: <span id="tb-record">...</span> &nbsp;&nbsp; Fees: <span id="tb-fees" class="red">...</span></div>
   <div style="font-size:12px">AVG RETURN: <span id="tb-avgret">...</span> &nbsp;&nbsp; AVG WIN: <span id="tb-avgwin" class="green">...</span> &nbsp;&nbsp; AVG LOSS: <span id="tb-avgloss" class="red">...</span></div>
 </div>
 
@@ -1233,16 +1246,17 @@ async function refresh(){
   ]);
 
   if(status){
-    $('tb-portfolio').textContent='$'+(status.portfolio||0).toFixed(2);
+    var ov=status.overall_pnl||0;
+    $('tb-overall').innerHTML='<span class="'+cls(ov)+'" style="font-size:24px">'+(ov>=0?'+$':'-$')+Math.abs(ov).toFixed(2)+'</span>';
+    var arp=status.all_rounds_pnl||0;
+    $('tb-rounds-pnl').innerHTML='<span class="'+cls(arp)+'">'+(arp>=0?'+$':'-$')+Math.abs(arp).toFixed(2)+'</span>';
+    $('tb-rounds-count').textContent=status.all_rounds_count||0;
+    var trp=status.round_pnl||0;
+    $('tb-thisround').innerHTML='<span class="'+cls(trp)+'">'+(trp>=0?'+$':'-$')+Math.abs(trp).toFixed(2)+'</span>';
     $('tb-positions').textContent='$'+(status.positions_value||0).toFixed(2);
     $('tb-cash').textContent='$'+(status.cash||0).toFixed(2);
-    var pnl=status.net_pnl||0;
-    $('tb-pnl').innerHTML='<span class="'+cls(pnl)+'">'+(pnl>=0?'+$':'-$')+Math.abs(pnl).toFixed(4)+'</span>';
-    $('tb-fees').textContent='-$'+(status.total_fees||0).toFixed(4)+' ('+(status.total_contracts||0)+'c)';
-    var net=status.pnl_after_fees||0;
-    $('tb-net').innerHTML='<span class="'+cls(net)+'">'+(net>=0?'+$':'-$')+Math.abs(net).toFixed(4)+'</span>';
-    $('tb-record').innerHTML='<span class="green">'+(status.wins||0)+'W</span> / <span class="red">'+(status.losses||0)+'L</span> / <span style="color:#ffaa00">'+(status.expired||0)+'E</span>';
-    $('tb-savings').textContent='$'+(status.savings||0).toFixed(4);
+    $('tb-fees').textContent='-$'+(status.total_fees||0).toFixed(2)+' ('+(status.total_contracts||0)+'c)';
+    $('tb-record').innerHTML='<span class="green">'+(status.wins||0)+'W</span> / <span class="red">'+(status.losses||0)+'L</span>';
     var ar=status.avg_return||0;
     $('tb-avgret').innerHTML='<span class="'+cls(ar)+'">'+(ar>=0?'+':'')+ar.toFixed(1)+'%</span>';
     var rp=status.round_pnl||0;
