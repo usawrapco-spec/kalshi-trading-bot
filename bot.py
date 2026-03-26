@@ -806,10 +806,23 @@ def api_status():
 
         mode = "PAPER" if not ENABLE_TRADING else "LIVE"
 
+        # Live round P&L
+        round_cost = sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_positions)
+        round_value = positions_value
+        round_pnl = round(round_value - round_cost, 4)
+        round_pct = round((round_pnl / round_cost * 100), 1) if round_cost > 0 else 0
+        round_peak = round(_peak_pnl, 4)
+
         return jsonify({
             'portfolio': round(portfolio, 2),
             'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
+            'round_pnl': round_pnl,
+            'round_pct': round_pct,
+            'round_cost': round(round_cost, 2),
+            'round_value': round(round_value, 2),
+            'round_peak': round_peak,
+            'round_positions': len(open_positions),
             'net_pnl': round(total_pnl, 4),
             'total_fees': total_fees,
             'pnl_after_fees': pnl_after_fees,
@@ -953,6 +966,12 @@ tr:hover{background:#1a1a1a !important}
   <div style="font-size:12px">AVG RETURN: <span id="tb-avgret">...</span> &nbsp;&nbsp; AVG WIN: <span id="tb-avgwin" class="green">...</span> &nbsp;&nbsp; AVG LOSS: <span id="tb-avgloss" class="red">...</span></div>
 </div>
 
+<div class="top-bar" style="flex-direction:column;gap:6px;border:2px solid #ffaa00">
+  <div style="font-size:14px;color:#ffaa00">LIVE ROUND</div>
+  <div style="font-size:20px"><span id="rnd-pnl">...</span> &nbsp; <span id="rnd-pct" style="font-size:14px">...</span></div>
+  <div style="font-size:12px;color:#888">Cost: <span id="rnd-cost">...</span> &nbsp;&nbsp; Value: <span id="rnd-value">...</span> &nbsp;&nbsp; Positions: <span id="rnd-count">...</span> &nbsp;&nbsp; Peak: <span id="rnd-peak" class="green">...</span></div>
+</div>
+
 <div class="panel">
   <div class="panel-header"><h2>Open Positions</h2><div class="count" id="open-count"></div></div>
   <div class="panel-body"><table><thead><tr>
@@ -1012,6 +1031,13 @@ async function refresh(){
     $('tb-savings').textContent='$'+(status.savings||0).toFixed(4);
     var ar=status.avg_return||0;
     $('tb-avgret').innerHTML='<span class="'+cls(ar)+'">'+(ar>=0?'+':'')+ar.toFixed(1)+'%</span>';
+    var rp=status.round_pnl||0;
+    $('rnd-pnl').innerHTML='<span class="'+cls(rp)+'">'+(rp>=0?'+$':'-$')+Math.abs(rp).toFixed(2)+'</span>';
+    $('rnd-pct').innerHTML='<span class="'+cls(rp)+'">'+(rp>=0?'+':'')+(status.round_pct||0).toFixed(1)+'%</span>';
+    $('rnd-cost').textContent='$'+(status.round_cost||0).toFixed(2);
+    $('rnd-value').textContent='$'+(status.round_value||0).toFixed(2);
+    $('rnd-count').textContent=(status.round_positions||0);
+    $('rnd-peak').textContent='+$'+(status.round_peak||0).toFixed(2);
     $('tb-avgwin').textContent='+$'+(status.avg_win||0).toFixed(4);
     $('tb-avgloss').textContent='-$'+Math.abs(status.avg_loss||0).toFixed(4);
     var mode=status.mode||'PAPER';
