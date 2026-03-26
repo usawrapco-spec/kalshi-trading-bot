@@ -1573,7 +1573,7 @@ async function refresh(){
     var naf=status.pnl_after_fees||status.net_pnl||ov;
     $('tb-net-pnl').innerHTML='<span class="'+cls(naf)+'">'+fmtPnl(naf)+'</span>';
     var cashout=(status.cash||0)+(status.positions_value||0);
-    var cashoutProfit=cashout-100000;
+    var cashoutProfit=status.overall_pnl||0;
     $('tb-cashout').innerHTML='$'+cashout.toFixed(2)+' <span style="font-size:11px" class="'+cls(cashoutProfit)+'">('+fmtPnl(cashoutProfit)+')</span>';
     $('tb-positions').innerHTML='<span style="color:var(--gold)">$'+(status.positions_value||0).toFixed(2)+'</span>';
     $('tb-cash').innerHTML='<span style="color:var(--blue)">$'+(status.cash||0).toFixed(2)+'</span>';
