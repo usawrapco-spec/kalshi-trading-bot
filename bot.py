@@ -41,11 +41,83 @@ PORTFOLIO_TAKE_PROFIT = None  # disabled — using individual take profit
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M', 'KXBTC1H']
 
+# === CRYPTO PRICE TRACKING ===
+
+# Map series tickers to coin symbols
+SERIES_TO_COIN = {
+    'KXBTC15M': 'BTC', 'KXETH15M': 'ETH', 'KXSOL15M': 'SOL',
+    'KXXRP15M': 'XRP', 'KXDOGE15M': 'DOGE', 'KXBTC1H': 'BTC',
+}
+COIN_TO_BINANCE = {
+    'BTC': 'BTCUSDT', 'ETH': 'ETHUSDT', 'SOL': 'SOLUSDT',
+    'XRP': 'XRPUSDT', 'DOGE': 'DOGEUSDT',
+}
+BINANCE_API = 'https://api.binance.com/api/v3/ticker/price'
+MAX_PRICE_HISTORY = 300  # 5 min at ~1/sec
+
+# price_history = {'BTC': [{'time': timestamp, 'price': float}, ...], ...}
+price_history = {coin: [] for coin in COIN_TO_BINANCE}
+
 # Hourly contracts need longer expiry window
 SERIES_MAX_EXPIRY = {
     'KXBTC1H': 60,
 }
 DEFAULT_MAX_EXPIRY = MAX_MINS_TO_EXPIRY  # 20 min for 15M contracts
+
+def fetch_crypto_prices():
+    """Fetch real-time prices from Binance for all tracked coins."""
+    now = time.time()
+    for coin, symbol in COIN_TO_BINANCE.items():
+        try:
+            resp = requests.get(f"{BINANCE_API}?symbol={symbol}", timeout=5)
+            resp.raise_for_status()
+            data = resp.json()
+            price = float(data['price'])
+            price_history[coin].append({'time': now, 'price': price})
+            # Trim to max entries
+            if len(price_history[coin]) > MAX_PRICE_HISTORY:
+                price_history[coin] = price_history[coin][-MAX_PRICE_HISTORY:]
+        except Exception as e:
+            logger.warning(f"Binance price fetch failed for {coin}: {e}")
+
+
+def get_momentum(coin):
+    """Calculate momentum for a coin. Returns dict with change_1m, change_5m, direction."""
+    hist = price_history.get(coin, [])
+    if not hist:
+        return {'price': None, 'change_1m': 0, 'change_5m': 0, 'direction': 'flat'}
+
+    now = time.time()
+    latest = hist[-1]['price']
+
+    # Find price ~1 min ago
+    price_1m = None
+    for entry in reversed(hist):
+        if now - entry['time'] >= 60:
+            price_1m = entry['price']
+            break
+
+    # Find price ~5 min ago
+    price_5m = None
+    for entry in reversed(hist):
+        if now - entry['time'] >= 300:
+            price_5m = entry['price']
+            break
+
+    change_1m = ((latest - price_1m) / price_1m * 100) if price_1m else 0
+    change_5m = ((latest - price_5m) / price_5m * 100) if price_5m else 0
+
+    # Direction based on 1-min change (primary) and 5-min change (secondary)
+    primary = change_1m if price_1m else change_5m
+    if abs(primary) < 0.1:
+        direction = 'flat'
+    elif primary > 0:
+        direction = 'up'
+    else:
+        direction = 'down'
+
+    return {'price': latest, 'change_1m': round(change_1m, 3), 'change_5m': round(change_5m, 3), 'direction': direction}
+
 
 # === DATABASE ===
 
@@ -577,11 +649,32 @@ def buy_candidates(markets):
         if ticker_positions:
             continue
 
-        # Buy cheapest side in range
-        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+        # Determine side using momentum if available
+        coin = SERIES_TO_COIN.get(market_series, '')
+        momentum = get_momentum(coin) if coin else None
+        momentum_side = None
+
+        if momentum and momentum['direction'] != 'flat':
+            if momentum['direction'] == 'up':
+                momentum_side = 'yes'
+            else:
+                momentum_side = 'no'
+
+        # Pick side: momentum-preferred if in range, else cheapest side in range
+        if momentum_side == 'yes' and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
+            logger.info(f"  MOMENTUM: {coin} {momentum['change_1m']:+.3f}% 1m, {momentum['change_5m']:+.3f}% 5m -> buying YES")
+        elif momentum_side == 'no' and BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
+            side, price, bid = 'no', no_ask, no_bid
+            logger.info(f"  MOMENTUM: {coin} {momentum['change_1m']:+.3f}% 1m, {momentum['change_5m']:+.3f}% 5m -> buying NO")
+        elif yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
+            side, price, bid = 'yes', yes_ask, yes_bid
+            if momentum and coin:
+                logger.info(f"  MOMENTUM: {coin} {momentum['change_1m']:+.3f}% 1m, {momentum['change_5m']:+.3f}% 5m -> FLAT, buying cheapest (YES)")
         elif BUY_MIN <= no_ask <= BUY_MAX and no_bid > 0:
             side, price, bid = 'no', no_ask, no_bid
+            if momentum and coin:
+                logger.info(f"  MOMENTUM: {coin} {momentum['change_1m']:+.3f}% 1m, {momentum['change_5m']:+.3f}% 5m -> FLAT, buying cheapest (NO)")
         elif BUY_MIN <= yes_ask <= BUY_MAX and yes_bid > 0:
             side, price, bid = 'yes', yes_ask, yes_bid
         else:
@@ -990,6 +1083,12 @@ def run_cycle():
         except Exception as e:
             logger.error(f"Portfolio take profit check failed: {e}")
 
+    # Fetch real-time crypto prices for momentum tracking
+    try:
+        fetch_crypto_prices()
+    except Exception as e:
+        logger.error(f"Crypto price fetch failed: {e}")
+
     check_sells()
     markets = fetch_all_markets()
     update_hot_markets(markets)
@@ -1237,6 +1336,25 @@ def api_learning():
         return jsonify({'active': False, 'message': str(e)})
 
 
+@app.route('/api/crypto')
+def api_crypto():
+    try:
+        result = []
+        for coin in COIN_TO_BINANCE:
+            m = get_momentum(coin)
+            result.append({
+                'coin': coin,
+                'price': m['price'],
+                'change_1m': m['change_1m'],
+                'change_5m': m['change_5m'],
+                'direction': m['direction'],
+            })
+        return jsonify(result)
+    except Exception as e:
+        logger.error(f"API crypto error: {e}")
+        return jsonify([])
+
+
 @app.route('/api/rounds')
 def api_rounds():
     try:
@@ -1474,6 +1592,14 @@ tr:hover{background:var(--bg3) !important}
   </div>
 </div>
 
+<!-- Crypto Prices -->
+<div class="panel full-width" style="margin-bottom:14px">
+  <div class="panel-header"><h2>Crypto Prices</h2><div class="count" id="crypto-count">Real-time from Binance</div></div>
+  <div class="panel-body" style="max-height:200px"><table><thead><tr>
+    <th>Coin</th><th>Price</th><th>1m Change</th><th>5m Change</th><th>Direction</th>
+  </tr></thead><tbody id="crypto-body"><tr><td colspan="5" class="loading">Loading...</td></tr></tbody></table></div>
+</div>
+
 <!-- Grid layout -->
 <div class="grid-layout">
 
@@ -1556,8 +1682,8 @@ function timeAgo(iso){
 }
 
 async function refresh(){
-  var [status,open,trades,hot,rounds,learn,batches]=await Promise.all([
-    fetchJSON('/api/status'),fetchJSON('/api/open'),fetchJSON('/api/trades'),fetchJSON('/api/hot'),fetchJSON('/api/rounds'),fetchJSON('/api/learning'),fetchJSON('/api/batches')
+  var [status,open,trades,hot,rounds,learn,batches,crypto]=await Promise.all([
+    fetchJSON('/api/status'),fetchJSON('/api/open'),fetchJSON('/api/trades'),fetchJSON('/api/hot'),fetchJSON('/api/rounds'),fetchJSON('/api/learning'),fetchJSON('/api/batches'),fetchJSON('/api/crypto')
   ]);
 
   if(status){
@@ -1746,6 +1872,25 @@ async function refresh(){
       $('learn-body').innerHTML=h;
     }
   }
+  if(crypto){
+    var h='';
+    crypto.forEach(function(c){
+      var dirArrow='<span class="gray">-</span>';
+      if(c.direction==='up')dirArrow='<span class="green" style="font-weight:700;font-size:14px">&#9650;</span>';
+      else if(c.direction==='down')dirArrow='<span class="red" style="font-weight:700;font-size:14px">&#9660;</span>';
+      var c1=cls(c.change_1m);var c5=cls(c.change_5m);
+      var priceStr=c.price!==null?'$'+c.price.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:c.price<1?6:2}):'--';
+      h+='<tr>';
+      h+='<td style="font-weight:700;color:var(--gold)">'+esc(c.coin)+'</td>';
+      h+='<td style="font-weight:600">'+priceStr+'</td>';
+      h+='<td class="'+c1+'" style="font-weight:600">'+(c.change_1m>=0?'+':'')+c.change_1m.toFixed(3)+'%</td>';
+      h+='<td class="'+c5+'" style="font-weight:600">'+(c.change_5m>=0?'+':'')+c.change_5m.toFixed(3)+'%</td>';
+      h+='<td>'+dirArrow+' <span style="font-size:10px;color:var(--text2)">'+esc(c.direction)+'</span></td>';
+      h+='</tr>';
+    });
+    $('crypto-body').innerHTML=h||'<tr><td colspan="5" class="empty-state">Waiting for price data...</td></tr>';
+  }
+
   $('last-update').textContent=new Date().toLocaleTimeString();
 }
 
