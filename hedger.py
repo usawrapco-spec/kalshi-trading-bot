@@ -791,13 +791,16 @@ tr:hover{background:rgba(255,255,255,.015)}
 
 <div class="header-bar">
   <div class="header-left">
-    <span class="brand">HEDGER</span>
+    <span class="brand">HEDGER POOL</span>
     <span class="mode-badge" id="modeBadge">PAPER</span>
   </div>
   <div class="header-right">
     <span><span class="live-dot dot-paper" id="liveDot"></span><span id="modeText">PAPER MODE</span></span>
     <span id="lastUpdate">--</span>
   </div>
+</div>
+<div style="background:var(--bg1);border-bottom:1px solid var(--border);padding:10px 24px;font-size:11px;color:var(--text2);line-height:1.6">
+  <strong style="color:#b060ff">STRATEGY:</strong> Buy 3 contracts per cycle spread across BTC, ETH, SOL, XRP, DOGE — always the cheapest side. Build a pool of up to 15 positions. Every 2 seconds, check if the pool is net positive by +5% or more. If yes, sell everything and lock in profit. Start a new pool. Winners and losers cancel out — you only need the pool to be slightly positive at any point to cash out. Positions that don't hit +5% ride to settlement.
 </div>
 
 <div class="main">

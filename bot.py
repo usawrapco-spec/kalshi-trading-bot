@@ -1528,17 +1528,20 @@ tr:hover{background:var(--bg3) !important}
 <!-- Header Bar -->
 <div class="header-bar">
   <div class="header-left">
-    <span class="brand">Kalshi Terminal</span>
+    <span class="brand">Kalshi Scalper</span>
     <span class="live-dot dot-paper" id="mode-dot"></span>
     <span class="mode-badge mode-paper" id="mode-badge">PAPER MODE</span>
   </div>
   <div class="header-right">
-    <span>Buy $0.15 - $0.40</span>
+    <span>Buy $0.01 - $0.40</span>
     <span class="status-sep">|</span>
-    <span>Sell +150%</span>
+    <span>Sell +150% / Portfolio +100%</span>
     <span class="status-sep">|</span>
     <span>Next cycle: <span class="countdown-box" id="countdown">--:--</span></span>
   </div>
+</div>
+<div style="background:var(--bg1);border-bottom:1px solid var(--border);padding:10px 24px;font-size:11px;color:var(--text2);line-height:1.6">
+  <strong style="color:var(--gold)">STRATEGY:</strong> Buy the cheapest side (yes or no) of 15-min crypto contracts in the first 5 minutes of each window (10-15 min before expiry). Price range $0.01-$0.40. One buy per ticker, 10 contracts each. Dip buy if position showed +20% promise then dipped below entry. Individual take profit at +150%. Sell entire portfolio if combined open positions hit +100%. Otherwise ride to settlement. Winners pay $1.00, losers pay $0.
 </div>
 
 <!-- Main Content -->
