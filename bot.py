@@ -1339,7 +1339,7 @@ def api_learning():
 def api_crypto():
     try:
         result = []
-        for coin in COIN_TO_BINANCE:
+        for coin in COIN_TO_GECKO:
             m = get_momentum(coin)
             result.append({
                 'coin': coin,
