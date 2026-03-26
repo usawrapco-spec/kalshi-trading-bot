@@ -548,9 +548,7 @@ def buy_candidates(markets):
                 market_series = s
                 break
 
-        # Per-series position cap
-        if market_series and series_position_counts.get(market_series, 0) >= MAX_POSITIONS_PER_SERIES:
-            continue
+        # Per-series cap removed — using MAX_POSITIONS instead
 
         # Expiry filter — hourly gets longer window
         max_expiry = SERIES_MAX_EXPIRY.get(market_series, DEFAULT_MAX_EXPIRY) if market_series else DEFAULT_MAX_EXPIRY
