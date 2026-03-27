@@ -491,14 +491,14 @@ def api_positions():
         now = datetime.now(timezone.utc)
         results = []
 
-        # Buy times from our DB
-        buy_times = {}
+        # Our DB entries for accurate entry price + buy times
+        db_entries = {}
         try:
             conn = get_db()
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT ticker, MIN(bought_at) as bought_at FROM scraper_trades WHERE status='open' GROUP BY ticker")
+                cur.execute("SELECT ticker, price, count, MIN(bought_at) as bought_at FROM scraper_trades WHERE status='open' GROUP BY ticker, price, count")
                 for row in cur.fetchall():
-                    buy_times[row['ticker']] = row['bought_at']
+                    db_entries[row['ticker']] = row
             conn.close()
         except:
             pass
@@ -514,9 +514,16 @@ def api_positions():
 
             side = 'yes' if position_fp > 0 else 'no'
             count = int(abs(position_fp))
-            cost = abs(sf(pos.get('total_traded_dollars', '0')))
             fees = sf(pos.get('fees_paid_dollars', '0'))
-            entry_per = cost / count if count > 0 else 0
+
+            # Use our DB entry price if we have it (accurate), else estimate from Kalshi
+            db_entry = db_entries.get(ticker)
+            if db_entry:
+                entry_per = sf(db_entry['price'])
+                cost = entry_per * (db_entry.get('count') or 1)
+            else:
+                cost = abs(sf(pos.get('total_traded_dollars', '0')))
+                entry_per = cost / count if count > 0 else 0
 
             # Live bid from cached market data
             market = _cache['markets'].get(ticker, {})
@@ -528,10 +535,10 @@ def api_positions():
                     current_bid = sf(market.get('no_bid_dollars', '0'))
 
             current_value = current_bid * count if current_bid > 0 else 0
-            unrealized = round(current_value - cost, 4) if current_bid > 0 else 0
+            unrealized = round(current_value - (entry_per * count), 4) if current_bid > 0 else 0
             gain_pct = ((current_bid - entry_per) / entry_per * 100) if entry_per > 0 and current_bid > 0 else 0
 
-            bought_at = buy_times.get(ticker)
+            bought_at = db_entry['bought_at'] if db_entry else None
             mins_held = 0
             if bought_at:
                 if bought_at.tzinfo is None:
