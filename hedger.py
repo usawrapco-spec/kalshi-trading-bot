@@ -190,7 +190,7 @@ def get_balance():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT price, count FROM hedger_trades WHERE action = 'buy'")
+            cur.execute("SELECT price, count FROM hedger_trades WHERE action = 'buy' AND pnl IS NULL")
             buys = cur.fetchall()
             buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in buys)
             cur.execute("SELECT pnl FROM hedger_trades WHERE pnl IS NOT NULL")
