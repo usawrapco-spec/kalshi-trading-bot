@@ -658,7 +658,7 @@ tr:hover{background:#1a1a1a}
 
 <div class="header">
   <span class="live-dot"></span>
-  SCRAPER BOT &mdash; buy $0.01-$0.99 cheapest, cut 50%+ losers at 5min, ride rest to settlement
+  SCRAPER BOT &mdash; buy $0.01-$0.50 cheapest, cut 70%+ losers at 5min, ride rest to settlement
   &mdash; <span id="last-update">--</span>
 </div>
 
@@ -852,8 +852,8 @@ function updateRoundTimer(){
   var totalWindowSecs=15*60;
   var secsLeft=totalWindowSecs-secsIntoWindow;
 
-  /* Phases: Buy 0-9min, Hold/Cut 9-14min, Settle 14-15min */
-  var buyEnd=9*60;      /* stop buying at 6min left = 9min in */
+  /* Phases: Buy 0-5min, Hold/Cut 5-14min, Settle 14-15min */
+  var buyEnd=5*60;      /* stop buying at 10min left = 5min in */
   var holdEnd=14*60;    /* last minute is settlement */
 
   var pctDone=secsIntoWindow/totalWindowSecs*100;
