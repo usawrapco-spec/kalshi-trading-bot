@@ -301,7 +301,7 @@ def buy_cheapest(markets):
     bal = _cache.get('balance', {})
     cash = bal.get('balance', 0)
     positions_value = bal.get('portfolio_value', 0)
-    max_in_positions = (cash + positions_value) * 0.25
+    max_in_positions = (cash + positions_value) * 0.50
     if positions_value >= max_in_positions:
         logger.info(f"Position cap: ${positions_value:.2f} >= 25% of ${cash + positions_value:.2f} (${max_in_positions:.2f})")
         return
@@ -322,7 +322,7 @@ def buy_cheapest(markets):
 
     # Check if this buy would exceed 25% cap
     if positions_value + best['price'] > max_in_positions:
-        logger.info(f"Skip buy: ${positions_value + best['price']:.2f} would exceed 25% cap ${max_in_positions:.2f}")
+        logger.info(f"Skip buy: ${positions_value + best['price']:.2f} would exceed 50% cap ${max_in_positions:.2f}")
         return
 
     logger.info(f"CHEAPEST: {best['ticker']} {best['side']} @ ${best['price']:.2f} ({best['mins_left']:.1f}min left)")
@@ -552,15 +552,19 @@ def api_closed():
         for t in trades:
             entry = sf(t['price'])
             bid = sf(t.get('current_bid', 0))
-            gain_pct = ((bid - entry) / entry * 100) if entry > 0 and bid > 0 else 0
+            count = t.get('count', 1) or 1
+            pnl = sf(t.get('pnl', 0))
+            fees = sf(t.get('fees', 0))
+            cost = entry * count
+            gain_pct = (pnl / cost * 100) if cost > 0 else 0
             results.append({
                 'ticker': t['ticker'],
                 'side': t['side'],
-                'count': t.get('count', 1),
+                'count': count,
                 'entry': entry,
                 'exit': bid,
-                'pnl': sf(t.get('pnl', 0)),
-                'fees': sf(t.get('fees', 0)),
+                'pnl': pnl,
+                'fees': fees,
                 'gain_pct': round(gain_pct, 1),
                 'reason': t.get('close_reason', ''),
                 'closed_at': str(t.get('closed_at', '')),
@@ -737,8 +741,8 @@ tr:hover{background:#1a1a1a}
 <div class="panel">
   <div class="panel-header"><h2>Closed Trades</h2><div class="count" id="closed-label"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Fees</th><th>Result</th><th>When</th>
-  </tr></thead><tbody id="closed-body"><tr><td colspan="9" class="gray" style="text-align:center;padding:20px">Loading...</td></tr></tbody></table></div>
+    <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Gain%</th><th>Fees</th><th>Result</th><th>When</th>
+  </tr></thead><tbody id="closed-body"><tr><td colspan="10" class="gray" style="text-align:center;padding:20px">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="footer">Scraper Bot &mdash; live market prices from Kalshi API &mdash; auto-refresh 2s</div>
@@ -815,6 +819,7 @@ async function refresh(){
       var h='';
       closed.forEach(function(t){
         var pc=cls(t.pnl);
+        var gc=cls(t.gain_pct);
         var tag=t.reason==='win'?'tag-win':t.reason==='cut_loss'?'tag-cut':'tag-loss';
         var label=t.reason==='win'?'WIN':t.reason==='cut_loss'?'CUT':'LOSS';
         h+='<tr>';
@@ -824,12 +829,13 @@ async function refresh(){
         h+='<td>$'+t.entry.toFixed(2)+'</td>';
         h+='<td>$'+(t.exit||0).toFixed(2)+'</td>';
         h+='<td class="'+pc+'">'+(t.pnl>=0?'+':'')+t.pnl.toFixed(4)+'</td>';
+        h+='<td class="'+gc+'">'+(t.gain_pct>=0?'+':'')+t.gain_pct.toFixed(0)+'%</td>';
         h+='<td class="red">$'+(t.fees||0).toFixed(4)+'</td>';
         h+='<td><span class="tag '+tag+'">'+label+'</span></td>';
         h+='<td>'+timeAgo(t.closed_at)+'</td>';
         h+='</tr>';
       });
-      $('closed-body').innerHTML=h||'<tr><td colspan="9" class="gray" style="text-align:center;padding:20px">No trades yet</td></tr>';
+      $('closed-body').innerHTML=h||'<tr><td colspan="10" class="gray" style="text-align:center;padding:20px">No trades yet</td></tr>';
     }
 
     $('last-update').textContent=new Date().toLocaleTimeString();
