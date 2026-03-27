@@ -28,19 +28,16 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 STARTING_BALANCE = 20.00
 BUY_MIN = 0.01
 BUY_MAX = 0.40
-CONTRACTS_PER_BUY = 5           # buy 5 contracts per cycle, spread across coins
-MAX_POOL_SIZE = 10               # max open positions in the pool
-POOL_TAKE_PROFIT = 0.30          # sell all when pool is +30%
+CONTRACTS_PER_BUY = 3           # buy 3 contracts per pool per cycle
+POOL_SIZE = 3                    # positions per pool
+MAX_POOLS = 10                   # run up to 10 pools simultaneously
+POOL_TAKE_PROFIT = 0.30          # sell pool when +30%
 TAKER_FEE_RATE = 0.07
-MAX_MINS_TO_EXPIRY_15M = 15
-MIN_MINS_TO_EXPIRY_15M = 10
-MAX_MINS_TO_EXPIRY_1H = 55
-MIN_MINS_TO_EXPIRY_1H = 20
+MAX_MINS_TO_EXPIRY = 15
+MIN_MINS_TO_EXPIRY = 10
 CYCLE_SECONDS = 2
 CASH_RESERVE = 0.50
-CRYPTO_SERIES_15M = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
-CRYPTO_SERIES_1H = ['KXBTCD', 'KXETHD', 'KXSOLD', 'KXXRPD', 'KXDOGED']
-CRYPTO_SERIES = CRYPTO_SERIES_15M + CRYPTO_SERIES_1H
+CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
 # === DATABASE ===
 
@@ -98,7 +95,6 @@ init_db()
 auth = KalshiAuth()
 app = Flask(__name__)
 
-_current_round_id = None
 _pool_sold_flag = False      # set True momentarily when pool sells for confetti
 
 
@@ -221,38 +217,51 @@ def get_open_positions():
         conn.close()
 
 
-# === ROUND MANAGEMENT ===
+# === ROUND/POOL MANAGEMENT ===
 
-def get_or_create_round():
-    """Get the current open round, or create a new one."""
-    global _current_round_id
+def get_open_pools():
+    """Get all open pool (round) IDs."""
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id FROM hedger_rounds WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1")
-            row = cur.fetchone()
-            if row:
-                _current_round_id = row['id']
-                return _current_round_id
-            cur.execute("INSERT INTO hedger_rounds (started_at) VALUES (NOW()) RETURNING id")
-            _current_round_id = cur.fetchone()['id']
-            return _current_round_id
+            cur.execute("SELECT id FROM hedger_rounds WHERE ended_at IS NULL ORDER BY id")
+            return [row['id'] for row in cur.fetchall()]
     finally:
         conn.close()
 
 
-def close_round(positions, total_cost, total_value, pnl, pnl_pct, reason):
-    """Close the current round and start a new one."""
-    global _current_round_id, _pool_sold_flag
+def create_new_pool():
+    """Create a new pool (round) and return its ID."""
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("INSERT INTO hedger_rounds (started_at) VALUES (NOW()) RETURNING id")
+            return cur.fetchone()['id']
+    finally:
+        conn.close()
+
+
+def get_pool_positions(round_id):
+    """Get open positions for a specific pool."""
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM hedger_trades WHERE round_id = %s AND pnl IS NULL", (round_id,))
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def close_round(round_id, positions, total_cost, total_value, pnl, pnl_pct, reason):
+    """Close a specific pool/round."""
+    global _pool_sold_flag
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            if _current_round_id:
-                cur.execute(
-                    "UPDATE hedger_rounds SET ended_at = NOW(), positions = %s, total_cost = %s, total_value = %s, pnl = %s, pnl_pct = %s, exit_reason = %s WHERE id = %s",
-                    (positions, float(total_cost), float(total_value), float(pnl), float(pnl_pct), reason, _current_round_id)
-                )
-        _current_round_id = None
+            cur.execute(
+                "UPDATE hedger_rounds SET ended_at = NOW(), positions = %s, total_cost = %s, total_value = %s, pnl = %s, pnl_pct = %s, exit_reason = %s WHERE id = %s",
+                (positions, float(total_cost), float(total_value), float(pnl), float(pnl_pct), reason, round_id)
+            )
         _pool_sold_flag = True
     except Exception as e:
         logger.error(f"Close round failed: {e}")
@@ -326,50 +335,56 @@ def check_settlements():
 # === POOL SELL CHECK ===
 
 def check_pool_sell():
-    """If pool is net +5%, sell everything."""
-    open_pos = get_open_positions()
-    if not open_pos:
-        return False
+    """Check each open pool — if any is net +30%, sell it."""
+    open_pools = get_open_pools()
+    any_sold = False
 
-    total_cost = sum(sf(t.get('price')) * (t.get('count') or 1) for t in open_pos)
-    total_value = sum(sf(t.get('current_bid')) * (t.get('count') or 1) for t in open_pos)
+    for pool_id in open_pools:
+        positions = get_pool_positions(pool_id)
+        if not positions:
+            # Empty pool (all settled) — close it
+            close_round(pool_id, 0, 0, 0, 0, 'all_settled')
+            continue
 
-    if total_cost <= 0:
-        return False
+        total_cost = sum(sf(t.get('price')) * (t.get('count') or 1) for t in positions)
+        total_value = sum(sf(t.get('current_bid')) * (t.get('count') or 1) for t in positions)
 
-    pool_pct = (total_value - total_cost) / total_cost
-    logger.info(f"POOL CHECK: cost=${total_cost:.4f} value=${total_value:.4f} {pool_pct*100:+.1f}% (target +{POOL_TAKE_PROFIT*100:.0f}%)")
+        if total_cost <= 0:
+            continue
 
-    if pool_pct >= POOL_TAKE_PROFIT:
-        logger.info(f"POOL TAKE PROFIT: +{pool_pct*100:.1f}% -- selling all {len(open_pos)} positions")
-        total_pnl = 0
-        sold = 0
-        for trade in open_pos:
-            entry = sf(trade['price'])
-            bid = sf(trade.get('current_bid'))
-            count = trade.get('count') or 1
-            if bid <= 0:
-                bid = 0.001
-            buy_fee = kalshi_fee(entry, count)
-            sell_fee = kalshi_fee(bid, count)
-            pnl = round((bid - entry) * count - buy_fee - sell_fee, 4)
+        pool_pct = (total_value - total_cost) / total_cost
+        logger.info(f"POOL #{pool_id}: cost=${total_cost:.4f} value=${total_value:.4f} {pool_pct*100:+.1f}% ({len(positions)} pos)")
 
-            place_order(trade['ticker'], trade['side'], 'sell', bid, count)
-            conn = get_db()
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("UPDATE hedger_trades SET pnl = %s, current_bid = %s WHERE id = %s",
-                                (float(pnl), float(bid), trade['id']))
-            finally:
-                conn.close()
-            total_pnl += pnl
-            sold += 1
+        if pool_pct >= POOL_TAKE_PROFIT:
+            logger.info(f"POOL #{pool_id} TAKE PROFIT: +{pool_pct*100:.1f}% -- selling all {len(positions)} positions")
+            total_pnl = 0
+            sold = 0
+            for trade in positions:
+                entry = sf(trade['price'])
+                bid = sf(trade.get('current_bid'))
+                count = trade.get('count') or 1
+                if bid <= 0:
+                    bid = 0.001
+                buy_fee = kalshi_fee(entry, count)
+                sell_fee = kalshi_fee(bid, count)
+                pnl = round((bid - entry) * count - buy_fee - sell_fee, 4)
 
-        logger.info(f"POOL SOLD: {sold} positions, total P&L=${total_pnl:.4f}")
-        close_round(sold, total_cost, total_value, round(total_pnl, 4), round(pool_pct * 100, 1), 'pool_take_profit')
-        return True
+                place_order(trade['ticker'], trade['side'], 'sell', bid, count)
+                conn = get_db()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE hedger_trades SET pnl = %s, current_bid = %s WHERE id = %s",
+                                    (float(pnl), float(bid), trade['id']))
+                finally:
+                    conn.close()
+                total_pnl += pnl
+                sold += 1
 
-    return False
+            logger.info(f"POOL #{pool_id} SOLD: {sold} positions, P&L=${total_pnl:.4f}")
+            close_round(pool_id, sold, total_cost, total_value, round(total_pnl, 4), round(pool_pct * 100, 1), 'pool_take_profit')
+            any_sold = True
+
+    return any_sold
 
 
 # === BUY LOGIC ===
@@ -396,16 +411,32 @@ def fetch_all_markets():
 
 
 def buy_pool_contracts(markets):
-    """Buy CONTRACTS_PER_BUY contracts spread across different coins (cheapest side)."""
+    """Fill existing pools and create new ones up to MAX_POOLS."""
     balance = get_balance()
-    open_positions = get_open_positions()
-    logger.info(f"Balance: ${balance:.2f} | {len(open_positions)} pool positions")
+    open_pools = get_open_pools()
+    all_open = get_open_positions()
+    logger.info(f"Balance: ${balance:.2f} | {len(all_open)} positions across {len(open_pools)} pools")
 
-    if len(open_positions) >= MAX_POOL_SIZE:
-        logger.info(f"MAX POOL SIZE ({MAX_POOL_SIZE}) reached -- waiting for pool sell or settlement")
-        return
+    # Find a pool that needs filling, or create a new one
+    target_pool = None
+    pool_positions = []
 
-    slots = min(CONTRACTS_PER_BUY, MAX_POOL_SIZE - len(open_positions))
+    for pool_id in open_pools:
+        positions = get_pool_positions(pool_id)
+        if len(positions) < POOL_SIZE:
+            target_pool = pool_id
+            pool_positions = positions
+            break
+
+    if target_pool is None:
+        if len(open_pools) >= MAX_POOLS:
+            logger.info(f"MAX POOLS ({MAX_POOLS}) reached -- waiting for sells or settlements")
+            return
+        target_pool = create_new_pool()
+        pool_positions = []
+        logger.info(f"Created new pool #{target_pool}")
+
+    slots = min(CONTRACTS_PER_BUY, POOL_SIZE - len(pool_positions))
     if slots <= 0:
         return
 
@@ -415,8 +446,8 @@ def buy_pool_contracts(markets):
         return
 
     now = datetime.now(timezone.utc)
-    open_tickers = set(t.get('ticker', '') for t in open_positions)
-    open_sides = [t.get('side', '') for t in open_positions]
+    open_tickers = set(t.get('ticker', '') for t in all_open)
+    open_sides = [t.get('side', '') for t in pool_positions]
     yes_count = sum(1 for s in open_sides if s == 'yes')
     no_count = sum(1 for s in open_sides if s == 'no')
 
@@ -445,13 +476,8 @@ def buy_pool_contracts(markets):
         try:
             close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
             mins_left = (close_dt - now).total_seconds() / 60
-            # Use different expiry windows for 15M vs hourly series
-            if market_series in CRYPTO_SERIES_1H:
-                if mins_left > MAX_MINS_TO_EXPIRY_1H or mins_left < MIN_MINS_TO_EXPIRY_1H:
-                    continue
-            else:
-                if mins_left > MAX_MINS_TO_EXPIRY_15M or mins_left < MIN_MINS_TO_EXPIRY_15M:
-                    continue
+            if mins_left > MAX_MINS_TO_EXPIRY or mins_left < MIN_MINS_TO_EXPIRY:
+                continue
         except:
             continue
 
@@ -507,7 +533,7 @@ def buy_pool_contracts(markets):
     series_list = list(candidates_by_series.keys())
     random.shuffle(series_list)
 
-    round_id = get_or_create_round()
+    round_id = target_pool
     bought = 0
 
     series_idx = 0
@@ -572,13 +598,12 @@ def run_cycle():
     # 1. Check settlements
     check_settlements()
 
-    # 2. Check if pool hit +5% target
-    sold = check_pool_sell()
+    # 2. Check each pool for take profit
+    check_pool_sell()
 
-    # 3. If we didn't sell the pool, buy more contracts
-    if not sold:
-        markets = fetch_all_markets()
-        buy_pool_contracts(markets)
+    # 3. Buy more contracts — fill existing pools or create new ones
+    markets = fetch_all_markets()
+    buy_pool_contracts(markets)
 
     balance = get_balance()
     logger.info(f"=== HEDGER CYCLE END [{mode}] === Balance: ${balance:.2f}")
@@ -633,7 +658,9 @@ def api_status():
             'pool_pnl': pool_pnl,
             'pool_pct': pool_pct,
             'pool_target': POOL_TAKE_PROFIT * 100,
-            'max_pool': MAX_POOL_SIZE,
+            'max_pool': POOL_SIZE,
+            'max_pools': MAX_POOLS,
+            'active_pools': len([r for r in get_open_pools()]),
             'resolved_pnl': round(total_resolved_pnl, 4),
             'wins': wins,
             'losses': losses,
@@ -834,7 +861,7 @@ tr:hover{background:rgba(255,255,255,.015)}
   </div>
 </div>
 <div style="background:var(--bg1);border-bottom:1px solid var(--border);padding:10px 24px;font-size:11px;color:var(--text2);line-height:1.6">
-  <strong style="color:#b060ff">STRATEGY:</strong> Buy 5 contracts per cycle across BTC, ETH, SOL, XRP, DOGE — mixed YES/NO sides for real hedging. 15-min + hourly contracts. Build a pool of up to 10 positions. Every 2 seconds, check if the pool is net positive by +30% or more. If yes, sell everything and lock in profit. Start a new pool. Mixed sides mean winners offset losers — you just need the pool to swing +30% to cash out.
+  <strong style="color:#b060ff">STRATEGY:</strong> Run up to 10 pools simultaneously, each with 3 mixed YES/NO positions across BTC, ETH, SOL, XRP, DOGE (15-min contracts). Every 2 seconds, check each pool — if any is +30%, sell it and lock in profit. Multiple pools = more volume, more chances to hit +30%. Mixed sides create real hedging.
 </div>
 
 <div class="main">
