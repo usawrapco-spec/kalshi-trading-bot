@@ -658,7 +658,7 @@ tr:hover{background:#1a1a1a}
 
 <div class="header">
   <span class="live-dot"></span>
-  SCRAPER BOT &mdash; buy $0.01-$0.50 cheapest, cut 70%+ losers at 5min, ride rest to settlement
+  SCRAPER BOT &mdash; buy $0.01-$0.50 cheapest, cut -70% losers at 5min, ride rest to settlement
   &mdash; <span id="last-update">--</span>
 </div>
 
