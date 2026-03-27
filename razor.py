@@ -484,39 +484,25 @@ def api_status():
 
 @app.route('/api/positions')
 def api_positions():
-    """Open positions from cache with cached market prices."""
+    """Open positions from OUR DB with live market bids."""
     try:
-        all_positions = _cache.get('positions', [])
+        conn = get_db()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM scraper_trades WHERE status='open' ORDER BY bought_at")
+            db_trades = cur.fetchall()
+        conn.close()
         now = datetime.now(timezone.utc)
+        wml = mins_left_in_window()
         results = []
 
-        # Batch-load buy times from DB
-        buy_times = {}
-        try:
-            conn = get_db()
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT ticker, MIN(bought_at) as bought_at FROM scraper_trades WHERE status='open' GROUP BY ticker")
-                for row in cur.fetchall():
-                    buy_times[row['ticker']] = row['bought_at']
-            conn.close()
-        except:
-            pass
+        for t in db_trades:
+            ticker = t['ticker']
+            side = t['side']
+            entry = sf(t['price'])
+            count = t.get('count') or 1
+            fees = sf(t.get('fees', 0))
 
-        for pos in all_positions:
-            ticker = pos.get('ticker', '')
-            position_fp = sf(pos.get('position_fp', '0'))
-            if position_fp == 0:
-                continue
-            # Only show positions from our 15M crypto series
-            if not any(ticker.startswith(series.replace('15M', '')) and '15M' in ticker for series in CRYPTO_SERIES):
-                continue
-
-            side = 'yes' if position_fp > 0 else 'no'
-            count = int(abs(position_fp))
-            cost = sf(pos.get('total_traded_dollars', '0'))
-            fees = sf(pos.get('fees_paid_dollars', '0'))
-
-            # Get bid from cached market data
+            # Get live bid from cached market data
             market = _cache['markets'].get(ticker, {})
             current_bid = 0
             if market:
@@ -525,33 +511,30 @@ def api_positions():
                 else:
                     current_bid = sf(market.get('no_bid_dollars', '0'))
 
-            # Buy time from batch query
-            bought_at = buy_times.get(ticker)
-            mins_held = 0
-            if bought_at:
-                if bought_at.tzinfo is None:
-                    bought_at = bought_at.replace(tzinfo=timezone.utc)
-                mins_held = (now - bought_at).total_seconds() / 60
+            bought_at = t['bought_at']
+            if bought_at and bought_at.tzinfo is None:
+                bought_at = bought_at.replace(tzinfo=timezone.utc)
+            mins_held = (now - bought_at).total_seconds() / 60 if bought_at else 0
 
+            cost = entry * count
             current_value = current_bid * count if current_bid > 0 else 0
-            entry_per = abs(cost) / count if count > 0 else 0
-            unrealized = round(current_value - abs(cost), 4) if current_bid > 0 else 0
-            gain_pct = ((current_value - abs(cost)) / abs(cost) * 100) if cost != 0 and current_bid > 0 else 0
+            unrealized = round(current_value - cost, 4) if current_bid > 0 else 0
+            gain_pct = ((current_bid - entry) / entry * 100) if entry > 0 and current_bid > 0 else 0
 
             results.append({
                 'ticker': ticker,
                 'side': side,
                 'count': count,
-                'cost': round(abs(cost), 4),
-                'entry_per': round(entry_per, 4),
+                'cost': round(cost, 4),
+                'entry_per': round(entry, 2),
                 'current_bid': round(current_bid, 2),
                 'current_value': round(current_value, 4),
                 'unrealized': unrealized,
                 'fees': round(fees, 4),
                 'gain_pct': round(gain_pct, 1),
                 'mins_held': round(mins_held, 1),
-                'window_mins_left': round(mins_left_in_window(), 1),
-                'cut_eligible': mins_left_in_window() <= CUT_WHEN_MINS_LEFT,
+                'window_mins_left': round(wml, 1),
+                'cut_eligible': wml <= CUT_WHEN_MINS_LEFT,
             })
 
         results.sort(key=lambda x: x['gain_pct'], reverse=True)
