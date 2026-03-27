@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hedger Pool Terminal</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#06080d;--bg1:#0c1017;--bg2:#111820;--bg3:#1a2130;
+  --border:#1a2235;--border2:#243050;
+  --text:#c8d0e0;--text2:#6a7490;--text3:#3a4260;
+  --green:#00e68a;--green2:#00cc7a;
+  --red:#ff4466;--red2:#ee3355;
+  --gold:#f0b040;--blue:#4488ff;--cyan:#40d0e0;--purple:#a855f7;
+}
+body{background:var(--bg);color:var(--text);font-family:'JetBrains Mono',monospace;font-size:12px;line-height:1.5;min-height:100vh;display:flex;flex-direction:column}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+@keyframes confetti-fall{0%{transform:translateY(-100vh) rotate(0deg);opacity:1}100%{transform:translateY(100vh) rotate(720deg);opacity:0}}
+
+.live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;animation:pulse 1.8s ease-in-out infinite;vertical-align:middle}
+.dot-paper{background:var(--gold);box-shadow:0 0 8px var(--gold)}
+.dot-live{background:var(--green);box-shadow:0 0 8px var(--green)}
+
+.header-bar{background:var(--bg1);border-bottom:1px solid var(--border);padding:10px 24px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+.header-left{display:flex;align-items:center;gap:16px}
+.brand{font-size:13px;font-weight:700;color:var(--purple);letter-spacing:2px;text-transform:uppercase}
+.mode-badge{font-size:10px;padding:3px 10px;border-radius:3px;font-weight:600;letter-spacing:1px}
+.mode-paper{background:rgba(240,176,64,.15);color:var(--gold);border:1px solid rgba(240,176,64,.3)}
+.mode-live{background:rgba(0,230,138,.15);color:var(--green);border:1px solid rgba(0,230,138,.3)}
+.header-right{display:flex;align-items:center;gap:16px;font-size:10px;color:var(--text2)}
+
+.main-wrap{flex:1;padding:16px 20px;max-width:1600px;margin:0 auto;width:100%}
+
+.hero-card{background:var(--bg1);border:1px solid var(--border);border-radius:8px;padding:24px 32px;text-align:center;position:relative;overflow:hidden;margin-bottom:14px}
+.hero-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--purple),transparent)}
+.hero-label{font-size:10px;color:var(--text2);text-transform:uppercase;letter-spacing:2px;margin-bottom:6px}
+.hero-value{font-size:40px;font-weight:800;letter-spacing:-1px;line-height:1.1}
+.hero-sub{display:flex;justify-content:center;gap:32px;margin-top:14px;flex-wrap:wrap}
+.hero-sub-item{text-align:center}
+.hero-sub-label{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px}
+.hero-sub-value{font-size:15px;font-weight:600;margin-top:2px}
+
+.stats-bar{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px;margin-bottom:14px}
+.stat-card{background:var(--bg1);border:1px solid var(--border);border-radius:6px;padding:12px 14px;position:relative;overflow:hidden}
+.stat-card::after{content:'';position:absolute;bottom:0;left:0;right:0;height:1px}
+.stat-card.a-green::after{background:var(--green)}
+.stat-card.a-red::after{background:var(--red)}
+.stat-card.a-gold::after{background:var(--gold)}
+.stat-card.a-blue::after{background:var(--blue)}
+.stat-card.a-purple::after{background:var(--purple)}
+.stat-label{font-size:9px;color:var(--text3);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px}
+.stat-value{font-size:15px;font-weight:700}
+
+.panel{background:var(--bg1);border:1px solid var(--border);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
+.panel-header{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--bg2)}
+.panel-header h2{color:var(--purple);font-size:11px;text-transform:uppercase;letter-spacing:1.5px;font-weight:600;display:flex;align-items:center;gap:8px}
+.panel-header h2::before{content:'';display:inline-block;width:3px;height:12px;background:var(--purple);border-radius:1px}
+.panel-header .count{color:var(--text2);font-size:10px}
+.panel-body{max-height:500px;overflow-y:auto;flex:1}
+.panel-body::-webkit-scrollbar{width:4px}
+.panel-body::-webkit-scrollbar-track{background:var(--bg1)}
+.panel-body::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
+
+.grid-layout{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:1100px){.grid-layout{grid-template-columns:1fr}}
+
+table{width:100%;border-collapse:collapse;font-size:11px}
+th{color:var(--text3);text-align:left;padding:8px 10px;border-bottom:1px solid var(--border);text-transform:uppercase;font-size:9px;letter-spacing:.8px;font-weight:600;position:sticky;top:0;background:var(--bg1);z-index:1}
+td{padding:7px 10px;border-bottom:1px solid rgba(26,34,53,.5)}
+tr:hover{background:var(--bg3) !important}
+.green{color:var(--green)}.red{color:var(--red)}.gray{color:var(--text3)}.gold{color:var(--gold)}
+
+.pool-card{background:var(--bg1);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:10px}
+.pool-header{padding:10px 14px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;background:var(--bg2);font-size:11px;font-weight:600}
+
+.confetti-container{position:fixed;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:9999;overflow:hidden}
+.confetti-piece{position:absolute;width:10px;height:10px;top:-20px;animation:confetti-fall 3s ease-in forwards}
+
+.status-bar{background:var(--bg1);border-top:1px solid var(--border);padding:8px 24px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:8px;font-size:10px;color:var(--text3)}
+</style>
+</head>
+<body>
+
+<div class="header-bar">
+  <div class="header-left">
+    <span class="brand">Hedger Pool</span>
+    <span class="live-dot dot-paper" id="modeDot"></span>
+    <span class="mode-badge mode-paper" id="modeBadge">PAPER</span>
+  </div>
+  <div class="header-right">
+    <span>BTC | ETH | SOL | XRP | DOGE</span><span>|</span>
+    <span>15-min | Mixed YES/NO</span><span>|</span>
+    <span>Sell +30%</span><span>|</span>
+    <span id="lastUpdate">--</span>
+  </div>
+</div>
+
+<div class="main-wrap">
+
+<div class="hero-card">
+  <div class="hero-label">Overall Profit &amp; Loss</div>
+  <div class="hero-value" id="heroPnl">...</div>
+  <div class="hero-sub">
+    <div class="hero-sub-item"><div class="hero-sub-label">Cash</div><div class="hero-sub-value" id="hCash">...</div></div>
+    <div class="hero-sub-item"><div class="hero-sub-label">Open Positions</div><div class="hero-sub-value" id="hPos">...</div></div>
+    <div class="hero-sub-item"><div class="hero-sub-label">Rounds P&L</div><div class="hero-sub-value" id="hRounds">...</div></div>
+    <div class="hero-sub-item"><div class="hero-sub-label">Cash Out Value</div><div class="hero-sub-value" id="hCashout">...</div></div>
+  </div>
+</div>
+
+<div class="stats-bar">
+  <div class="stat-card a-blue"><div class="stat-label">Cash</div><div class="stat-value" id="stCash">--</div></div>
+  <div class="stat-card a-gold"><div class="stat-label">Positions Value</div><div class="stat-value" id="stPosVal">--</div></div>
+  <div class="stat-card a-green"><div class="stat-label">Record</div><div class="stat-value" id="stRecord">--</div></div>
+  <div class="stat-card a-purple"><div class="stat-label">Active Pools</div><div class="stat-value" id="stPools">--</div></div>
+  <div class="stat-card a-green"><div class="stat-label">Rounds Won</div><div class="stat-value green" id="stRoundsW">--</div></div>
+  <div class="stat-card a-red"><div class="stat-label">Avg Loss</div><div class="stat-value red" id="stAvgL">--</div></div>
+  <div class="stat-card a-gold"><div class="stat-label">Rounds P&L</div><div class="stat-value" id="stRoundsPnl">--</div></div>
+</div>
+
+<div class="grid-layout">
+
+<div class="panel">
+  <div class="panel-header"><h2>Live Pools</h2><span class="count" id="poolCount">0 open</span></div>
+  <div class="panel-body" id="poolsContainer" style="padding:8px">
+    <div style="padding:20px;text-align:center;color:var(--text3)">Waiting for positions...</div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="panel-header"><h2>Recent Trades</h2><span class="count" id="tradeCount">0</span></div>
+  <div class="panel-body">
+    <table><thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Entry</th><th>P&L</th><th>Gains</th></tr></thead><tbody id="historyTable"></tbody></table>
+  </div>
+</div>
+
+</div>
+</div>
+
+<div class="status-bar">
+  <span>Hedger Pool | 5 pools x 3 positions | 15-min crypto | Mixed YES/NO | 2s cycles</span>
+  <span>Last: <span id="sbTime">--</span></span>
+</div>
+
+<div class="confetti-container" id="confettiContainer"></div>
+
+<script>
+const $=s=>document.getElementById(s);
+const pc=v=>v>=0?'green':'red';
+const pf=v=>(v>=0?'+$':'-$')+Math.abs(v).toFixed(2);
+const pf4=v=>(v>=0?'+$':'-$')+Math.abs(v).toFixed(4);
+
+function fireConfetti(){
+  const c=$('confettiContainer');
+  const colors=['#00e68a','#ff4466','#f0b040','#4488ff','#a855f7','#40d0e0'];
+  for(let i=0;i<80;i++){
+    const p=document.createElement('div');
+    p.className='confetti-piece';
+    p.style.left=Math.random()*100+'%';
+    p.style.background=colors[Math.floor(Math.random()*colors.length)];
+    p.style.animationDelay=Math.random()*1.5+'s';
+    p.style.animationDuration=(2+Math.random()*2)+'s';
+    p.style.width=(6+Math.random()*8)+'px';
+    p.style.height=(6+Math.random()*8)+'px';
+    p.style.borderRadius=Math.random()>.5?'50%':'2px';
+    c.appendChild(p);
+  }
+  setTimeout(()=>{c.innerHTML=''},5000);
+}
+
+async function refresh(){
+  try{
+    const [s,poolRes,histRes]=await Promise.all([
+      fetch('/api/status').then(r=>r.json()),
+      fetch('/api/pool').then(r=>r.json()),
+      fetch('/api/history').then(r=>r.json()),
+    ]);
+
+    // Mode
+    if(s.mode==='LIVE'){$('modeDot').className='live-dot dot-live';$('modeBadge').className='mode-badge mode-live';$('modeBadge').textContent='LIVE';}
+
+    // Hero
+    const ov=s.overall_pnl||0;
+    $('heroPnl').innerHTML='<span class="'+pc(ov)+'">'+pf(ov)+'</span>';
+    $('hCash').innerHTML='$'+(s.cash||0).toFixed(2);
+    $('hPos').innerHTML='$'+(s.positions_value||0).toFixed(2);
+    $('hRounds').innerHTML='<span class="'+pc(s.rounds_pnl||0)+'">'+pf(s.rounds_pnl||0)+'</span>';
+    $('hCashout').innerHTML='$'+(s.portfolio||0).toFixed(2)+' <span style="font-size:11px">('+pf(ov)+')</span>';
+
+    // Stats bar
+    $('stCash').textContent='$'+(s.cash||0).toFixed(2);
+    $('stPosVal').textContent='$'+(s.positions_value||0).toFixed(2);
+    $('stRecord').innerHTML='<span class="green">'+(s.wins||0)+'W</span> / <span class="red">'+(s.losses||0)+'L</span>';
+    $('stPools').textContent=(s.active_pools||0)+' / '+(s.max_pools||5);
+    $('stRoundsW').textContent=(s.rounds_count||0)+' rounds';
+    const losses=s.losses||0;
+    if(losses>0){
+      const totalLoss=histRes.filter(t=>t.pnl<0).reduce((s,t)=>s+t.pnl,0);
+      $('stAvgL').textContent=pf(totalLoss/losses);
+    }
+    $('stRoundsPnl').innerHTML='<span class="'+pc(s.rounds_pnl||0)+'">'+pf(s.rounds_pnl||0)+'</span>';
+
+    // Pools
+    $('poolCount').textContent=(s.active_pools||0)+' open / '+(s.pool_positions||0)+' pos';
+    const cont=$('poolsContainer');
+    if(poolRes.length===0){
+      cont.innerHTML='<div style="padding:20px;text-align:center;color:var(--text3)">Waiting for positions...</div>';
+    } else {
+      const pools={};
+      poolRes.forEach(p=>{const rid=p.round_id||0;if(!pools[rid])pools[rid]=[];pools[rid].push(p);});
+      let html='';
+      Object.keys(pools).sort((a,b)=>a-b).forEach(rid=>{
+        const pos=pools[rid];
+        const cost=pos.reduce((s,p)=>s+p.price,0);
+        const value=pos.reduce((s,p)=>s+p.current_bid,0);
+        const pnl=value-cost;
+        const pct=cost>0?((pnl/cost)*100):0;
+        const minLeft=Math.min(...pos.map(p=>p.mins_remaining).filter(m=>m!=null));
+        const clock=isFinite(minLeft)?((minLeft<1?Math.round(minLeft*60)+'s':Math.floor(minLeft)+'m '+Math.round((minLeft%1)*60)+'s')):'--';
+        const clockCls=isFinite(minLeft)&&minLeft<3?'red':isFinite(minLeft)&&minLeft<7?'gold':'green';
+        html+='<div class="pool-card">';
+        html+='<div class="pool-header"><span>Pool #'+rid+' &mdash; '+pos.length+'/3 &mdash; <span class="'+clockCls+'">'+clock+'</span></span><span class="'+pc(pct)+'">'+(pct>=0?'+':'')+pct.toFixed(1)+'% '+pf4(pnl)+'</span></div>';
+        html+='<table><thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th></tr></thead><tbody>';
+        pos.forEach(p=>{
+          const c=p.gain_pct>=0?'green':'red';
+          html+='<tr><td>'+p.ticker+'</td><td>'+p.side.toUpperCase()+'</td><td>$'+p.price.toFixed(2)+'</td><td>$'+p.current_bid.toFixed(2)+'</td><td class="'+c+'">'+pf4(p.unrealized)+'</td><td class="'+c+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(1)+'%</td></tr>';
+        });
+        html+='</tbody></table></div>';
+      });
+      cont.innerHTML=html;
+    }
+
+    // Trades
+    $('tradeCount').textContent=(histRes.length||0)+' trades';
+    const ht=$('historyTable');
+    if(histRes.length===0){
+      ht.innerHTML='<tr><td colspan=6 style="color:var(--text3);text-align:center;padding:20px">No trades yet</td></tr>';
+    } else {
+      ht.innerHTML=histRes.slice(0,40).map(t=>{
+        const cls=t.pnl>=0?'green':'red';
+        const ts=new Date(t.created_at).toLocaleTimeString();
+        const gains=t.price>0?((t.pnl/t.price)*100).toFixed(0)+'%':'--';
+        return '<tr><td style="font-size:9px">'+ts+'</td><td>'+t.ticker+'</td><td>'+t.side.toUpperCase()+'</td><td>$'+t.price.toFixed(2)+'</td><td class="'+cls+'">'+pf4(t.pnl)+'</td><td class="'+cls+'">'+gains+'</td></tr>';
+      }).join('');
+    }
+
+    if(s.confetti) fireConfetti();
+    $('lastUpdate').textContent=new Date().toLocaleTimeString();
+    $('sbTime').textContent=new Date().toLocaleTimeString();
+  }catch(e){console.error(e)}
+}
+refresh();setInterval(refresh,2000);
+</script>
+</body>
+</html>
