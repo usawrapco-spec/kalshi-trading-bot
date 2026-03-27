@@ -691,6 +691,28 @@ def api_pool():
             else:
                 unrealized = 0
                 gain_pct = 0
+            # Parse expiry from ticker (e.g. KXBTC15M-26MAR262330-30 → 23:30 UTC-4)
+            ticker_str = t.get('ticker', '')
+            created = t.get('created_at')
+            mins_remaining = None
+            try:
+                import re as _re
+                m = _re.search(r'-\d{2}[A-Z]{3}\d{2}(\d{2})(\d{2})-', ticker_str)
+                if m and created:
+                    hh, mm = int(m.group(1)), int(m.group(2))
+                    # Expiry is in EDT (UTC-4), convert to UTC
+                    from datetime import timedelta
+                    created_dt = created if isinstance(created, datetime) else datetime.fromisoformat(str(created))
+                    expiry_utc = created_dt.replace(hour=(hh + 4) % 24, minute=mm, second=0, microsecond=0)
+                    if expiry_utc < created_dt:
+                        expiry_utc += timedelta(days=1)
+                    now_utc = datetime.now(timezone.utc)
+                    mins_remaining = round((expiry_utc - now_utc).total_seconds() / 60, 1)
+                    if mins_remaining < 0:
+                        mins_remaining = 0
+            except:
+                pass
+
             positions.append({
                 'id': t['id'],
                 'ticker': t.get('ticker', ''),
@@ -702,7 +724,7 @@ def api_pool():
                 'round_id': t.get('round_id'),
                 'unrealized': unrealized,
                 'gain_pct': gain_pct,
-                'mins_to_expiry': float(t.get('mins_to_expiry') or 0),
+                'mins_remaining': mins_remaining,
                 'created_at': str(t.get('created_at', '')),
             })
         positions.sort(key=lambda p: p['gain_pct'], reverse=True)
@@ -1000,7 +1022,10 @@ async function refresh(){
         const cls = pct>=0?'pnl-pos':'pnl-neg';
         const statusCls = pct>=0?'val-green':'val-red';
         html += '<div class="section">';
-        html += '<div class="section-header" style="display:flex;justify-content:space-between"><span>Pool #'+rid+' &mdash; '+positions.length+' positions</span><span class="'+statusCls+'">'+(pct>=0?'+':'')+pct.toFixed(1)+'%  $'+pnlSign(pnl)+'</span></div>';
+        const minLeft = Math.min(...positions.map(p=>p.mins_remaining).filter(m=>m!==null&&m!==undefined));
+        const clock = isFinite(minLeft)?((minLeft<1?Math.round(minLeft*60)+'s':Math.floor(minLeft)+'m '+Math.round((minLeft%1)*60)+'s')):'--';
+        const clockCls = isFinite(minLeft)&&minLeft<3?'val-red':isFinite(minLeft)&&minLeft<7?'val-gold':'val-green';
+        html += '<div class="section-header" style="display:flex;justify-content:space-between"><span>Pool #'+rid+' &mdash; '+positions.length+' pos &mdash; <span class="'+clockCls+'">'+clock+'</span></span><span class="'+statusCls+'">'+(pct>=0?'+':'')+pct.toFixed(1)+'%  $'+pnlSign(pnl)+'</span></div>';
         html += '<table><thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th></tr></thead><tbody>';
         positions.forEach(p=>{
           const c = p.gain_pct>=0?'pnl-pos':'pnl-neg';
@@ -1036,7 +1061,7 @@ async function refresh(){
 }
 
 refresh();
-setInterval(refresh, 5000);
+setInterval(refresh, 2000);
 </script>
 </body>
 </html>"""
