@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 KALSHI_HOST = os.environ.get('KALSHI_API_HOST', 'https://api.elections.kalshi.com')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://kalshi:kalshi@localhost:5432/kalshi')
 PORT = int(os.environ.get('PORT', 8080))
-ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
+ENABLE_TRADING = True  # LIVE TRADING ENABLED
 
 # === STRATEGY ===
 BUY_MIN = 0.01
@@ -31,11 +31,11 @@ TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_EXPIRY = 10       # only buy 10-15 min window (early buys win 60%)
 CYCLE_SECONDS = 2
-STARTING_BALANCE = 100.00
+STARTING_BALANCE = 20.00
 CASH_RESERVE = 0.50
 SAVINGS_RATE = 0.00
 MAX_BUYS_PER_CYCLE = 5
-CONTRACTS = 10
+CONTRACTS = 1
 MAX_POSITIONS = 25
 PORTFOLIO_TAKE_PROFIT = None  # disabled — ride to settlement for max payout
 
