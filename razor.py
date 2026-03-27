@@ -28,8 +28,8 @@ TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 10          # only buy when 10-15 min left (first 5 min of window)
 CYCLE_SECONDS = 2
-CONTRACTS = 1
-MAX_POSITIONS = 10
+CONTRACTS = 3
+MAX_POSITIONS = 15
 CUT_WHEN_MINS_LEFT = 5        # start cutting when 5 min left in window
 CUT_LOSS_THRESHOLD = -0.70
 TAKE_PROFIT_THRESHOLD = 1.00  # sell at +100% gain
@@ -45,6 +45,13 @@ _cache = {
     'markets': {},          # ticker -> market data
     'balance': {},          # from /portfolio/balance
     'positions': [],        # from /portfolio/positions
+
+# Round-start balance tracking — snapshot once per 15-min window
+_round = {
+    'start_balance': 0,     # cash at round start
+    'spent': 0,             # total cost of buys this round
+    'active': False,        # is buy window active?
+    'window_id': -1,        # which 15-min window we're in
     'updated': 0,
 }
 
@@ -336,15 +343,17 @@ def check_sells():
 
 
 def buy_cheapest(markets):
+    global _round
     open_positions = get_open_positions()
 
-    # Check position budget: max 50% of portfolio in positions
-    bal = _cache.get('balance', {})
-    cash = bal.get('balance', 0)
-    positions_value = bal.get('portfolio_value', 0)
-    max_in_positions = (cash + positions_value) * 0.50
-    if positions_value >= max_in_positions:
-        logger.info(f"RAZOR Position cap: ${positions_value:.2f} >= 50% of ${cash + positions_value:.2f} (${max_in_positions:.2f})")
+    # Check round budget: max 50% of round-start balance
+    max_spend = _round['start_balance'] * 0.50
+    if max_spend <= 0:
+        logger.info("RAZOR Waiting for round balance snapshot")
+        return
+    cost_this_buy = markets[0].get('price', 0.50) * CONTRACTS if markets else 0.50
+    if _round['spent'] >= max_spend:
+        logger.info(f"RAZOR Round budget spent: ${_round['spent']:.2f} / ${max_spend:.2f}")
         return
 
     if len(open_positions) >= MAX_POSITIONS:
@@ -360,10 +369,11 @@ def buy_cheapest(markets):
         return
 
     best = candidates[0]
+    buy_cost = best['price'] * CONTRACTS
 
-    # Check if this buy would exceed 50% cap
-    if positions_value + best['price'] > max_in_positions:
-        logger.info(f"RAZOR Skip buy: ${positions_value + best['price']:.2f} would exceed 50% cap ${max_in_positions:.2f}")
+    # Check if this buy would exceed round budget
+    if _round['spent'] + buy_cost > max_spend:
+        logger.info(f"RAZOR Round budget: ${_round['spent'] + buy_cost:.2f} would exceed ${max_spend:.2f}")
         return
 
     logger.info(f"RAZOR CHEAPEST: {best['ticker']} {best['side']} @ ${best['price']:.2f} ({best['mins_left']:.1f}min left)")
@@ -384,7 +394,8 @@ def buy_cheapest(markets):
                 "INSERT INTO scraper_trades (ticker, side, price, count, current_bid, fees) VALUES (%s, %s, %s, %s, %s, %s)",
                 (best['ticker'], best['side'], float(fill_price), filled, float(fill_price), float(buy_fee))
             )
-        logger.info(f"RAZOR BOUGHT: {best['ticker']} {best['side']} x{filled} @ ${fill_price:.2f} (asked ${best['price']:.2f}) fee=${buy_fee:.4f}")
+        _round['spent'] += fill_price * filled
+        logger.info(f"RAZOR BOUGHT: {best['ticker']} {best['side']} x{filled} @ ${fill_price:.2f} (asked ${best['price']:.2f}) fee=${buy_fee:.4f} | round spent: ${_round['spent']:.2f}/${max_spend:.2f}")
     finally:
         conn.close()
 
@@ -424,10 +435,27 @@ def refresh_cache():
 
 
 def run_cycle():
+    global _round
+
+    # Detect new 15-min window and snapshot balance
+    now = datetime.now(timezone.utc)
+    current_window = (now.hour * 4) + (now.minute // 15)
+    if current_window != _round['window_id']:
+        # New window — snapshot balance
+        try:
+            resp = kalshi_get('/portfolio/balance')
+            cash = resp.get('balance', 0) / 100.0
+            _round['start_balance'] = cash
+            _round['spent'] = 0
+            _round['window_id'] = current_window
+            logger.info(f"RAZOR NEW ROUND: cash=${cash:.2f}, max spend=${cash * 0.50:.2f}")
+        except:
+            pass
+
     open_pos = get_open_positions()
     total_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_pos)
     total_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_pos)
-    logger.info(f"=== RAZOR CYCLE === {len(open_pos)} positions | cost=${total_cost:.2f} | value=${total_value:.2f}")
+    logger.info(f"=== RAZOR CYCLE === {len(open_pos)} positions | cost=${total_cost:.2f} | value=${total_value:.2f} | round spent=${_round['spent']:.2f}/${_round['start_balance'] * 0.50:.2f}")
     check_sells()
     markets = fetch_all_markets()
     # Cache all market data for dashboard
