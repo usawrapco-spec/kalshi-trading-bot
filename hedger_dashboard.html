@@ -130,9 +130,9 @@ tr:hover{background:var(--bg3) !important}
 </div>
 
 <div class="panel">
-  <div class="panel-header"><h2>Recent Trades</h2><span class="count" id="tradeCount">0</span></div>
+  <div class="panel-header"><h2>Completed Pools</h2><span class="count" id="tradeCount">0</span></div>
   <div class="panel-body">
-    <table><thead><tr><th>Time</th><th>Ticker</th><th>Side</th><th>Entry</th><th>P&L</th><th>Gains</th></tr></thead><tbody id="historyTable"></tbody></table>
+    <table><thead><tr><th>#</th><th>Time</th><th>Pos</th><th>Cost</th><th>Value</th><th>P&L</th><th>%</th></tr></thead><tbody id="roundsTable"></tbody></table>
   </div>
 </div>
 
@@ -172,10 +172,10 @@ function fireConfetti(){
 
 async function refresh(){
   try{
-    const [s,poolRes,histRes]=await Promise.all([
+    const [s,poolRes,roundsRes]=await Promise.all([
       fetch('/api/status').then(r=>r.json()),
       fetch('/api/pool').then(r=>r.json()),
-      fetch('/api/history').then(r=>r.json()),
+      fetch('/api/rounds').then(r=>r.json()),
     ]);
 
     // Mode
@@ -197,7 +197,7 @@ async function refresh(){
     $('stRoundsW').textContent=(s.rounds_count||0)+' rounds';
     const losses=s.losses||0;
     if(losses>0){
-      const totalLoss=histRes.filter(t=>t.pnl<0).reduce((s,t)=>s+t.pnl,0);
+      const totalLoss=(s.resolved_pnl||0)-(s.rounds_pnl||0);
       $('stAvgL').textContent=pf(totalLoss/losses);
     }
     $('stRoundsPnl').innerHTML='<span class="'+pc(s.rounds_pnl||0)+'">'+pf(s.rounds_pnl||0)+'</span>';
@@ -232,17 +232,17 @@ async function refresh(){
       cont.innerHTML=html;
     }
 
-    // Trades
-    $('tradeCount').textContent=(histRes.length||0)+' trades';
-    const ht=$('historyTable');
-    if(histRes.length===0){
-      ht.innerHTML='<tr><td colspan=6 style="color:var(--text3);text-align:center;padding:20px">No trades yet</td></tr>';
+    // Completed pools
+    $('tradeCount').textContent=(roundsRes.length||0)+' pools';
+    const rt=$('roundsTable');
+    if(roundsRes.length===0){
+      rt.innerHTML='<tr><td colspan=7 style="color:var(--text3);text-align:center;padding:20px">No completed pools yet</td></tr>';
     } else {
-      ht.innerHTML=histRes.slice(0,40).map(t=>{
-        const cls=t.pnl>=0?'green':'red';
-        const ts=new Date(t.created_at).toLocaleTimeString();
-        const gains=t.price>0?((t.pnl/t.price)*100).toFixed(0)+'%':'--';
-        return '<tr><td style="font-size:9px">'+ts+'</td><td>'+t.ticker+'</td><td>'+t.side.toUpperCase()+'</td><td>$'+t.price.toFixed(2)+'</td><td class="'+cls+'">'+pf4(t.pnl)+'</td><td class="'+cls+'">'+gains+'</td></tr>';
+      rt.innerHTML=roundsRes.slice(0,30).map(r=>{
+        const cls=r.pnl>=0?'green':'red';
+        const ts=new Date(r.ended_at).toLocaleTimeString();
+        const pctStr=(r.pnl_pct>=0?'+':'')+r.pnl_pct.toFixed(1)+'%';
+        return '<tr><td>#'+r.id+'</td><td style="font-size:9px">'+ts+'</td><td>'+r.positions+'</td><td>$'+r.cost.toFixed(2)+'</td><td>$'+r.value.toFixed(2)+'</td><td class="'+cls+'">'+pf4(r.pnl)+'</td><td class="'+cls+'">'+pctStr+'</td></tr>';
       }).join('');
     }
 

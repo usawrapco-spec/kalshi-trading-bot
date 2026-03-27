@@ -34,7 +34,7 @@ MAX_POOLS = 5                    # run up to 5 pools simultaneously
 POOL_TAKE_PROFIT = 0.10          # sell pool when +10%
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_EXPIRY = 10
+MIN_MINS_TO_EXPIRY = 1
 CYCLE_SECONDS = 2
 CASH_RESERVE = 0.50
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
@@ -411,33 +411,11 @@ def fetch_all_markets():
 
 
 def buy_pool_contracts(markets):
-    """Fill existing pools and create new ones up to MAX_POOLS."""
+    """Fill ALL pools up to MAX_POOLS, each with POOL_SIZE positions."""
     balance = get_balance()
     open_pools = get_open_pools()
     all_open = get_open_positions()
     logger.info(f"Balance: ${balance:.2f} | {len(all_open)} positions across {len(open_pools)} pools")
-
-    # Find a pool that needs filling, or create a new one
-    target_pool = None
-    pool_positions = []
-
-    for pool_id in open_pools:
-        positions = get_pool_positions(pool_id)
-        if len(positions) < POOL_SIZE:
-            target_pool = pool_id
-            pool_positions = positions
-            break
-
-    need_new_pool = target_pool is None
-    if need_new_pool:
-        if len(open_pools) >= MAX_POOLS:
-            logger.info(f"MAX POOLS ({MAX_POOLS}) reached -- waiting for sells or settlements")
-            return
-        # Don't create yet — wait until we confirm there are candidates
-
-    slots = min(CONTRACTS_PER_BUY, POOL_SIZE - len(pool_positions))
-    if slots <= 0:
-        return
 
     deployable = balance * (1.0 - CASH_RESERVE)
     if deployable <= 0.10:
@@ -446,20 +424,14 @@ def buy_pool_contracts(markets):
 
     now = datetime.now(timezone.utc)
     open_tickers = set(t.get('ticker', '') for t in all_open)
-    open_sides = [t.get('side', '') for t in pool_positions]
-    yes_count = sum(1 for s in open_sides if s == 'yes')
-    no_count = sum(1 for s in open_sides if s == 'no')
 
-    # Build candidates per series (coin), with both sides available
-    candidates_by_series = {}
+    # Build all available candidates with both sides
+    all_candidates = []
     for market in markets:
         ticker = market.get('ticker', '')
-
-        # Skip if we already hold this exact ticker
         if ticker in open_tickers:
             continue
 
-        # Figure out which series
         market_series = None
         for s in CRYPTO_SERIES:
             if ticker.startswith(s):
@@ -468,7 +440,6 @@ def buy_pool_contracts(markets):
         if not market_series:
             continue
 
-        # Expiry filter
         close_time = market.get('close_time') or market.get('expected_expiration_time')
         if not close_time:
             continue
@@ -483,112 +454,120 @@ def buy_pool_contracts(markets):
         yes_ask = float(market.get('yes_ask_dollars') or '999')
         no_ask = float(market.get('no_ask_dollars') or '999')
 
-        # Determine which side to buy based on pool balance
-        # Force mixed sides: if pool already has more YES, buy NO (and vice versa)
-        if yes_count > no_count:
-            # Need more NO — only consider NO side
-            if BUY_MIN <= no_ask <= BUY_MAX:
-                side = 'no'
-                price = no_ask
-            else:
-                continue
-        elif no_count > yes_count:
-            # Need more YES — only consider YES side
-            if BUY_MIN <= yes_ask <= BUY_MAX:
-                side = 'yes'
-                price = yes_ask
-            else:
-                continue
-        else:
-            # Pool is balanced — pick cheapest side
-            if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX:
-                side = 'yes'
-                price = yes_ask
-            elif no_ask < yes_ask and BUY_MIN <= no_ask <= BUY_MAX:
-                side = 'no'
-                price = no_ask
-            else:
-                continue
+        # Add both sides as candidates
+        if BUY_MIN <= yes_ask <= BUY_MAX:
+            all_candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'series': market_series, 'mins_left': mins_left})
+        if BUY_MIN <= no_ask <= BUY_MAX:
+            all_candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'series': market_series, 'mins_left': mins_left})
 
-        if market_series not in candidates_by_series:
-            candidates_by_series[market_series] = []
-        candidates_by_series[market_series].append({
-            'ticker': ticker,
-            'side': side,
-            'price': price,
-            'series': market_series,
-            'mins_left': mins_left,
-        })
-
-    if not candidates_by_series:
+    if not all_candidates:
         logger.info("No buy candidates found")
         return
 
-    # Sort each series by price (cheapest first)
-    for s in candidates_by_series:
-        candidates_by_series[s].sort(key=lambda c: c['price'])
+    # Sort by price to get similar-priced contracts
+    all_candidates.sort(key=lambda c: c['price'])
+    total_bought = 0
 
-    # Round-robin across different series to spread risk
-    series_list = list(candidates_by_series.keys())
-    random.shuffle(series_list)
+    # Fill each pool that needs positions, and create new pools up to MAX_POOLS
+    pools_to_fill = []
+    for pool_id in open_pools:
+        positions = get_pool_positions(pool_id)
+        if len(positions) < POOL_SIZE:
+            pools_to_fill.append((pool_id, positions))
 
-    # Create pool now that we have candidates
-    if need_new_pool:
-        target_pool = create_new_pool()
-        logger.info(f"Created new pool #{target_pool}")
-    round_id = target_pool
-    bought = 0
+    # Create new pools to reach MAX_POOLS
+    while len(open_pools) + len([p for p in pools_to_fill if p[0] not in open_pools]) < MAX_POOLS and len(pools_to_fill) < MAX_POOLS:
+        if deployable <= 0.10:
+            break
+        new_id = create_new_pool()
+        pools_to_fill.append((new_id, []))
+        open_pools.append(new_id)
+        logger.info(f"Created new pool #{new_id}")
 
-    series_idx = 0
-    attempts = 0
-    max_attempts = len(series_list) * 3  # avoid infinite loop
-
-    while bought < slots and attempts < max_attempts:
-        series = series_list[series_idx % len(series_list)]
-        series_idx += 1
-        attempts += 1
-
-        cands = candidates_by_series.get(series, [])
-        if not cands:
+    for pool_id, pool_positions in pools_to_fill:
+        slots = POOL_SIZE - len(pool_positions)
+        if slots <= 0:
             continue
 
-        cand = cands.pop(0)
-        price = cand['price']
-        cost = price + kalshi_fee(price, 1)
+        # Determine side balance for this pool
+        yes_count = sum(1 for t in pool_positions if t.get('side') == 'yes')
+        no_count = sum(1 for t in pool_positions if t.get('side') == 'no')
+        bought = 0
+        used_tickers = set(open_tickers)
 
-        if cost > deployable:
-            logger.info(f"  SKIP: {cand['ticker']} costs ${cost:.2f}, only ${deployable:.2f} deployable")
-            continue
+        for _ in range(slots):
+            # Pick side based on balance
+            if yes_count > no_count:
+                need_side = 'no'
+            elif no_count > yes_count:
+                need_side = 'yes'
+            else:
+                need_side = None  # any side
 
-        result = place_order(cand['ticker'], cand['side'], 'buy', price, 1)
-        if not result:
-            continue
+            # Find best candidate for this side
+            best = None
+            best_idx = None
+            for i, c in enumerate(all_candidates):
+                if c['ticker'] in used_tickers:
+                    continue
+                if need_side and c['side'] != need_side:
+                    continue
+                best = c
+                best_idx = i
+                break
 
-        order_id, filled = result
-        if filled <= 0:
-            continue
+            # Fallback: any side if preferred side not available
+            if best is None and need_side:
+                for i, c in enumerate(all_candidates):
+                    if c['ticker'] in used_tickers:
+                        continue
+                    best = c
+                    best_idx = i
+                    break
 
-        fee = kalshi_fee(price, filled)
-        conn = get_db()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO hedger_trades (ticker, side, action, price, count, series, mins_to_expiry, round_id, current_bid) VALUES (%s, %s, 'buy', %s, %s, %s, %s, %s, %s)",
-                    (cand['ticker'], cand['side'], float(price), filled, cand['series'], round(cand['mins_left'], 1), round_id, float(price))
-                )
-        finally:
-            conn.close()
+            if best is None:
+                break
 
-        deployable -= cost
-        bought += 1
-        # Update side counts for mixed-side balancing
-        if cand['side'] == 'yes':
-            yes_count += 1
-        else:
-            no_count += 1
-        logger.info(f"  BOUGHT: {cand['ticker']} {cand['side']} x{filled} @ ${price:.2f} (fee ${fee:.4f}) [{cand['series']}]")
+            price = best['price']
+            cost = price + kalshi_fee(price, 1)
+            if cost > deployable:
+                break
 
-    logger.info(f"BUY SUMMARY: bought {bought}/{slots} contracts across {len(set(c['series'] for c in [] ))} series")
+            result = place_order(best['ticker'], best['side'], 'buy', price, 1)
+            if not result:
+                all_candidates.pop(best_idx)
+                continue
+
+            order_id, filled = result
+            if filled <= 0:
+                all_candidates.pop(best_idx)
+                continue
+
+            fee = kalshi_fee(price, filled)
+            conn = get_db()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO hedger_trades (ticker, side, action, price, count, series, mins_to_expiry, round_id, current_bid) VALUES (%s, %s, 'buy', %s, %s, %s, %s, %s, %s)",
+                        (best['ticker'], best['side'], float(price), filled, best['series'], round(best['mins_left'], 1), pool_id, float(price))
+                    )
+            finally:
+                conn.close()
+
+            deployable -= cost
+            bought += 1
+            total_bought += 1
+            used_tickers.add(best['ticker'])
+            open_tickers.add(best['ticker'])
+            all_candidates.pop(best_idx)
+
+            if best['side'] == 'yes':
+                yes_count += 1
+            else:
+                no_count += 1
+            logger.info(f"  Pool #{pool_id} BOUGHT: {best['ticker']} {best['side']} x{filled} @ ${price:.2f} (fee ${fee:.4f})")
+
+    logger.info(f"BUY SUMMARY: bought {total_bought} contracts across pools")
 
 
 # === MAIN CYCLE ===
