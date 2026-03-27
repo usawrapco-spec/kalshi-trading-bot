@@ -37,7 +37,7 @@ SAVINGS_RATE = 0.00
 MAX_BUYS_PER_CYCLE = 5
 CONTRACTS = 10
 MAX_POSITIONS = 25
-PORTFOLIO_TAKE_PROFIT = 1.00  # sell all if open positions combined +100%
+PORTFOLIO_TAKE_PROFIT = None  # disabled — ride to settlement for max payout
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M', 'KXBTC1H']
 
