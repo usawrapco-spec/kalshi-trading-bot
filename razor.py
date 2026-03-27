@@ -42,17 +42,17 @@ app = Flask(__name__)
 
 # Cache for market data and Kalshi portfolio — filled by bot cycle, read by dashboard
 _cache = {
-    'markets': {},          # ticker -> market data
-    'balance': {},          # from /portfolio/balance
-    'positions': [],        # from /portfolio/positions
+    'markets': {},
+    'balance': {},
+    'positions': [],
+    'updated': 0,
+}
 
 # Round-start balance tracking — snapshot once per 15-min window
 _round = {
-    'start_balance': 0,     # cash at round start
-    'spent': 0,             # total cost of buys this round
-    'active': False,        # is buy window active?
-    'window_id': -1,        # which 15-min window we're in
-    'updated': 0,
+    'start_balance': 0,
+    'spent': 0,
+    'window_id': -1,
 }
 
 
