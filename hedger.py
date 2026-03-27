@@ -1066,7 +1066,7 @@ setInterval(refresh, 5000);
 
 def bot_loop():
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
-    logger.info(f"Hedger starting [{mode}] -- pool target +{POOL_TAKE_PROFIT*100:.0f}%, max pool {MAX_POOL_SIZE}, buy ${BUY_MIN}-${BUY_MAX}")
+    logger.info(f"Hedger starting [{mode}] -- pool target +{POOL_TAKE_PROFIT*100:.0f}%, {MAX_POOLS} pools x {POOL_SIZE}, buy ${BUY_MIN}-${BUY_MAX}")
     logger.info(f"Series: {CRYPTO_SERIES}")
 
     while True:
