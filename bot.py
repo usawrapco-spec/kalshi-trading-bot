@@ -519,6 +519,22 @@ tr:hover{background:#1a1a1a}
 
 .cut-bar{height:3px;background:#222;border-radius:2px;margin-top:3px;overflow:hidden}
 .cut-fill{height:100%;border-radius:2px;transition:width .3s}
+/* === ROUND TIMER === */
+.round-timer{background:#111;border:1px solid #1a1a1a;border-radius:6px;padding:14px 16px;margin-bottom:14px}
+.round-phases{display:flex;gap:8px;margin-bottom:8px}
+.phase{flex:1;background:#0a0a0a;border:1px solid #222;border-radius:4px;padding:8px 10px;text-align:center}
+.phase-label{font-size:8px;text-transform:uppercase;letter-spacing:.5px;color:#555;margin-bottom:4px}
+.phase-time{font-size:18px;font-weight:700;color:#555}
+.phase.active{border-color:#ffaa00}
+.phase.active .phase-time{color:#ffaa00}
+.phase-buy.active{border-color:#00d673}.phase-buy.active .phase-time{color:#00d673}
+.phase-hold.active{border-color:#ffaa00}.phase-hold.active .phase-time{color:#ffaa00}
+.phase-settle.active{border-color:#ff4444}.phase-settle.active .phase-time{color:#ff4444}
+.phase.done{opacity:.4}
+.round-bar{height:4px;background:#222;border-radius:2px;overflow:hidden;margin-bottom:6px}
+.round-fill{height:100%;border-radius:2px;transition:width 1s linear;background:linear-gradient(90deg,#00d673,#ffaa00,#ff4444)}
+.round-label{text-align:center;font-size:10px;color:#555}
+
 .footer{text-align:center;color:#333;font-size:9px;margin-top:8px}
 .panel-body::-webkit-scrollbar{width:4px}
 .panel-body::-webkit-scrollbar-track{background:#111}
@@ -536,6 +552,28 @@ tr:hover{background:#1a1a1a}
   <span class="live-dot"></span>
   SCRAPER BOT &mdash; buy $0.01-$0.99 cheapest, cut 50%+ losers at 5min, ride rest to settlement
   &mdash; <span id="last-update">--</span>
+</div>
+
+<div class="round-timer">
+  <div class="round-phases">
+    <div class="phase phase-buy" id="phase-buy">
+      <div class="phase-label">BUY WINDOW</div>
+      <div class="phase-time" id="buy-time">--:--</div>
+    </div>
+    <div class="phase phase-hold" id="phase-hold">
+      <div class="phase-label">HOLD / CUT CHECK</div>
+      <div class="phase-time" id="hold-time">--:--</div>
+    </div>
+    <div class="phase phase-settle" id="phase-settle">
+      <div class="phase-label">SETTLEMENT</div>
+      <div class="phase-time" id="settle-time">--:--</div>
+    </div>
+  </div>
+  <div class="round-bar"><div class="round-fill" id="round-fill"></div></div>
+  <div class="round-label">
+    <span id="round-status">--</span>
+    &mdash; Next round: <span id="next-round" style="color:#ffaa00;font-weight:700">--:--</span>
+  </div>
 </div>
 
 <div class="pnl-box" id="pnl-box">
@@ -688,6 +726,60 @@ async function refresh(){
 
 refresh();
 setInterval(refresh,2000);
+
+/* === ROUND TIMER === */
+function updateRoundTimer(){
+  var now=new Date();
+  var utcMins=now.getUTCMinutes();
+  var utcSecs=now.getUTCSeconds();
+
+  /* 15-min windows: :00-:15, :15-:30, :30-:45, :45-:00 */
+  var windowStart=Math.floor(utcMins/15)*15;
+  var minsIntoWindow=utcMins-windowStart;
+  var secsIntoWindow=minsIntoWindow*60+utcSecs;
+  var totalWindowSecs=15*60;
+  var secsLeft=totalWindowSecs-secsIntoWindow;
+
+  /* Phases: Buy 0-9min, Hold/Cut 9-14min, Settle 14-15min */
+  var buyEnd=9*60;      /* stop buying at 6min left = 9min in */
+  var holdEnd=14*60;    /* last minute is settlement */
+
+  var pctDone=secsIntoWindow/totalWindowSecs*100;
+  $('round-fill').style.width=pctDone+'%';
+
+  /* Next round */
+  var nextMins=Math.floor(secsLeft/60);
+  var nextSecs=secsLeft%60;
+  $('next-round').textContent=nextMins+':'+nextSecs.toString().padStart(2,'0');
+
+  /* Phase times */
+  var buyLeft=Math.max(0,buyEnd-secsIntoWindow);
+  var holdLeft=Math.max(0,holdEnd-secsIntoWindow);
+  var settleLeft=Math.max(0,totalWindowSecs-secsIntoWindow);
+
+  function fmt(s){return Math.floor(s/60)+':'+Math.floor(s%60).toString().padStart(2,'0')}
+
+  $('buy-time').textContent=buyLeft>0?fmt(buyLeft):'DONE';
+  $('hold-time').textContent=secsIntoWindow>=buyEnd?(holdLeft>0?fmt(holdLeft):'DONE'):'--:--';
+  $('settle-time').textContent=secsIntoWindow>=holdEnd?fmt(settleLeft):'--:--';
+
+  /* Active/done states */
+  var pb=$('phase-buy'),ph=$('phase-hold'),ps=$('phase-settle');
+  pb.className='phase phase-buy'+(secsIntoWindow<buyEnd?' active':' done');
+  ph.className='phase phase-hold'+(secsIntoWindow>=buyEnd&&secsIntoWindow<holdEnd?' active':(secsIntoWindow>=holdEnd?' done':''));
+  ps.className='phase phase-settle'+(secsIntoWindow>=holdEnd?' active':'');
+
+  /* Status text */
+  if(secsIntoWindow<buyEnd){
+    $('round-status').innerHTML='<span class="green">BUYING</span> \u2014 '+fmt(buyLeft)+' left';
+  }else if(secsIntoWindow<holdEnd){
+    $('round-status').innerHTML='<span class="orange">HOLDING / CUT CHECK</span> \u2014 '+fmt(holdLeft)+' to settle';
+  }else{
+    $('round-status').innerHTML='<span class="red">SETTLING</span> \u2014 '+fmt(settleLeft);
+  }
+}
+updateRoundTimer();
+setInterval(updateRoundTimer,1000);
 </script>
 </body>
 </html>"""
