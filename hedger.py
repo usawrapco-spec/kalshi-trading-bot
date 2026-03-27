@@ -30,7 +30,7 @@ BUY_MIN = 0.01
 BUY_MAX = 0.55
 CONTRACTS_PER_BUY = 3           # buy 3 contracts per pool per cycle
 POOL_SIZE = 3                    # positions per pool
-MAX_POOLS = 10                   # run up to 10 pools simultaneously
+MAX_POOLS = 5                    # run up to 5 pools simultaneously
 POOL_TAKE_PROFIT = 0.30          # sell pool when +30%
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
@@ -865,7 +865,7 @@ tr:hover{background:rgba(255,255,255,.015)}
   </div>
 </div>
 <div style="background:var(--bg1);border-bottom:1px solid var(--border);padding:10px 24px;font-size:11px;color:var(--text2);line-height:1.6">
-  <strong style="color:#b060ff">STRATEGY:</strong> Run up to 10 pools simultaneously, each with 3 mixed YES/NO positions across BTC, ETH, SOL, XRP, DOGE (15-min contracts). Every 2 seconds, check each pool — if any is +30%, sell it and lock in profit. Multiple pools = more volume, more chances to hit +30%. Mixed sides create real hedging.
+  <strong style="color:#b060ff">STRATEGY:</strong> Run up to 5 pools simultaneously, each with 3 mixed YES/NO positions across BTC, ETH, SOL, XRP, DOGE (15-min contracts). Every 2 seconds, check each pool — if any is +30%, sell it and lock in profit. Multiple pools = more volume, more chances to hit +30%. Mixed sides create real hedging.
 </div>
 
 <div class="main">
@@ -899,13 +899,11 @@ tr:hover{background:rgba(255,255,255,.015)}
   </div>
 
   <div class="two-col">
-    <!-- Open Positions -->
-    <div class="section">
-      <div class="section-header" id="positionsHeader">Open Positions</div>
-      <table>
-        <thead><tr><th>Ticker</th><th>Side</th><th>Pool</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th></tr></thead>
-        <tbody id="poolTable"><tr><td colspan="7" style="color:var(--text3);text-align:center;padding:20px">No positions</td></tr></tbody>
-      </table>
+    <!-- Live Pools -->
+    <div>
+      <div id="poolsContainer" style="display:flex;flex-direction:column;gap:12px">
+        <div class="section"><div class="section-header">Pools</div><div style="padding:20px;text-align:center;color:var(--text3)">Waiting for positions...</div></div>
+      </div>
     </div>
 
     <!-- Recent Trades -->
@@ -970,8 +968,8 @@ async function refresh(){
     document.getElementById('portfolio').textContent = '$'+(s.portfolio||0).toFixed(2);
     document.getElementById('cashDetail').textContent = 'Cash: $'+(s.cash||0).toFixed(2)+' | Pos: $'+(s.positions_value||0).toFixed(4);
 
-    document.getElementById('poolSize').textContent = (s.active_pools||0)+' / '+s.max_pools+' ('+( s.pool_positions||0)+' pos)';
-    document.getElementById('poolCostValue').textContent = 'Cost: $'+(s.pool_cost||0).toFixed(4)+' | Value: $'+(s.pool_value||0).toFixed(4);
+    document.getElementById('poolSize').textContent = (s.active_pools||0)+' / '+(s.max_pools||5);
+    document.getElementById('poolCostValue').textContent = (s.pool_positions||0)+' positions | Cost: $'+(s.pool_cost||0).toFixed(2);
 
     document.getElementById('roundsCount').textContent = s.rounds_count||0;
     document.getElementById('roundsPnl').textContent = 'Total rounds P&L: $'+(s.rounds_pnl||0).toFixed(4);
@@ -980,16 +978,37 @@ async function refresh(){
     const total = (s.wins||0)+(s.losses||0);
     document.getElementById('winRate').textContent = total>0?'Win rate: '+(s.wins/total*100).toFixed(1)+'%':'--';
 
-    // Open positions table
-    const pt = document.getElementById('poolTable');
-    document.getElementById('positionsHeader').textContent = 'Open Positions ' + (s.pool_pct!=0?((s.pool_pct>=0?'+':'')+s.pool_pct.toFixed(1)+'%'):'') + ' / ' + (s.active_pools||0) + ' pools';
+    // Render pools as separate containers
+    const pc = document.getElementById('poolsContainer');
     if(poolRes.length===0){
-      pt.innerHTML='<tr><td colspan="7" style="color:var(--text3);text-align:center;padding:20px">No positions</td></tr>';
+      pc.innerHTML='<div class="section"><div class="section-header">Pools</div><div style="padding:20px;text-align:center;color:var(--text3)">Waiting for positions...</div></div>';
     } else {
-      pt.innerHTML = poolRes.map(p=>{
-        const cls = p.gain_pct>=0?'pnl-pos':'pnl-neg';
-        return '<tr><td>'+p.ticker+'</td><td>'+p.side.toUpperCase()+'</td><td>#'+(p.round_id||'?')+'</td><td>$'+p.price.toFixed(2)+'</td><td>$'+p.current_bid.toFixed(2)+'</td><td class="'+cls+'">$'+pnlSign(p.unrealized)+'</td><td class="'+cls+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(1)+'%</td></tr>';
-      }).join('');
+      // Group positions by round_id
+      const pools = {};
+      poolRes.forEach(p=>{
+        const rid = p.round_id||0;
+        if(!pools[rid]) pools[rid] = [];
+        pools[rid].push(p);
+      });
+      let html = '';
+      Object.keys(pools).sort((a,b)=>a-b).forEach(rid=>{
+        const positions = pools[rid];
+        const cost = positions.reduce((s,p)=>s+p.price,0);
+        const value = positions.reduce((s,p)=>s+p.current_bid,0);
+        const pnl = value - cost;
+        const pct = cost>0?((pnl/cost)*100):0;
+        const cls = pct>=0?'pnl-pos':'pnl-neg';
+        const statusCls = pct>=0?'val-green':'val-red';
+        html += '<div class="section">';
+        html += '<div class="section-header" style="display:flex;justify-content:space-between"><span>Pool #'+rid+' &mdash; '+positions.length+' positions</span><span class="'+statusCls+'">'+(pct>=0?'+':'')+pct.toFixed(1)+'%  $'+pnlSign(pnl)+'</span></div>';
+        html += '<table><thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th></tr></thead><tbody>';
+        positions.forEach(p=>{
+          const c = p.gain_pct>=0?'pnl-pos':'pnl-neg';
+          html += '<tr><td>'+p.ticker+'</td><td>'+p.side.toUpperCase()+'</td><td>$'+p.price.toFixed(2)+'</td><td>$'+p.current_bid.toFixed(2)+'</td><td class="'+c+'">$'+pnlSign(p.unrealized)+'</td><td class="'+c+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(1)+'%</td></tr>';
+        });
+        html += '</tbody></table></div>';
+      });
+      pc.innerHTML = html;
     }
 
     // Recent trades table
