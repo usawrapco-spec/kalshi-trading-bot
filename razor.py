@@ -135,7 +135,7 @@ def get_market(ticker):
 def place_order(ticker, side, action, price, count):
     if not ENABLE_TRADING:
         logger.info(f"RAZOR PAPER {action}: {ticker} {side} x{count} @ ${price:.2f}")
-        return ('paper', count)
+        return ('paper', count, price)
 
     price_cents = int(round(price * 100))
     try:
@@ -145,10 +145,30 @@ def place_order(ticker, side, action, price, count):
             'yes_price' if side == 'yes' else 'no_price': price_cents,
         })
         order = resp.get('order', {})
+        order_id = order.get('order_id', '')
         filled = order.get('place_count', 0) - order.get('remaining_count', 0)
         if filled <= 0:
             filled = count if order.get('status') in ('executed', 'filled') else 0
-        return (order.get('order_id', ''), filled) if filled > 0 else None
+        if filled <= 0:
+            return None
+
+        # Get actual fill price from fills API
+        fill_price = price
+        try:
+            fills_resp = kalshi_get(f'/portfolio/fills?order_id={order_id}&limit=10')
+            fills = fills_resp.get('fills', [])
+            if fills:
+                if side == 'yes':
+                    fill_price = sf(fills[0].get('yes_price_dollars', str(price)))
+                else:
+                    fill_price = sf(fills[0].get('no_price_dollars', str(price)))
+                if fill_price <= 0:
+                    fill_price = price
+                logger.info(f"RAZOR FILL: asked ${price:.2f}, filled @ ${fill_price:.2f}")
+        except:
+            pass
+
+        return (order_id, filled, fill_price)
     except Exception as e:
         logger.error(f"RAZOR ORDER FAILED: {action} {ticker} -- {e}")
         return None
@@ -352,19 +372,19 @@ def buy_cheapest(markets):
     if not result:
         return
 
-    order_id, filled = result
+    order_id, filled, fill_price = result
     if filled <= 0:
         return
 
-    buy_fee = kalshi_fee(best['price'], filled)
+    buy_fee = kalshi_fee(fill_price, filled)
     conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO scraper_trades (ticker, side, price, count, current_bid, fees) VALUES (%s, %s, %s, %s, %s, %s)",
-                (best['ticker'], best['side'], float(best['price']), filled, float(best['price']), float(buy_fee))
+                (best['ticker'], best['side'], float(fill_price), filled, float(fill_price), float(buy_fee))
             )
-        logger.info(f"RAZOR BOUGHT: {best['ticker']} {best['side']} x{filled} @ ${best['price']:.2f} fee=${buy_fee:.4f}")
+        logger.info(f"RAZOR BOUGHT: {best['ticker']} {best['side']} x{filled} @ ${fill_price:.2f} (asked ${best['price']:.2f}) fee=${buy_fee:.4f}")
     finally:
         conn.close()
 
