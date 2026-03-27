@@ -699,6 +699,7 @@ def api_pool():
                 'current_bid': float(current),
                 'count': count,
                 'series': t.get('series', ''),
+                'round_id': t.get('round_id'),
                 'unrealized': unrealized,
                 'gain_pct': gain_pct,
                 'mins_to_expiry': float(t.get('mins_to_expiry') or 0),
@@ -881,8 +882,8 @@ tr:hover{background:rgba(255,255,255,.015)}
       <div class="stat-sub" id="cashDetail">Cash: $0 | Pos: $0</div>
     </div>
     <div class="stat-card">
-      <div class="stat-label">Pool Size</div>
-      <div class="stat-value val-purple" id="poolSize">0 / 15</div>
+      <div class="stat-label">Active Pools</div>
+      <div class="stat-value val-purple" id="poolSize">0 / 10</div>
       <div class="stat-sub" id="poolCostValue">Cost: $0 | Value: $0</div>
     </div>
     <div class="stat-card">
@@ -897,45 +898,24 @@ tr:hover{background:rgba(255,255,255,.015)}
     </div>
   </div>
 
-  <!-- Pool Progress Bar -->
-  <div class="pool-progress-wrap">
-    <div class="pool-progress-header">
-      <span class="pool-progress-title">Pool P&L Progress</span>
-      <span class="pool-progress-pct" id="poolPctDisplay">+0.0% / 5.0%</span>
-    </div>
-    <div class="progress-bar-bg">
-      <div class="progress-bar-fill positive" id="progressFill" style="width:0%"></div>
-      <span class="progress-target">TARGET: +5%</span>
-    </div>
-  </div>
-
   <div class="two-col">
-    <!-- Pool Positions Table -->
+    <!-- Open Positions -->
     <div class="section">
-      <div class="section-header">Pool Positions</div>
+      <div class="section-header" id="positionsHeader">Open Positions</div>
       <table>
-        <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th></tr></thead>
-        <tbody id="poolTable"><tr><td colspan="6" style="color:var(--text3);text-align:center;padding:20px">No positions</td></tr></tbody>
+        <thead><tr><th>Ticker</th><th>Side</th><th>Pool</th><th>Entry</th><th>Bid</th><th>P&L</th><th>%</th></tr></thead>
+        <tbody id="poolTable"><tr><td colspan="7" style="color:var(--text3);text-align:center;padding:20px">No positions</td></tr></tbody>
       </table>
     </div>
 
-    <!-- Rounds Table -->
+    <!-- Recent Trades -->
     <div class="section">
-      <div class="section-header">Completed Rounds</div>
+      <div class="section-header" id="tradesHeader">Recent Trades</div>
       <table>
-        <thead><tr><th>#</th><th>Time</th><th>Pos</th><th>Cost</th><th>Value</th><th>P&L</th><th>%</th></tr></thead>
-        <tbody id="roundsTable"><tr><td colspan="7" style="color:var(--text3);text-align:center;padding:20px">No rounds yet</td></tr></tbody>
+        <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>P&L</th><th>Gains</th><th>Time</th></tr></thead>
+        <tbody id="historyTable"><tr><td colspan="6" style="color:var(--text3);text-align:center;padding:20px">No trades yet</td></tr></tbody>
       </table>
     </div>
-  </div>
-
-  <!-- Recent Trade History -->
-  <div class="section">
-    <div class="section-header">Recent Resolved Trades</div>
-    <table>
-      <thead><tr><th>Ticker</th><th>Side</th><th>Entry</th><th>P&L</th><th>Series</th><th>Time</th></tr></thead>
-      <tbody id="historyTable"><tr><td colspan="6" style="color:var(--text3);text-align:center;padding:20px">No trades yet</td></tr></tbody>
-    </table>
   </div>
 </div>
 
@@ -990,7 +970,7 @@ async function refresh(){
     document.getElementById('portfolio').textContent = '$'+(s.portfolio||0).toFixed(2);
     document.getElementById('cashDetail').textContent = 'Cash: $'+(s.cash||0).toFixed(2)+' | Pos: $'+(s.positions_value||0).toFixed(4);
 
-    document.getElementById('poolSize').textContent = (s.pool_positions||0)+' / '+s.max_pool;
+    document.getElementById('poolSize').textContent = (s.active_pools||0)+' / '+s.max_pools+' ('+( s.pool_positions||0)+' pos)';
     document.getElementById('poolCostValue').textContent = 'Cost: $'+(s.pool_cost||0).toFixed(4)+' | Value: $'+(s.pool_value||0).toFixed(4);
 
     document.getElementById('roundsCount').textContent = s.rounds_count||0;
@@ -1000,44 +980,21 @@ async function refresh(){
     const total = (s.wins||0)+(s.losses||0);
     document.getElementById('winRate').textContent = total>0?'Win rate: '+(s.wins/total*100).toFixed(1)+'%':'--';
 
-    // Pool progress
-    const pct = s.pool_pct||0;
-    const target = s.pool_target||5;
-    const pctEl = document.getElementById('poolPctDisplay');
-    pctEl.textContent = (pct>=0?'+':'')+pct.toFixed(1)+'% / '+target.toFixed(1)+'%';
-    pctEl.className = 'pool-progress-pct '+(pct>=0?'val-green':'val-red');
-
-    const fill = document.getElementById('progressFill');
-    const fillPct = Math.min(Math.max(Math.abs(pct)/target*100, 0), 100);
-    fill.style.width = fillPct+'%';
-    fill.className = 'progress-bar-fill '+(pct>=0?'positive':'negative');
-
-    // Pool table
+    // Open positions table
     const pt = document.getElementById('poolTable');
+    document.getElementById('positionsHeader').textContent = 'Open Positions ' + (s.pool_pct!=0?((s.pool_pct>=0?'+':'')+s.pool_pct.toFixed(1)+'%'):'') + ' / ' + (s.active_pools||0) + ' pools';
     if(poolRes.length===0){
-      pt.innerHTML='<tr><td colspan="6" style="color:var(--text3);text-align:center;padding:20px">No positions in pool</td></tr>';
+      pt.innerHTML='<tr><td colspan="7" style="color:var(--text3);text-align:center;padding:20px">No positions</td></tr>';
     } else {
       pt.innerHTML = poolRes.map(p=>{
         const cls = p.gain_pct>=0?'pnl-pos':'pnl-neg';
-        return '<tr><td>'+p.ticker+'</td><td>'+p.side.toUpperCase()+'</td><td>$'+p.price.toFixed(2)+'</td><td>$'+p.current_bid.toFixed(2)+'</td><td class="'+cls+'">$'+pnlSign(p.unrealized)+'</td><td class="'+cls+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(1)+'%</td></tr>';
+        return '<tr><td>'+p.ticker+'</td><td>'+p.side.toUpperCase()+'</td><td>#'+(p.round_id||'?')+'</td><td>$'+p.price.toFixed(2)+'</td><td>$'+p.current_bid.toFixed(2)+'</td><td class="'+cls+'">$'+pnlSign(p.unrealized)+'</td><td class="'+cls+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(1)+'%</td></tr>';
       }).join('');
     }
 
-    // Rounds table
-    const rt = document.getElementById('roundsTable');
-    if(roundsRes.length===0){
-      rt.innerHTML='<tr><td colspan="7" style="color:var(--text3);text-align:center;padding:20px">No rounds yet</td></tr>';
-    } else {
-      rt.innerHTML = roundsRes.map(r=>{
-        const cls = r.pnl>=0?'pnl-pos':'pnl-neg';
-        const t = new Date(r.ended_at);
-        const ts = t.toLocaleTimeString();
-        return '<tr><td>'+r.id+'</td><td>'+ts+'</td><td>'+r.positions+'</td><td>$'+r.cost.toFixed(4)+'</td><td>$'+r.value.toFixed(4)+'</td><td class="'+cls+'">$'+pnlSign(r.pnl)+'</td><td class="'+cls+'">'+(r.pnl_pct>=0?'+':'')+r.pnl_pct.toFixed(1)+'%</td></tr>';
-      }).join('');
-    }
-
-    // History table
+    // Recent trades table
     const ht = document.getElementById('historyTable');
+    document.getElementById('tradesHeader').textContent = 'Recent Trades — ' + (s.rounds_count||0) + ' rounds completed, P&L: $'+(s.rounds_pnl||0).toFixed(4);
     if(histRes.length===0){
       ht.innerHTML='<tr><td colspan="6" style="color:var(--text3);text-align:center;padding:20px">No trades yet</td></tr>';
     } else {
@@ -1045,7 +1002,8 @@ async function refresh(){
         const cls = t.pnl>=0?'pnl-pos':'pnl-neg';
         const dt = new Date(t.created_at);
         const ts = dt.toLocaleTimeString();
-        return '<tr><td>'+t.ticker+'</td><td>'+t.side.toUpperCase()+'</td><td>$'+t.price.toFixed(2)+'</td><td class="'+cls+'">$'+pnlSign(t.pnl)+'</td><td>'+t.series+'</td><td>'+ts+'</td></tr>';
+        const gains = t.price>0?((t.pnl/t.price)*100).toFixed(0)+'%':'--';
+        return '<tr><td>'+t.ticker+'</td><td>'+t.side.toUpperCase()+'</td><td>$'+t.price.toFixed(2)+'</td><td class="'+cls+'">$'+pnlSign(t.pnl)+'</td><td class="'+cls+'">'+gains+'</td><td>'+ts+'</td></tr>';
       }).join('');
     }
 
