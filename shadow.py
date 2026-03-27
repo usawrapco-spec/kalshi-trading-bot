@@ -29,7 +29,7 @@ MIN_MINS_TO_BUY = 10          # only buy when 10-15 min left (first 5 min of win
 CYCLE_SECONDS = 2
 CONTRACTS = 1
 MAX_POSITIONS = 10
-CUT_LOSS_AFTER_MINS = 5
+CUT_WHEN_MINS_LEFT = 5        # start cutting when 5 min left in window
 CUT_LOSS_THRESHOLD = -0.70
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
@@ -53,6 +53,13 @@ def sf(val):
 
 def kalshi_fee(price, count):
     return min(math.ceil(TAKER_FEE_RATE * count * price * (1 - price) * 100) / 100, 0.02 * count)
+
+
+def mins_left_in_window():
+    """Minutes remaining in the current 15-min window."""
+    now = datetime.now(timezone.utc)
+    mins_in = now.minute % 15 + now.second / 60
+    return 15 - mins_in
 
 
 # === DATABASE ===
@@ -233,13 +240,10 @@ def check_sells():
             if current_bid <= 0:
                 continue
 
-            # === 5-MINUTE CUT LOSS CHECK ===
-            bought_at = trade['bought_at']
-            if bought_at.tzinfo is None:
-                bought_at = bought_at.replace(tzinfo=timezone.utc)
-            mins_held = (now - bought_at).total_seconds() / 60
+            # === CUT LOSS CHECK — only when 5 min left in window ===
+            window_mins_left = mins_left_in_window()
 
-            if mins_held >= CUT_LOSS_AFTER_MINS:
+            if window_mins_left <= CUT_WHEN_MINS_LEFT:
                 gain = (current_bid - entry) / entry
                 if gain <= CUT_LOSS_THRESHOLD:
                     buy_fee = kalshi_fee(entry, count)
@@ -418,7 +422,8 @@ def api_shadow_positions():
                 'unrealized': unrealized,
                 'gain_pct': round(gain_pct, 1),
                 'mins_held': round(mins_held, 1),
-                'cut_eligible': mins_held >= CUT_LOSS_AFTER_MINS,
+                'window_mins_left': round(mins_left_in_window(), 1),
+                'cut_eligible': mins_left_in_window() <= CUT_WHEN_MINS_LEFT,
             })
 
         results.sort(key=lambda x: x['gain_pct'], reverse=True)
@@ -566,11 +571,11 @@ tr:hover{background:#1a1a1a}
       <div class="phase-time" id="buy-time">--:--</div>
     </div>
     <div class="phase phase-hold" id="phase-hold">
-      <div class="phase-label">HOLD / CUT CHECK</div>
+      <div class="phase-label">HOLDING</div>
       <div class="phase-time" id="hold-time">--:--</div>
     </div>
     <div class="phase phase-settle" id="phase-settle">
-      <div class="phase-label">SETTLEMENT</div>
+      <div class="phase-label">CUT CHECK</div>
       <div class="phase-time" id="settle-time">--:--</div>
     </div>
   </div>
@@ -691,8 +696,10 @@ async function refresh(){
       positions.forEach(function(p){
         var gc=cls(p.gain_pct);
         var uc=cls(p.unrealized);
-        var cutPct=Math.min(p.mins_held/5*100,100);
-        var cutColor=cutPct>=100?(p.gain_pct<=-70?'#ff4444':'#00d673'):'#ffaa00';
+        var wml=p.window_mins_left||15;
+        var cutActive=wml<=5;
+        var cutColor=cutActive?(p.gain_pct<=-70?'#ff4444':'#00d673'):'#ffaa00';
+        var cutPct=cutActive?100:Math.min((10-wml)/5*100,100);
         h+='<tr>';
         h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
         h+='<td><span class="tag tag-'+p.side+'">'+p.side.toUpperCase()+'</span></td>';
@@ -705,10 +712,10 @@ async function refresh(){
         h+='<td class="'+gc+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
         h+='<td>'+p.mins_held.toFixed(1)+'m</td>';
         h+='<td style="min-width:60px"><div class="cut-bar"><div class="cut-fill" style="width:'+cutPct+'%;background:'+cutColor+'"></div></div>';
-        if(cutPct>=100){
+        if(cutActive){
           h+=p.gain_pct<=-70?'<span class="red" style="font-size:9px">CUT</span>':'<span class="green" style="font-size:9px">OK</span>';
         }else{
-          h+='<span class="gray" style="font-size:9px">'+p.mins_held.toFixed(1)+'/5m</span>';
+          h+='<span class="gray" style="font-size:9px">'+wml.toFixed(0)+'m left</span>';
         }
         h+='</td></tr>';
       });
@@ -761,7 +768,7 @@ function updateRoundTimer(){
 
   /* Phases: Buy 0-5min, Hold/Cut 5-14min, Settle 14-15min */
   var buyEnd=5*60;      /* stop buying at 10min left = 5min in */
-  var holdEnd=14*60;    /* last minute is settlement */
+  var holdEnd=10*60;    /* cut check starts at 5 min left = 10min in */
 
   var pctDone=secsIntoWindow/totalWindowSecs*100;
   $('round-fill').style.width=pctDone+'%';
@@ -792,9 +799,9 @@ function updateRoundTimer(){
   if(secsIntoWindow<buyEnd){
     $('round-status').innerHTML='<span class="green">BUYING</span> \\u2014 '+fmt(buyLeft)+' left';
   }else if(secsIntoWindow<holdEnd){
-    $('round-status').innerHTML='<span class="orange">HOLDING / CUT CHECK</span> \\u2014 '+fmt(holdLeft)+' to settle';
+    $('round-status').innerHTML='<span class="orange">HOLDING</span> \\u2014 '+fmt(holdLeft)+' to cut check';
   }else{
-    $('round-status').innerHTML='<span class="red">SETTLING</span> \\u2014 '+fmt(settleLeft);
+    $('round-status').innerHTML='<span class="red">CUT CHECK</span> \\u2014 '+fmt(settleLeft)+' to settle';
   }
 }
 updateRoundTimer();
@@ -808,7 +815,7 @@ setInterval(updateRoundTimer,1000);
 
 def shadow_loop():
     init_shadow_db()
-    logger.info(f"SHADOW bot starting -- PAPER MODE -- buy ${BUY_MIN}-${BUY_MAX}, cut -70% at {CUT_LOSS_AFTER_MINS}min")
+    logger.info(f"SHADOW bot starting -- PAPER MODE -- buy ${BUY_MIN}-${BUY_MAX}, cut -70% at {CUT_WHEN_MINS_LEFT}min left")
     logger.info(f"Series: {CRYPTO_SERIES}")
 
     while True:
