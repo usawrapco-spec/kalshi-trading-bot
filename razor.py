@@ -23,7 +23,7 @@ ENABLE_TRADING = True
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.30
+BUY_MAX = 0.45
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 10          # only buy when 10-15 min left (first 5 min of window)
