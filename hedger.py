@@ -343,7 +343,7 @@ def check_pool_sell():
         positions = get_pool_positions(pool_id)
         if not positions:
             # Empty pool (all settled) — close it
-            close_round(pool_id, 0, 0, 0, 0, 'all_settled')
+            close_round(pool_id, 0, 0, 0, 0, 0, 'all_settled')
             continue
 
         total_cost = sum(sf(t.get('price')) * (t.get('count') or 1) for t in positions)
