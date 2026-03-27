@@ -412,8 +412,11 @@ def buy_pool_contracts(markets):
 
     now = datetime.now(timezone.utc)
     open_tickers = set(t.get('ticker', '') for t in open_positions)
+    open_sides = [t.get('side', '') for t in open_positions]
+    yes_count = sum(1 for s in open_sides if s == 'yes')
+    no_count = sum(1 for s in open_sides if s == 'no')
 
-    # Build candidates per series (coin)
+    # Build candidates per series (coin), with both sides available
     candidates_by_series = {}
     for market in markets:
         ticker = market.get('ticker', '')
@@ -446,15 +449,32 @@ def buy_pool_contracts(markets):
         yes_ask = float(market.get('yes_ask_dollars') or '999')
         no_ask = float(market.get('no_ask_dollars') or '999')
 
-        # Pick cheapest side
-        if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX:
-            side = 'yes'
-            price = yes_ask
-        elif no_ask < yes_ask and BUY_MIN <= no_ask <= BUY_MAX:
-            side = 'no'
-            price = no_ask
+        # Determine which side to buy based on pool balance
+        # Force mixed sides: if pool already has more YES, buy NO (and vice versa)
+        if yes_count > no_count:
+            # Need more NO — only consider NO side
+            if BUY_MIN <= no_ask <= BUY_MAX:
+                side = 'no'
+                price = no_ask
+            else:
+                continue
+        elif no_count > yes_count:
+            # Need more YES — only consider YES side
+            if BUY_MIN <= yes_ask <= BUY_MAX:
+                side = 'yes'
+                price = yes_ask
+            else:
+                continue
         else:
-            continue
+            # Pool is balanced — pick cheapest side
+            if yes_ask <= no_ask and BUY_MIN <= yes_ask <= BUY_MAX:
+                side = 'yes'
+                price = yes_ask
+            elif no_ask < yes_ask and BUY_MIN <= no_ask <= BUY_MAX:
+                side = 'no'
+                price = no_ask
+            else:
+                continue
 
         if market_series not in candidates_by_series:
             candidates_by_series[market_series] = []
@@ -523,6 +543,11 @@ def buy_pool_contracts(markets):
 
         deployable -= cost
         bought += 1
+        # Update side counts for mixed-side balancing
+        if cand['side'] == 'yes':
+            yes_count += 1
+        else:
+            no_count += 1
         logger.info(f"  BOUGHT: {cand['ticker']} {cand['side']} x{filled} @ ${price:.2f} (fee ${fee:.4f}) [{cand['series']}]")
 
     logger.info(f"BUY SUMMARY: bought {bought}/{slots} contracts across {len(set(c['series'] for c in [] ))} series")
