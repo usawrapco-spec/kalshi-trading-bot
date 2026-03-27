@@ -183,7 +183,7 @@ def find_cheapest(markets):
         try:
             close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
             mins_left = (close_dt - now).total_seconds() / 60
-            if mins_left < 1 or mins_left > MAX_MINS_TO_EXPIRY:
+            if mins_left < 10 or mins_left > MAX_MINS_TO_EXPIRY:
                 continue
         except:
             continue
