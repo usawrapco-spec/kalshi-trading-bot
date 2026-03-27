@@ -1050,6 +1050,30 @@ def run_cycle():
         except Exception as e:
             logger.error(f"Learning update failed: {e}")
 
+    # Clean up settled batches
+    try:
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE batches SET status = 'settled', closed_at = NOW()
+                    WHERE status = 'open' AND id IN (
+                        SELECT b.id FROM batches b
+                        WHERE b.status = 'open'
+                        AND NOT EXISTS (
+                            SELECT 1 FROM trades t
+                            WHERE t.batch_id = b.id AND t.action = 'buy' AND t.pnl IS NULL
+                        )
+                        AND EXISTS (
+                            SELECT 1 FROM trades t WHERE t.batch_id = b.id
+                        )
+                    )
+                """)
+        finally:
+            conn.close()
+    except:
+        pass
+
     mode = "PAPER" if not ENABLE_TRADING else "LIVE"
     balance = get_balance()
     logger.info(f"=== CYCLE START [{mode}] === Balance: ${balance:.2f}")
