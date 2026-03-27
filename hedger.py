@@ -25,7 +25,7 @@ PORT = int(os.environ.get('HEDGER_PORT', 8081))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 
 # === STRATEGY ===
-STARTING_BALANCE = 100.00
+STARTING_BALANCE = 20.00
 BUY_MIN = 0.01
 BUY_MAX = 0.40
 CONTRACTS_PER_BUY = 3           # buy 3 contracts per cycle, spread across coins

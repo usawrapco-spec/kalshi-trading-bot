@@ -21,10 +21,25 @@ echo "[redeploy] Installing/updating dependencies..."
 echo "[redeploy] Fixing file ownership..."
 chown -R kalshi:kalshi "${INSTALL_DIR}"
 
+# Install hedger service if it doesn't exist
+if [[ ! -f /etc/systemd/system/kalshi-hedger.service ]]; then
+    echo "[redeploy] Installing kalshi-hedger service..."
+    cp "${INSTALL_DIR}/deploy/kalshi-hedger.service" /etc/systemd/system/kalshi-hedger.service
+    systemctl daemon-reload
+    systemctl enable kalshi-hedger
+fi
+
+# One-time reset: clear hedger data for fresh $20 start
+if [[ -f "${INSTALL_DIR}/.hedger-reset-pending" ]]; then
+    echo "[redeploy] Resetting hedger database tables..."
+    sudo -u postgres psql -d kalshi -c "TRUNCATE hedger_trades, hedger_rounds RESTART IDENTITY;"
+    rm -f "${INSTALL_DIR}/.hedger-reset-pending"
+fi
+
 echo "[redeploy] Restarting services..."
 systemctl restart kalshi-bot
-systemctl restart kalshi-hedger 2>/dev/null || true
+systemctl restart kalshi-hedger
 
 echo "[redeploy] Done. Service status:"
 systemctl --no-pager status kalshi-bot
-systemctl --no-pager status kalshi-hedger 2>/dev/null || true
+systemctl --no-pager status kalshi-hedger
