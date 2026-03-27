@@ -22,10 +22,11 @@ PORT = int(os.environ.get('PORT', 8080))
 ENABLE_TRADING = True
 
 # === STRATEGY ===
-BUY_MAX = 0.10              # buy cheapest contract up to $0.10
+BUY_MIN = 0.01              # minimum price
+BUY_MAX = 0.99              # buy anything up to $0.99
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15     # full 15-min window
-CYCLE_SECONDS = 5
+CYCLE_SECONDS = 2            # 2-second cycles
 CONTRACTS = 1
 MAX_POSITIONS = 15           # max open at once
 CUT_LOSS_AFTER_MINS = 5     # check at 5 min mark
@@ -192,13 +193,13 @@ def find_cheapest(markets):
         no_ask = sf(market.get('no_ask_dollars', '999'))
 
         # Check yes side
-        if 0.01 <= yes_ask <= BUY_MAX:
+        if BUY_MIN <= yes_ask <= BUY_MAX:
             candidates.append({
                 'ticker': ticker, 'side': 'yes', 'price': yes_ask,
                 'mins_left': mins_left
             })
         # Check no side
-        if 0.01 <= no_ask <= BUY_MAX:
+        if BUY_MIN <= no_ask <= BUY_MAX:
             candidates.append({
                 'ticker': ticker, 'side': 'no', 'price': no_ask,
                 'mins_left': mins_left
@@ -494,7 +495,7 @@ tr:hover{background:#1a1a1a}
 
 <div class="header">
   <span class="live-dot"></span>
-  SCRAPER BOT &mdash; cheapest contract, cut 50%+ losers at 5min, ride rest to settlement
+  SCRAPER BOT &mdash; buy $0.01-$0.99, cut 50%+ losers at 5min, ride rest to settlement
   &mdash; <span id="last-update">--</span>
 </div>
 
@@ -527,7 +528,7 @@ tr:hover{background:#1a1a1a}
   </tr></thead><tbody id="closed-body"><tr><td colspan="6" class="gray" style="text-align:center;padding:20px">Loading...</td></tr></tbody></table></div>
 </div>
 
-<div class="footer">Scraper Bot &mdash; auto-refresh 5s</div>
+<div class="footer">Scraper Bot &mdash; auto-refresh 2s &mdash; cycle 2s &mdash; buy $0.01-$0.99</div>
 
 <script>
 function $(id){return document.getElementById(id)}
@@ -606,7 +607,7 @@ async function refresh(){
 }
 
 refresh();
-setInterval(refresh,5000);
+setInterval(refresh,2000);
 </script>
 </body>
 </html>"""
