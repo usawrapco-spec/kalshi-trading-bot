@@ -321,23 +321,7 @@ def check_sells():
                         )
                 continue
 
-            # === CUT LOSS CHECK — only when 5 min left in window ===
-            window_mins_left = mins_left_in_window()
-
-            if window_mins_left <= CUT_WHEN_MINS_LEFT:
-                if gain <= CUT_LOSS_THRESHOLD:
-                    buy_fee = kalshi_fee(entry, count)
-                    sell_fee = kalshi_fee(current_bid, count)
-                    total_fees = buy_fee + sell_fee
-                    pnl = round((current_bid - entry) * count - total_fees, 4)
-                    logger.info(f"RAZOR CUT LOSS: {ticker} {side} ${entry:.2f} -> ${current_bid:.2f} ({gain*100:+.0f}%) pnl=${pnl:.4f}")
-                    result = place_order(ticker, side, 'sell', current_bid, count)
-                    if result:
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                "UPDATE scraper_trades SET pnl=%s, fees=%s, status='closed', closed_at=NOW(), close_reason='cut_loss', current_bid=%s WHERE id=%s",
-                                (float(pnl), float(total_fees), float(current_bid), trade_id)
-                            )
+            # === CUT LOSS DISABLED — ride everything to settlement ===
     finally:
         conn.close()
 
