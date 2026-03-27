@@ -27,7 +27,7 @@ BUY_MIN = 0.01
 BUY_MAX = 0.99
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_BUY = 6
+MIN_MINS_TO_BUY = 10          # only buy when 10-15 min left (first 5 min of window)
 CYCLE_SECONDS = 2
 CONTRACTS = 1
 MAX_POSITIONS = 15
@@ -39,6 +39,14 @@ CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 # === INIT ===
 auth = KalshiAuth()
 app = Flask(__name__)
+
+# Cache for market data and Kalshi portfolio — filled by bot cycle, read by dashboard
+_cache = {
+    'markets': {},          # ticker -> market data
+    'balance': {},          # from /portfolio/balance
+    'positions': [],        # from /portfolio/positions
+    'updated': 0,
+}
 
 
 def sf(val):
@@ -326,6 +334,38 @@ def buy_cheapest(markets):
 
 # === MAIN CYCLE ===
 
+def refresh_cache():
+    """Refresh cached Kalshi data for the dashboard."""
+    global _cache
+    try:
+        resp = kalshi_get('/portfolio/balance')
+        _cache['balance'] = {
+            'balance': resp.get('balance', 0) / 100.0,
+            'portfolio_value': resp.get('portfolio_value', 0) / 100.0,
+        }
+    except:
+        pass
+
+    try:
+        all_pos = []
+        cursor = None
+        while True:
+            url = '/portfolio/positions?limit=200&count_filter=position'
+            if cursor:
+                url += f'&cursor={cursor}'
+            resp = kalshi_get(url)
+            batch = resp.get('market_positions', [])
+            all_pos.extend(batch)
+            cursor = resp.get('cursor')
+            if not cursor or not batch:
+                break
+        _cache['positions'] = all_pos
+    except:
+        pass
+
+    _cache['updated'] = time.time()
+
+
 def run_cycle():
     open_pos = get_open_positions()
     total_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_pos)
@@ -333,8 +373,12 @@ def run_cycle():
     logger.info(f"=== CYCLE === {len(open_pos)} positions | cost=${total_cost:.2f} | value=${total_value:.2f}")
     check_sells()
     markets = fetch_all_markets()
+    # Cache all market data for dashboard
+    for m in markets:
+        _cache['markets'][m.get('ticker', '')] = m
     logger.info(f"Fetched {len(markets)} markets")
     buy_cheapest(markets)
+    refresh_cache()
 
 
 # === DASHBOARD API ===
@@ -347,40 +391,14 @@ def health():
 @app.route('/api/status')
 def api_status():
     try:
-        # Pull balance directly from Kalshi
-        bal = {'balance': 0, 'portfolio_value': 0}
-        try:
-            resp = kalshi_get('/portfolio/balance')
-            bal = {
-                'balance': resp.get('balance', 0) / 100.0,
-                'portfolio_value': resp.get('portfolio_value', 0) / 100.0,
-            }
-        except:
-            pass
-
-        cash = bal['balance']
-        positions_value = bal['portfolio_value']
+        # Use cached Kalshi data
+        bal = _cache.get('balance', {})
+        cash = bal.get('balance', 0)
+        positions_value = bal.get('portfolio_value', 0)
         portfolio = cash + positions_value
 
-        # Pull positions from Kalshi for count
-        positions = []
-        try:
-            cursor = None
-            while True:
-                url = '/portfolio/positions?limit=200&count_filter=position'
-                if cursor:
-                    url += f'&cursor={cursor}'
-                resp = kalshi_get(url)
-                batch = resp.get('market_positions', [])
-                positions.extend(batch)
-                cursor = resp.get('cursor')
-                if not cursor or not batch:
-                    break
-        except:
-            pass
-
+        positions = _cache.get('positions', [])
         active = [p for p in positions if sf(p.get('position_fp', '0')) != 0]
-        total_realized = sum(sf(p.get('realized_pnl_dollars', '0')) for p in positions)
         total_fees = sum(sf(p.get('fees_paid_dollars', '0')) for p in positions)
 
         # Win/loss/cuts from OUR bot's DB only
@@ -429,24 +447,23 @@ def api_status():
 
 @app.route('/api/positions')
 def api_positions():
-    """Open positions from Kalshi API with live market prices."""
+    """Open positions from cache with cached market prices."""
     try:
-        # Get positions from Kalshi
-        all_positions = []
-        cursor = None
-        while True:
-            url = '/portfolio/positions?limit=200&count_filter=position'
-            if cursor:
-                url += f'&cursor={cursor}'
-            resp = kalshi_get(url)
-            batch = resp.get('market_positions', [])
-            all_positions.extend(batch)
-            cursor = resp.get('cursor')
-            if not cursor or not batch:
-                break
-
+        all_positions = _cache.get('positions', [])
         now = datetime.now(timezone.utc)
         results = []
+
+        # Batch-load buy times from DB
+        buy_times = {}
+        try:
+            conn = get_db()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT ticker, MIN(bought_at) as bought_at FROM scraper_trades WHERE status='open' GROUP BY ticker")
+                for row in cur.fetchall():
+                    buy_times[row['ticker']] = row['bought_at']
+            conn.close()
+        except:
+            pass
 
         for pos in all_positions:
             ticker = pos.get('ticker', '')
@@ -457,12 +474,10 @@ def api_positions():
             side = 'yes' if position_fp > 0 else 'no'
             count = int(abs(position_fp))
             cost = sf(pos.get('total_traded_dollars', '0'))
-            exposure = sf(pos.get('market_exposure_dollars', '0'))
-            realized = sf(pos.get('realized_pnl_dollars', '0'))
             fees = sf(pos.get('fees_paid_dollars', '0'))
 
-            # Get live market price
-            market = get_market(ticker)
+            # Get bid from cached market data
+            market = _cache['markets'].get(ticker, {})
             current_bid = 0
             if market:
                 if side == 'yes':
@@ -470,27 +485,14 @@ def api_positions():
                 else:
                     current_bid = sf(market.get('no_bid_dollars', '0'))
 
-            # Get buy time from our DB for cut timer
-            bought_at = None
-            try:
-                conn = get_db()
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute("SELECT bought_at FROM scraper_trades WHERE ticker=%s AND status='open' ORDER BY bought_at ASC LIMIT 1", (ticker,))
-                    row = cur.fetchone()
-                    if row:
-                        bought_at = row['bought_at']
-                conn.close()
-            except:
-                pass
-
+            # Buy time from batch query
+            bought_at = buy_times.get(ticker)
             mins_held = 0
             if bought_at:
                 if bought_at.tzinfo is None:
                     bought_at = bought_at.replace(tzinfo=timezone.utc)
                 mins_held = (now - bought_at).total_seconds() / 60
 
-            # Gain % = (current_value - cost) / cost
-            # current_value = bid * count, cost = total_traded
             current_value = current_bid * count if current_bid > 0 else 0
             entry_per = abs(cost) / count if count > 0 else 0
             unrealized = round(current_value - abs(cost), 4) if current_bid > 0 else 0
