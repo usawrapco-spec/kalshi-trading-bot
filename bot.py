@@ -296,6 +296,16 @@ def check_sells():
 
 def buy_cheapest(markets):
     open_positions = get_open_positions()
+
+    # Check position budget: max 25% of cash in positions
+    bal = _cache.get('balance', {})
+    cash = bal.get('balance', 0)
+    positions_value = bal.get('portfolio_value', 0)
+    max_in_positions = (cash + positions_value) * 0.25
+    if positions_value >= max_in_positions:
+        logger.info(f"Position cap: ${positions_value:.2f} >= 25% of ${cash + positions_value:.2f} (${max_in_positions:.2f})")
+        return
+
     if len(open_positions) >= MAX_POSITIONS:
         logger.info(f"Max positions ({MAX_POSITIONS}) reached")
         return
@@ -309,6 +319,12 @@ def buy_cheapest(markets):
         return
 
     best = candidates[0]
+
+    # Check if this buy would exceed 25% cap
+    if positions_value + best['price'] > max_in_positions:
+        logger.info(f"Skip buy: ${positions_value + best['price']:.2f} would exceed 25% cap ${max_in_positions:.2f}")
+        return
+
     logger.info(f"CHEAPEST: {best['ticker']} {best['side']} @ ${best['price']:.2f} ({best['mins_left']:.1f}min left)")
 
     result = place_order(best['ticker'], best['side'], 'buy', best['price'], CONTRACTS)
