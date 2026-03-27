@@ -383,31 +383,29 @@ def api_status():
         total_realized = sum(sf(p.get('realized_pnl_dollars', '0')) for p in positions)
         total_fees = sum(sf(p.get('fees_paid_dollars', '0')) for p in positions)
 
-        # Settlements for win/loss count
-        settlements = []
-        try:
-            resp = kalshi_get('/portfolio/settlements?limit=200')
-            settlements = resp.get('settlements', [])
-        except:
-            pass
-
-        wins = sum(1 for s in settlements if s.get('revenue', 0) > 0)
-        losses = sum(1 for s in settlements if s.get('revenue', 0) == 0 and (sf(s.get('yes_count_fp', '0')) + sf(s.get('no_count_fp', '0'))) > 0)
-
-        # Win/loss P&L for averages
-        win_revenues = [s.get('revenue', 0) / 100.0 - sf(s.get('yes_total_cost_dollars', '0')) - sf(s.get('no_total_cost_dollars', '0')) for s in settlements if s.get('revenue', 0) > 0]
-        loss_costs = [-(sf(s.get('yes_total_cost_dollars', '0')) + sf(s.get('no_total_cost_dollars', '0'))) for s in settlements if s.get('revenue', 0) == 0 and (sf(s.get('yes_count_fp', '0')) + sf(s.get('no_count_fp', '0'))) > 0]
-        avg_win = round(sum(win_revenues) / len(win_revenues), 4) if win_revenues else 0
-        avg_loss = round(sum(loss_costs) / len(loss_costs), 4) if loss_costs else 0
-
-        # Cuts from our DB
+        # Win/loss/cuts from OUR bot's DB only
+        wins = 0
+        losses = 0
         cuts = 0
+        avg_win = 0
+        avg_loss = 0
+        bot_pnl = 0
+        bot_fees = 0
         try:
             conn = get_db()
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM scraper_trades WHERE close_reason='cut_loss'")
-                cuts = cur.fetchone()[0]
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM scraper_trades WHERE status='closed'")
+                closed = cur.fetchall()
             conn.close()
+            wins = sum(1 for t in closed if t.get('close_reason') == 'win')
+            losses = sum(1 for t in closed if t.get('close_reason') == 'loss')
+            cuts = sum(1 for t in closed if t.get('close_reason') == 'cut_loss')
+            win_pnls = [sf(t['pnl']) for t in closed if sf(t.get('pnl', 0)) > 0]
+            loss_pnls = [sf(t['pnl']) for t in closed if sf(t.get('pnl', 0)) < 0]
+            avg_win = round(sum(win_pnls) / len(win_pnls), 4) if win_pnls else 0
+            avg_loss = round(sum(loss_pnls) / len(loss_pnls), 4) if loss_pnls else 0
+            bot_pnl = round(sum(sf(t['pnl']) for t in closed if t.get('pnl') is not None), 4)
+            bot_fees = round(sum(sf(t.get('fees', 0)) for t in closed), 4)
         except:
             pass
 
@@ -416,7 +414,7 @@ def api_status():
             'positions_value': round(positions_value, 2),
             'portfolio': round(portfolio, 2),
             'open_count': len(active),
-            'realized_pnl': round(total_realized, 4),
+            'realized_pnl': bot_pnl,
             'total_fees': round(total_fees, 4),
             'wins': wins,
             'losses': losses,
@@ -491,16 +489,22 @@ def api_positions():
                     bought_at = bought_at.replace(tzinfo=timezone.utc)
                 mins_held = (now - bought_at).total_seconds() / 60
 
-            gain_pct = (exposure / abs(cost) * 100) if cost != 0 else 0
+            # Gain % = (current_value - cost) / cost
+            # current_value = bid * count, cost = total_traded
+            current_value = current_bid * count if current_bid > 0 else 0
+            entry_per = abs(cost) / count if count > 0 else 0
+            unrealized = round(current_value - abs(cost), 4) if current_bid > 0 else 0
+            gain_pct = ((current_value - abs(cost)) / abs(cost) * 100) if cost != 0 and current_bid > 0 else 0
 
             results.append({
                 'ticker': ticker,
                 'side': side,
                 'count': count,
                 'cost': round(abs(cost), 4),
-                'exposure': round(exposure, 4),
+                'entry_per': round(entry_per, 4),
                 'current_bid': round(current_bid, 2),
-                'realized_pnl': round(realized, 4),
+                'current_value': round(current_value, 4),
+                'unrealized': unrealized,
                 'fees': round(fees, 4),
                 'gain_pct': round(gain_pct, 1),
                 'mins_held': round(mins_held, 1),
@@ -705,8 +709,8 @@ tr:hover{background:#1a1a1a}
 <div class="panel">
   <div class="panel-header"><h2>Open Positions</h2><div class="count" id="pos-label"></div></div>
   <div class="panel-body"><table><thead><tr>
-    <th>Ticker</th><th>Side</th><th>Qty</th><th>Cost</th><th>Bid</th><th>Exposure</th><th>Gain</th><th>Fees</th><th>Held</th><th>Cut Timer</th>
-  </tr></thead><tbody id="pos-body"><tr><td colspan="10" class="gray" style="text-align:center;padding:20px">Loading...</td></tr></tbody></table></div>
+    <th>Ticker</th><th>Side</th><th>Qty</th><th>Entry</th><th>Cost</th><th>Bid</th><th>Value</th><th>P&L</th><th>Gain</th><th>Held</th><th>Cut</th>
+  </tr></thead><tbody id="pos-body"><tr><td colspan="11" class="gray" style="text-align:center;padding:20px">Loading...</td></tr></tbody></table></div>
 </div>
 
 <div class="panel">
@@ -760,27 +764,29 @@ async function refresh(){
       var h='';
       positions.forEach(function(p){
         var gc=cls(p.gain_pct);
+        var uc=cls(p.unrealized);
         var cutPct=Math.min(p.mins_held/5*100,100);
         var cutColor=cutPct>=100?(p.gain_pct<=-50?'#ff4444':'#00d673'):'#ffaa00';
         h+='<tr>';
         h+='<td style="font-size:10px">'+esc(p.ticker)+'</td>';
         h+='<td><span class="tag tag-'+p.side+'">'+p.side.toUpperCase()+'</span></td>';
         h+='<td>'+p.count+'</td>';
-        h+='<td>$'+p.cost.toFixed(4)+'</td>';
+        h+='<td>$'+p.entry_per.toFixed(2)+'</td>';
+        h+='<td>$'+p.cost.toFixed(2)+'</td>';
         h+='<td>'+(p.current_bid>0?'$'+p.current_bid.toFixed(2):'--')+'</td>';
-        h+='<td class="'+cls(p.exposure)+'">$'+p.exposure.toFixed(4)+'</td>';
+        h+='<td>'+(p.current_bid>0?'$'+p.current_value.toFixed(2):'--')+'</td>';
+        h+='<td class="'+uc+'">'+(p.unrealized>=0?'+':'')+p.unrealized.toFixed(4)+'</td>';
         h+='<td class="'+gc+'">'+(p.gain_pct>=0?'+':'')+p.gain_pct.toFixed(0)+'%</td>';
-        h+='<td class="red">$'+p.fees.toFixed(4)+'</td>';
         h+='<td>'+p.mins_held.toFixed(1)+'m</td>';
-        h+='<td style="min-width:70px"><div class="cut-bar"><div class="cut-fill" style="width:'+cutPct+'%;background:'+cutColor+'"></div></div>';
+        h+='<td style="min-width:60px"><div class="cut-bar"><div class="cut-fill" style="width:'+cutPct+'%;background:'+cutColor+'"></div></div>';
         if(cutPct>=100){
-          h+=p.gain_pct<=-50?'<span class="red" style="font-size:9px">CUTTING</span>':'<span class="green" style="font-size:9px">SAFE</span>';
+          h+=p.gain_pct<=-50?'<span class="red" style="font-size:9px">CUT</span>':'<span class="green" style="font-size:9px">OK</span>';
         }else{
           h+='<span class="gray" style="font-size:9px">'+p.mins_held.toFixed(1)+'/5m</span>';
         }
         h+='</td></tr>';
       });
-      $('pos-body').innerHTML=h||'<tr><td colspan="10" class="gray" style="text-align:center;padding:20px">No open positions</td></tr>';
+      $('pos-body').innerHTML=h||'<tr><td colspan="11" class="gray" style="text-align:center;padding:20px">No open positions</td></tr>';
     }
 
     if(closed){
