@@ -486,6 +486,9 @@ def api_positions():
             position_fp = sf(pos.get('position_fp', '0'))
             if position_fp == 0:
                 continue
+            # Only show positions from our 15M crypto series
+            if not any(ticker.startswith(series.replace('15M', '')) and '15M' in ticker for series in CRYPTO_SERIES):
+                continue
 
             side = 'yes' if position_fp > 0 else 'no'
             count = int(abs(position_fp))
