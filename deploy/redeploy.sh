@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Kalshi Trading Bot - Redeploy Script
-# Pulls the latest code from GitHub and restarts all services.
+# Kalshi Scraper Bot - Redeploy Script
+# Pulls the latest code from GitHub and restarts the bot.
 #
 # Usage: sudo bash /opt/kalshi-trading-bot/deploy/redeploy.sh
 # =============================================================================
@@ -21,25 +21,18 @@ echo "[redeploy] Installing/updating dependencies..."
 echo "[redeploy] Fixing file ownership..."
 chown -R kalshi:kalshi "${INSTALL_DIR}"
 
-# Install hedger service if it doesn't exist
-if [[ ! -f /etc/systemd/system/kalshi-hedger.service ]]; then
-    echo "[redeploy] Installing kalshi-hedger service..."
-    cp "${INSTALL_DIR}/deploy/kalshi-hedger.service" /etc/systemd/system/kalshi-hedger.service
+# === CLEANUP: remove old hedger service ===
+if systemctl is-active kalshi-hedger &>/dev/null || [[ -f /etc/systemd/system/kalshi-hedger.service ]]; then
+    echo "[redeploy] Removing hedger service..."
+    systemctl stop kalshi-hedger 2>/dev/null || true
+    systemctl disable kalshi-hedger 2>/dev/null || true
+    rm -f /etc/systemd/system/kalshi-hedger.service
     systemctl daemon-reload
-    systemctl enable kalshi-hedger
+    echo "[redeploy] Hedger service removed."
 fi
 
-# One-time reset: clear hedger data for fresh $20 start
-if [[ -f "${INSTALL_DIR}/.hedger-reset-pending" ]]; then
-    echo "[redeploy] Resetting hedger database tables..."
-    sudo -u postgres psql -d kalshi -c "TRUNCATE hedger_trades, hedger_rounds RESTART IDENTITY;"
-    rm -f "${INSTALL_DIR}/.hedger-reset-pending"
-fi
-
-echo "[redeploy] Restarting services..."
+echo "[redeploy] Restarting scraper bot..."
 systemctl restart kalshi-bot
-systemctl restart kalshi-hedger
 
 echo "[redeploy] Done. Service status:"
 systemctl --no-pager status kalshi-bot
-systemctl --no-pager status kalshi-hedger
