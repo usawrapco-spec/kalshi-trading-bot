@@ -428,13 +428,12 @@ def buy_pool_contracts(markets):
             pool_positions = positions
             break
 
-    if target_pool is None:
+    need_new_pool = target_pool is None
+    if need_new_pool:
         if len(open_pools) >= MAX_POOLS:
             logger.info(f"MAX POOLS ({MAX_POOLS}) reached -- waiting for sells or settlements")
             return
-        target_pool = create_new_pool()
-        pool_positions = []
-        logger.info(f"Created new pool #{target_pool}")
+        # Don't create yet — wait until we confirm there are candidates
 
     slots = min(CONTRACTS_PER_BUY, POOL_SIZE - len(pool_positions))
     if slots <= 0:
@@ -533,6 +532,10 @@ def buy_pool_contracts(markets):
     series_list = list(candidates_by_series.keys())
     random.shuffle(series_list)
 
+    # Create pool now that we have candidates
+    if need_new_pool:
+        target_pool = create_new_pool()
+        logger.info(f"Created new pool #{target_pool}")
     round_id = target_pool
     bought = 0
 
