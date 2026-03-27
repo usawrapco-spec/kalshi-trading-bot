@@ -1313,8 +1313,7 @@ def api_batches():
                 """)
                 open_batches = cur.fetchall()
 
-                cur.execute("SELECT * FROM batches WHERE status != 'open' ORDER BY closed_at DESC LIMIT 5")
-                closed_batches = cur.fetchall()
+                closed_batches = []  # don't show closed batches in live panel
         finally:
             conn.close()
 
