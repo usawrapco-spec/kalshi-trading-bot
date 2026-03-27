@@ -284,11 +284,14 @@ echo "[redeploy] Installing/updating dependencies..."
 echo "[redeploy] Fixing file ownership..."
 chown -R kalshi:kalshi "${INSTALL_DIR}"
 
-echo "[redeploy] Restarting service..."
+echo "[redeploy] Restarting services..."
 systemctl restart "${SERVICE_NAME}"
+# Restart hedger if it exists
+systemctl restart kalshi-hedger 2>/dev/null || true
 
 echo "[redeploy] Done. Service status:"
 systemctl --no-pager status "${SERVICE_NAME}"
+systemctl --no-pager status kalshi-hedger 2>/dev/null || true
 REDEPLOY
 
 chmod +x "${INSTALL_DIR}/deploy/redeploy.sh"
