@@ -27,7 +27,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 # === STRATEGY ===
 STARTING_BALANCE = 20.00
 BUY_MIN = 0.01
-BUY_MAX = 0.40
+BUY_MAX = 0.55
 CONTRACTS_PER_BUY = 3           # buy 3 contracts per pool per cycle
 POOL_SIZE = 3                    # positions per pool
 MAX_POOLS = 10                   # run up to 10 pools simultaneously
