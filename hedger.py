@@ -28,15 +28,19 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() == 'true'
 STARTING_BALANCE = 20.00
 BUY_MIN = 0.01
 BUY_MAX = 0.40
-CONTRACTS_PER_BUY = 3           # buy 3 contracts per cycle, spread across coins
-MAX_POOL_SIZE = 3                # max open positions in the pool
+CONTRACTS_PER_BUY = 5           # buy 5 contracts per cycle, spread across coins
+MAX_POOL_SIZE = 10               # max open positions in the pool
 POOL_TAKE_PROFIT = 0.30          # sell all when pool is +30%
 TAKER_FEE_RATE = 0.07
-MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_EXPIRY = 10
+MAX_MINS_TO_EXPIRY_15M = 15
+MIN_MINS_TO_EXPIRY_15M = 10
+MAX_MINS_TO_EXPIRY_1H = 55
+MIN_MINS_TO_EXPIRY_1H = 20
 CYCLE_SECONDS = 2
 CASH_RESERVE = 0.50
-CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
+CRYPTO_SERIES_15M = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
+CRYPTO_SERIES_1H = ['KXBTCD', 'KXETHD', 'KXSOLD', 'KXXRPD', 'KXDOGED']
+CRYPTO_SERIES = CRYPTO_SERIES_15M + CRYPTO_SERIES_1H
 
 # === DATABASE ===
 
@@ -441,8 +445,13 @@ def buy_pool_contracts(markets):
         try:
             close_dt = datetime.fromisoformat(close_time.replace('Z', '+00:00'))
             mins_left = (close_dt - now).total_seconds() / 60
-            if mins_left > MAX_MINS_TO_EXPIRY or mins_left < MIN_MINS_TO_EXPIRY:
-                continue
+            # Use different expiry windows for 15M vs hourly series
+            if market_series in CRYPTO_SERIES_1H:
+                if mins_left > MAX_MINS_TO_EXPIRY_1H or mins_left < MIN_MINS_TO_EXPIRY_1H:
+                    continue
+            else:
+                if mins_left > MAX_MINS_TO_EXPIRY_15M or mins_left < MIN_MINS_TO_EXPIRY_15M:
+                    continue
         except:
             continue
 
@@ -825,7 +834,7 @@ tr:hover{background:rgba(255,255,255,.015)}
   </div>
 </div>
 <div style="background:var(--bg1);border-bottom:1px solid var(--border);padding:10px 24px;font-size:11px;color:var(--text2);line-height:1.6">
-  <strong style="color:#b060ff">STRATEGY:</strong> Buy 3 contracts per cycle spread across BTC, ETH, SOL, XRP, DOGE — always the cheapest side. Build a pool of up to 15 positions. Every 2 seconds, check if the pool is net positive by +5% or more. If yes, sell everything and lock in profit. Start a new pool. Winners and losers cancel out — you only need the pool to be slightly positive at any point to cash out. Positions that don't hit +5% ride to settlement.
+  <strong style="color:#b060ff">STRATEGY:</strong> Buy 5 contracts per cycle across BTC, ETH, SOL, XRP, DOGE — mixed YES/NO sides for real hedging. 15-min + hourly contracts. Build a pool of up to 10 positions. Every 2 seconds, check if the pool is net positive by +30% or more. If yes, sell everything and lock in profit. Start a new pool. Mixed sides mean winners offset losers — you just need the pool to swing +30% to cash out.
 </div>
 
 <div class="main">
