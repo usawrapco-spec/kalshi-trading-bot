@@ -242,10 +242,16 @@ def find_cheapest(markets):
         yes_ask = sf(market.get('yes_ask_dollars', '999'))
         no_ask = sf(market.get('no_ask_dollars', '999'))
 
-        if SIDE_STRATEGY in ('cheapest', 'yes'):
+        if SIDE_STRATEGY == 'yes':
+            # Only buy YES when it's the cheap side (under 50c)
+            if BUY_MIN <= yes_ask <= BUY_MAX and yes_ask < no_ask:
+                candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
+        elif SIDE_STRATEGY == 'no':
+            if BUY_MIN <= no_ask <= BUY_MAX and no_ask < yes_ask:
+                candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'mins_left': mins_left})
+        elif SIDE_STRATEGY == 'cheapest':
             if BUY_MIN <= yes_ask <= BUY_MAX:
                 candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
-        if SIDE_STRATEGY in ('cheapest', 'no'):
             if BUY_MIN <= no_ask <= BUY_MAX:
                 candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'mins_left': mins_left})
 
