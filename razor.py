@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.20
+BUY_MAX = 0.99
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 10          # only buy when 10-15 min left (first 5 min of window)
@@ -31,7 +31,7 @@ CYCLE_SECONDS = 2
 CONTRACTS = 3
 MAX_POSITIONS = 15
 MAX_BUYS_PER_WINDOW = 3       # max NEW positions per 15-min round
-ROUND_BUDGET_PCT = 0.25       # spend max 25% of pre-window cash per round
+ROUND_BUDGET_PCT = 0.25       # spend max 25% of STARTING_BALANCE per round (hard cap)
 SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'cheapest')  # 'yes', 'no', or 'cheapest'
 CUT_WHEN_MINS_LEFT = 5        # start cutting when 5 min left in window
 CUT_LOSS_THRESHOLD = -0.70
@@ -323,8 +323,8 @@ def buy_cheapest(markets):
     global _round
     open_positions = get_open_positions()
 
-    # Check round budget: max 25% of pre-window cash
-    max_spend = _round['start_balance'] * ROUND_BUDGET_PCT
+    # Check round budget: max 25% of STARTING_BALANCE (hard cap, never exceeds original cash)
+    max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
     if max_spend <= 0:
         logger.info("RAZOR Waiting for round balance snapshot")
         return
@@ -519,14 +519,14 @@ def run_cycle():
         _round['spent'] = 0
         _round['buys'] = 0
         _round['window_id'] = current_window
-        max_spend = cash * ROUND_BUDGET_PCT
-        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max spend=${max_spend:.2f} ({ROUND_BUDGET_PCT*100:.0f}%), max buys={MAX_BUYS_PER_WINDOW}, side={SIDE_STRATEGY}")
+        max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
+        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max spend=${max_spend:.2f} (25% of ${STARTING_BALANCE:.0f}), max buys={MAX_BUYS_PER_WINDOW}, side={SIDE_STRATEGY}")
         sync_positions()
 
     open_pos = get_open_positions()
     total_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_pos)
     total_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_pos)
-    max_spend = _round['start_balance'] * ROUND_BUDGET_PCT
+    max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
     logger.info(f"=== RAZOR [{mode}] === {len(open_pos)} pos | cost=${total_cost:.2f} | value=${total_value:.2f} | round: ${_round['spent']:.2f}/${max_spend:.2f} buys={_round['buys']}/{MAX_BUYS_PER_WINDOW}")
     check_sells()
     markets = fetch_all_markets()
@@ -583,6 +583,7 @@ def api_status():
         except:
             pass
 
+        mode = "LIVE" if ENABLE_TRADING else "PAPER"
         return jsonify({
             'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
@@ -595,6 +596,7 @@ def api_status():
             'cuts': cuts,
             'avg_win': avg_win,
             'avg_loss': avg_loss,
+            'mode': mode,
         })
     except Exception as e:
         logger.error(f"RAZOR API status error: {e}")
@@ -881,8 +883,8 @@ tr:hover{background:#1a1a1a}
 
 
 <div class="header">
-  <span class="live-dot"></span>
-  RAZOR (LIVE) &mdash; buy $0.01-$0.50 cheapest, cut -70% losers at 5min, ride rest to settlement
+  <span class="live-dot" id="mode-dot"></span>
+  <span id="mode-label">RAZOR</span> &mdash; buy $0.01-$0.99, 100% settle, 25% budget cap
   &mdash; <span id="last-update">--</span>
 </div>
 
@@ -965,7 +967,7 @@ tr:hover{background:#1a1a1a}
   </tr></thead><tbody id="closed-body"><tr><td colspan="10" class="gray" style="text-align:center;padding:20px">Loading...</td></tr></tbody></table></div>
 </div>
 
-<div class="footer">RAZOR (LIVE) &mdash; live market prices from Kalshi API &mdash; auto-refresh 2s</div>
+<div class="footer"><span id="footer-mode">RAZOR</span> &mdash; live market prices from Kalshi API &mdash; auto-refresh 2s</div>
 
 <script>
 function $(id){return document.getElementById(id)}
@@ -1002,6 +1004,11 @@ async function refresh(){
       $('avg-win').textContent='+$'+(status.avg_win||0).toFixed(4);
       $('avg-loss').textContent='-$'+Math.abs(status.avg_loss||0).toFixed(4);
       $('cuts').textContent=status.cuts||0;
+      var mode=status.mode||'PAPER';
+      $('mode-label').textContent='RAZOR ('+mode+')';
+      $('footer-mode').textContent='RAZOR ('+mode+')';
+      var dot=$('mode-dot');
+      if(mode==='LIVE'){dot.style.background='#00d673'}else{dot.style.background='#ffaa00'}
     }
 
     if(positions){
