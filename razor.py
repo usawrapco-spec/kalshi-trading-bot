@@ -1,7 +1,7 @@
 """
-RAZOR (LIVE) — Flask Blueprint version of the scraper bot.
-Buy the cheapest available crypto contract ($0.01-$0.50).
-At 5 minutes after buy: cut anything 70%+ red. Rest rides to settlement.
+RAZOR — Crypto scalper bot.
+Buy YES-side crypto contracts settling within 15 min.
+25% of pre-window cash per round. Ride to settlement.
 Tracks everything in local DB. Dashboard shows real positions + market prices.
 """
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # === CONFIG ===
 KALSHI_HOST = os.environ.get('KALSHI_API_HOST', 'https://api.elections.kalshi.com')
 DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://kalshi:kalshi@localhost:5432/kalshi')
-ENABLE_TRADING = True
+ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '1', 'yes')
 
 # === STRATEGY ===
 BUY_MIN = 0.01
@@ -30,9 +30,13 @@ MIN_MINS_TO_BUY = 10          # only buy when 10-15 min left (first 5 min of win
 CYCLE_SECONDS = 2
 CONTRACTS = 3
 MAX_POSITIONS = 15
+MAX_BUYS_PER_WINDOW = 3       # max NEW positions per 15-min round
+ROUND_BUDGET_PCT = 0.25       # spend max 25% of pre-window cash per round
+SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'yes')  # 'yes', 'no', or 'cheapest'
 CUT_WHEN_MINS_LEFT = 5        # start cutting when 5 min left in window
 CUT_LOSS_THRESHOLD = -0.70
 TAKE_PROFIT_THRESHOLD = 1.00  # sell at +100% gain
+STARTING_BALANCE = 50.00      # paper mode starting balance
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
@@ -48,10 +52,14 @@ _cache = {
     'updated': 0,
 }
 
+# Last known good balance — fallback when API fails
+_last_known_balance = 0
+
 # Round-start balance tracking — snapshot once per 15-min window
 _round = {
     'start_balance': 0,
     'spent': 0,
+    'buys': 0,
     'window_id': -1,
 }
 
@@ -157,6 +165,7 @@ def place_order(ticker, side, action, price, count):
         if filled <= 0:
             filled = count if order.get('status') in ('executed', 'filled') else 0
         if filled <= 0:
+            logger.warning(f"RAZOR ORDER NOT FILLED: {ticker} {side} {action} x{count} @ ${price:.2f} -- status={order.get('status')}, remaining={order.get('remaining_count')}")
             return None
 
         # Get actual fill price from fills API
@@ -233,10 +242,12 @@ def find_cheapest(markets):
         yes_ask = sf(market.get('yes_ask_dollars', '999'))
         no_ask = sf(market.get('no_ask_dollars', '999'))
 
-        if BUY_MIN <= yes_ask <= BUY_MAX:
-            candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
-        if BUY_MIN <= no_ask <= BUY_MAX:
-            candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'mins_left': mins_left})
+        if SIDE_STRATEGY in ('cheapest', 'yes'):
+            if BUY_MIN <= yes_ask <= BUY_MAX:
+                candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
+        if SIDE_STRATEGY in ('cheapest', 'no'):
+            if BUY_MIN <= no_ask <= BUY_MAX:
+                candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'mins_left': mins_left})
 
     candidates.sort(key=lambda x: x['price'])
     return candidates
@@ -312,14 +323,18 @@ def buy_cheapest(markets):
     global _round
     open_positions = get_open_positions()
 
-    # Check round budget: max 50% of round-start balance
-    max_spend = _round['start_balance'] * 0.50
+    # Check round budget: max 25% of pre-window cash
+    max_spend = _round['start_balance'] * ROUND_BUDGET_PCT
     if max_spend <= 0:
         logger.info("RAZOR Waiting for round balance snapshot")
         return
-    cost_this_buy = markets[0].get('price', 0.50) * CONTRACTS if markets else 0.50
     if _round['spent'] >= max_spend:
         logger.info(f"RAZOR Round budget spent: ${_round['spent']:.2f} / ${max_spend:.2f}")
+        return
+
+    # Check per-window buy cap
+    if _round['buys'] >= MAX_BUYS_PER_WINDOW:
+        logger.info(f"RAZOR Max buys this window ({MAX_BUYS_PER_WINDOW}) reached")
         return
 
     if len(open_positions) >= MAX_POSITIONS:
@@ -342,7 +357,7 @@ def buy_cheapest(markets):
         logger.info(f"RAZOR Round budget: ${_round['spent'] + buy_cost:.2f} would exceed ${max_spend:.2f}")
         return
 
-    logger.info(f"RAZOR CHEAPEST: {best['ticker']} {best['side']} @ ${best['price']:.2f} ({best['mins_left']:.1f}min left)")
+    logger.info(f"RAZOR BEST: {best['ticker']} {best['side']} @ ${best['price']:.2f} ({best['mins_left']:.1f}min left) [strategy={SIDE_STRATEGY}]")
 
     result = place_order(best['ticker'], best['side'], 'buy', best['price'], CONTRACTS)
     if not result:
@@ -361,7 +376,8 @@ def buy_cheapest(markets):
                 (best['ticker'], best['side'], float(fill_price), filled, float(fill_price), float(buy_fee))
             )
         _round['spent'] += fill_price * filled
-        logger.info(f"RAZOR BOUGHT: {best['ticker']} {best['side']} x{filled} @ ${fill_price:.2f} (asked ${best['price']:.2f}) fee=${buy_fee:.4f} | round spent: ${_round['spent']:.2f}/${max_spend:.2f}")
+        _round['buys'] += 1
+        logger.info(f"RAZOR BOUGHT: {best['ticker']} {best['side']} x{filled} @ ${fill_price:.2f} fee=${buy_fee:.4f} | round: ${_round['spent']:.2f}/${max_spend:.2f} buys={_round['buys']}/{MAX_BUYS_PER_WINDOW}")
     finally:
         conn.close()
 
@@ -400,31 +416,120 @@ def refresh_cache():
     _cache['updated'] = time.time()
 
 
+def get_paper_balance():
+    """Calculate balance from DB for paper mode."""
+    try:
+        conn = get_db()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT price, count FROM scraper_trades WHERE status='open'")
+            open_trades = cur.fetchall()
+            cur.execute("SELECT pnl FROM scraper_trades WHERE status='closed' AND pnl IS NOT NULL")
+            closed_trades = cur.fetchall()
+        conn.close()
+        buy_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_trades)
+        total_pnl = sum(sf(t['pnl']) for t in closed_trades)
+        return max(0, STARTING_BALANCE - buy_cost + total_pnl)
+    except Exception as e:
+        logger.error(f"Paper balance calc failed: {e}")
+        return STARTING_BALANCE
+
+
+def fetch_balance():
+    """Get current cash balance — live from API or calculated for paper."""
+    global _last_known_balance
+    if ENABLE_TRADING:
+        for attempt in range(3):
+            try:
+                resp = kalshi_get('/portfolio/balance')
+                cash = resp.get('balance', 0) / 100.0
+                _last_known_balance = cash
+                return cash
+            except Exception as e:
+                logger.warning(f"RAZOR Balance fetch attempt {attempt+1}/3 failed: {e}")
+                if attempt < 2:
+                    time.sleep(1)
+        # All retries failed — use last known
+        if _last_known_balance > 0:
+            logger.warning(f"RAZOR Using last known balance: ${_last_known_balance:.2f}")
+            return _last_known_balance
+        return 0
+    else:
+        return get_paper_balance()
+
+
+def sync_positions():
+    """Reconcile Kalshi API positions with local DB."""
+    if not ENABLE_TRADING:
+        return
+    try:
+        all_pos = []
+        cursor = None
+        while True:
+            url = '/portfolio/positions?limit=200&count_filter=position'
+            if cursor:
+                url += f'&cursor={cursor}'
+            resp = kalshi_get(url)
+            batch = resp.get('market_positions', [])
+            all_pos.extend(batch)
+            cursor = resp.get('cursor')
+            if not cursor or not batch:
+                break
+
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT ticker FROM scraper_trades WHERE status = 'open'")
+                db_tickers = {row['ticker'] for row in cur.fetchall()}
+
+            # Import orphan Kalshi positions not in our DB
+            for pos in all_pos:
+                ticker = pos.get('ticker', '')
+                position_fp = sf(pos.get('position_fp', '0'))
+                if position_fp == 0 or '15M' not in ticker:
+                    continue
+                if ticker not in db_tickers:
+                    side = 'yes' if position_fp > 0 else 'no'
+                    count = int(abs(position_fp))
+                    cost = abs(sf(pos.get('total_traded_dollars', '0')))
+                    entry_per = cost / count if count > 0 else 0
+                    if entry_per > 0:
+                        with conn.cursor() as cur2:
+                            cur2.execute(
+                                "INSERT INTO scraper_trades (ticker, side, price, count, current_bid, fees, status) VALUES (%s, %s, %s, %s, %s, 0, 'open')",
+                                (ticker, side, float(entry_per), count, float(entry_per))
+                            )
+                        logger.info(f"RAZOR SYNC: Imported orphan {ticker} {side} x{count} @ ${entry_per:.2f}")
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"RAZOR SYNC error: {e}")
+
+
 def run_cycle():
     global _round
+
+    mode = "LIVE" if ENABLE_TRADING else "PAPER"
 
     # Detect new 15-min window and snapshot balance
     now = datetime.now(timezone.utc)
     current_window = (now.hour * 4) + (now.minute // 15)
     if current_window != _round['window_id']:
-        # New window — snapshot balance
-        try:
-            resp = kalshi_get('/portfolio/balance')
-            cash = resp.get('balance', 0) / 100.0
-            _round['start_balance'] = cash
-            _round['spent'] = 0
-            _round['window_id'] = current_window
-            logger.info(f"RAZOR NEW ROUND: cash=${cash:.2f}, max spend=${cash * 0.50:.2f}")
-        except:
-            pass
+        cash = fetch_balance()
+        _round['start_balance'] = cash
+        _round['spent'] = 0
+        _round['buys'] = 0
+        _round['window_id'] = current_window
+        max_spend = cash * ROUND_BUDGET_PCT
+        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max spend=${max_spend:.2f} ({ROUND_BUDGET_PCT*100:.0f}%), max buys={MAX_BUYS_PER_WINDOW}, side={SIDE_STRATEGY}")
+        sync_positions()
 
     open_pos = get_open_positions()
     total_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_pos)
     total_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_pos)
-    logger.info(f"=== RAZOR CYCLE === {len(open_pos)} positions | cost=${total_cost:.2f} | value=${total_value:.2f} | round spent=${_round['spent']:.2f}/${_round['start_balance'] * 0.50:.2f}")
+    max_spend = _round['start_balance'] * ROUND_BUDGET_PCT
+    logger.info(f"=== RAZOR [{mode}] === {len(open_pos)} pos | cost=${total_cost:.2f} | value=${total_value:.2f} | round: ${_round['spent']:.2f}/${max_spend:.2f} buys={_round['buys']}/{MAX_BUYS_PER_WINDOW}")
     check_sells()
     markets = fetch_all_markets()
-    # Cache all market data for dashboard
     for m in markets:
         _cache['markets'][m.get('ticker', '')] = m
     logger.info(f"RAZOR Fetched {len(markets)} markets")
@@ -616,6 +721,76 @@ def api_closed():
     except Exception as e:
         logger.error(f"RAZOR API closed error: {e}")
         return jsonify([])
+
+
+@app.route('/api/analysis')
+def api_analysis():
+    """Win rate analysis by side, coin, and price bucket."""
+    try:
+        conn = get_db()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM scraper_trades WHERE status='closed'")
+            trades = cur.fetchall()
+        conn.close()
+
+        if not trades:
+            return jsonify({'message': 'No closed trades yet', 'total_trades': 0, 'by_side': {}, 'by_coin': {}, 'by_price_bucket': {}})
+
+        def bucket(price):
+            p = sf(price)
+            if p <= 0.05: return '$0.01-0.05'
+            if p <= 0.10: return '$0.06-0.10'
+            if p <= 0.20: return '$0.11-0.20'
+            if p <= 0.30: return '$0.21-0.30'
+            return '$0.31-0.45'
+
+        def coin_from_ticker(ticker):
+            for s in CRYPTO_SERIES:
+                prefix = s.replace('15M', '')
+                if ticker.startswith(prefix):
+                    return s
+            return 'OTHER'
+
+        def analyze_group(group):
+            total = len(group)
+            wins = sum(1 for t in group if t.get('close_reason') == 'win')
+            losses = sum(1 for t in group if t.get('close_reason') == 'loss')
+            pnl = round(sum(sf(t.get('pnl', 0)) for t in group), 4)
+            fees = round(sum(sf(t.get('fees', 0)) for t in group), 4)
+            return {
+                'total': total, 'wins': wins, 'losses': losses,
+                'win_rate': round(wins / total * 100, 1) if total > 0 else 0,
+                'pnl': pnl, 'fees': fees,
+            }
+
+        by_side = {}
+        for side in ('yes', 'no'):
+            group = [t for t in trades if t.get('side') == side]
+            if group:
+                by_side[side] = analyze_group(group)
+
+        by_coin = {}
+        for t in trades:
+            coin = coin_from_ticker(t.get('ticker', ''))
+            by_coin.setdefault(coin, []).append(t)
+        by_coin = {k: analyze_group(v) for k, v in by_coin.items()}
+
+        by_bucket = {}
+        for t in trades:
+            b = bucket(t.get('price', 0))
+            by_bucket.setdefault(b, []).append(t)
+        by_bucket = {k: analyze_group(v) for k, v in by_bucket.items()}
+
+        return jsonify({
+            'total_trades': len(trades),
+            'overall': analyze_group(trades),
+            'by_side': by_side,
+            'by_coin': by_coin,
+            'by_price_bucket': by_bucket,
+        })
+    except Exception as e:
+        logger.error(f"RAZOR API analysis error: {e}")
+        return jsonify({'error': str(e)})
 
 
 @app.route('/dashboard')
@@ -957,8 +1132,10 @@ PORT = int(os.environ.get('PORT', 8080))
 
 def razor_loop():
     init_razor_db()
-    logger.info(f"RAZOR starting -- buy ${BUY_MIN}-${BUY_MAX}, cut -70% at {CUT_WHEN_MINS_LEFT}min left, TP +100%")
+    mode = "LIVE" if ENABLE_TRADING else "PAPER"
+    logger.info(f"RAZOR starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, side={SIDE_STRATEGY}, {ROUND_BUDGET_PCT*100:.0f}% budget, {MAX_BUYS_PER_WINDOW} buys/window")
     logger.info(f"RAZOR Series: {CRYPTO_SERIES}")
+    sync_positions()
 
     while True:
         try:
