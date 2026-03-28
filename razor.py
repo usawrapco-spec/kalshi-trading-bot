@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.20
+BUY_MAX = 0.40
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 0           # buy throughout entire window
@@ -314,21 +314,7 @@ def check_sells():
             if current_bid <= 0:
                 continue
 
-            # === TAKE PROFIT at +30% ===
-            gain = (current_bid - entry) / entry if entry > 0 else 0
-            if gain >= TAKE_PROFIT_THRESHOLD:
-                buy_fee = kalshi_fee(entry, count)
-                sell_fee = kalshi_fee(current_bid, count)
-                pnl = round((current_bid - entry) * count - buy_fee - sell_fee, 4)
-                if pnl > 0:
-                    logger.info(f"RAZOR TAKE PROFIT: {ticker} {side} x{count} @ ${current_bid:.2f} gain={gain*100:.0f}% pnl=${pnl:.4f}")
-                    result = place_order(ticker, side, 'sell', current_bid, count)
-                    if result:
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                "UPDATE scraper_trades SET pnl=%s, fees=%s, status='closed', closed_at=NOW(), close_reason='take_profit', current_bid=%s WHERE id=%s",
-                                (float(pnl), float(buy_fee + sell_fee), float(current_bid), trade_id)
-                            )
+            # === NO SELLING — ride everything to settlement ===
     finally:
         conn.close()
 
