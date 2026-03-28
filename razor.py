@@ -355,9 +355,10 @@ def buy_cheapest(markets):
         logger.info(f"RAZOR Max positions ({MAX_POSITIONS}) reached")
         return
 
-    held_tickers = {t['ticker'] for t in open_positions}
+    # Dedup: don't buy same ticker+side combo twice
+    held = {(t['ticker'], t['side']) for t in open_positions}
     candidates = find_cheapest(markets)
-    candidates = [c for c in candidates if c['ticker'] not in held_tickers]
+    candidates = [c for c in candidates if (c['ticker'], c['side']) not in held]
 
     if not candidates:
         logger.info("RAZOR No buy candidates")
