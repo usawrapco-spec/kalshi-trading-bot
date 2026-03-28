@@ -26,13 +26,13 @@ BUY_MIN = 0.01
 BUY_MAX = 0.40
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_BUY = 10          # only buy when 10-15 min left (first 5 min of window)
+MIN_MINS_TO_BUY = 10          # buy when 10-15 min left (first 5 min of window)
 CYCLE_SECONDS = 2
 CONTRACTS = 1
-MAX_POSITIONS = 999
-MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
-ROUND_BUDGET_PCT = 0.50       # spend max 50% of STARTING_BALANCE per round (hard cap, no reinvesting wins)
-SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'yes')  # 'yes', 'no', or 'cheapest'
+MAX_POSITIONS = 999           # budget controlled
+MAX_BUYS_PER_WINDOW = 5       # 5 unique tickers per round
+ROUND_BUDGET_PCT = 0.75       # spend max 75% of cash, keep 25% reserve
+SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'cheapest')  # 'yes', 'no', or 'cheapest'
 CUT_WHEN_MINS_LEFT = 5        # start cutting when 5 min left in window
 CUT_LOSS_THRESHOLD = -0.70
 TAKE_PROFIT_THRESHOLD = 0.30  # sell at +30% gain
@@ -329,8 +329,8 @@ def buy_cheapest(markets):
     global _round
     open_positions = get_open_positions()
 
-    # Check round budget: max 25% of STARTING_BALANCE (hard cap, never exceeds original cash)
-    max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
+    # Check round budget: 75% of round-start cash (keep 25% reserve)
+    max_spend = _round['start_balance'] * ROUND_BUDGET_PCT
     if max_spend <= 0:
         logger.info("RAZOR Waiting for round balance snapshot")
         return
@@ -347,7 +347,10 @@ def buy_cheapest(markets):
         logger.info(f"RAZOR Max positions ({MAX_POSITIONS}) reached")
         return
 
+    # Single ticker buys — no repeats
+    held_tickers = {t['ticker'] for t in open_positions}
     candidates = find_cheapest(markets)
+    candidates = [c for c in candidates if c['ticker'] not in held_tickers]
 
     if not candidates:
         logger.info("RAZOR No buy candidates")
@@ -523,14 +526,14 @@ def run_cycle():
         _round['spent'] = 0
         _round['buys'] = 0
         _round['window_id'] = current_window
-        max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
-        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max spend=${max_spend:.2f} (25% of ${STARTING_BALANCE:.0f}), max buys={MAX_BUYS_PER_WINDOW}, side={SIDE_STRATEGY}")
+        max_spend = cash * ROUND_BUDGET_PCT
+        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max spend=${max_spend:.2f} (75%, 25% reserve), max buys={MAX_BUYS_PER_WINDOW}, side={SIDE_STRATEGY}")
         sync_positions()
 
     open_pos = get_open_positions()
     total_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_pos)
     total_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_pos)
-    max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
+    max_spend = _round['start_balance'] * ROUND_BUDGET_PCT
     logger.info(f"=== RAZOR [{mode}] === {len(open_pos)} pos | cost=${total_cost:.2f} | value=${total_value:.2f} | round: ${_round['spent']:.2f}/${max_spend:.2f} buys={_round['buys']}/{MAX_BUYS_PER_WINDOW}")
     check_sells()
     markets = fetch_all_markets()
