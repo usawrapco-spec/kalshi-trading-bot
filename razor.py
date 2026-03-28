@@ -547,15 +547,20 @@ def health():
 @app.route('/api/status')
 def api_status():
     try:
-        # Use cached Kalshi data
-        bal = _cache.get('balance', {})
-        cash = bal.get('balance', 0)
-        positions_value = bal.get('portfolio_value', 0)
+        # Balance: live from Kalshi cache, or paper from DB
+        if ENABLE_TRADING:
+            bal = _cache.get('balance', {})
+            cash = bal.get('balance', 0)
+            positions_value = bal.get('portfolio_value', 0)
+        else:
+            cash = get_paper_balance()
+            open_trades = get_open_positions()
+            positions_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_trades)
         portfolio = cash + positions_value
 
-        positions = _cache.get('positions', [])
-        active = [p for p in positions if sf(p.get('position_fp', '0')) != 0]
-        total_fees = sum(sf(p.get('fees_paid_dollars', '0')) for p in positions)
+        # Open count from DB (works for both paper and live)
+        open_positions = get_open_positions()
+        total_fees = 0
 
         # Win/loss/cuts from OUR bot's DB only
         wins = 0
@@ -580,6 +585,7 @@ def api_status():
             avg_loss = round(sum(loss_pnls) / len(loss_pnls), 4) if loss_pnls else 0
             bot_pnl = round(sum(sf(t['pnl']) for t in closed if t.get('pnl') is not None), 4)
             bot_fees = round(sum(sf(t.get('fees', 0)) for t in closed), 4)
+            total_fees = bot_fees
         except:
             pass
 
@@ -588,7 +594,7 @@ def api_status():
             'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
             'portfolio': round(portfolio, 2),
-            'open_count': len(active),
+            'open_count': len(open_positions),
             'realized_pnl': bot_pnl,
             'total_fees': round(total_fees, 4),
             'wins': wins,
@@ -605,61 +611,41 @@ def api_status():
 
 @app.route('/api/positions')
 def api_positions():
-    """All 15M positions from Kalshi with live bids and correct gain%."""
+    """Open positions from DB with live market bids."""
     try:
-        all_positions = _cache.get('positions', [])
         wml = mins_left_in_window()
         now = datetime.now(timezone.utc)
         results = []
 
-        # Our DB entries for accurate entry price + buy times
-        db_entries = {}
-        try:
-            conn = get_db()
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT ticker, price, count, MIN(bought_at) as bought_at FROM scraper_trades WHERE status='open' GROUP BY ticker, price, count")
-                for row in cur.fetchall():
-                    db_entries[row['ticker']] = row
-            conn.close()
-        except:
-            pass
+        # Source of truth: our DB
+        open_trades = get_open_positions()
 
-        for pos in all_positions:
-            ticker = pos.get('ticker', '')
-            position_fp = sf(pos.get('position_fp', '0'))
-            if position_fp == 0:
-                continue
-            # Only 15M crypto series
-            if '15M' not in ticker:
+        for trade in open_trades:
+            ticker = trade['ticker']
+            side = trade['side']
+            entry_per = sf(trade['price'])
+            count = trade.get('count') or 1
+            fees = sf(trade.get('fees', 0))
+
+            if entry_per <= 0:
                 continue
 
-            side = 'yes' if position_fp > 0 else 'no'
-            count = int(abs(position_fp))
-            fees = sf(pos.get('fees_paid_dollars', '0'))
-
-            # Use our DB entry price if we have it (accurate), else estimate from Kalshi
-            db_entry = db_entries.get(ticker)
-            if db_entry:
-                entry_per = sf(db_entry['price'])
-                cost = entry_per * (db_entry.get('count') or 1)
-            else:
-                cost = abs(sf(pos.get('total_traded_dollars', '0')))
-                entry_per = cost / count if count > 0 else 0
+            cost = entry_per * count
 
             # Live bid from cached market data
             market = _cache['markets'].get(ticker, {})
-            current_bid = 0
+            current_bid = sf(trade.get('current_bid', 0))
             if market:
                 if side == 'yes':
-                    current_bid = sf(market.get('yes_bid_dollars', '0'))
+                    current_bid = sf(market.get('yes_bid_dollars', '0')) or current_bid
                 else:
-                    current_bid = sf(market.get('no_bid_dollars', '0'))
+                    current_bid = sf(market.get('no_bid_dollars', '0')) or current_bid
 
             current_value = current_bid * count if current_bid > 0 else 0
-            unrealized = round(current_value - (entry_per * count), 4) if current_bid > 0 else 0
+            unrealized = round(current_value - cost, 4) if current_bid > 0 else 0
             gain_pct = ((current_bid - entry_per) / entry_per * 100) if entry_per > 0 and current_bid > 0 else 0
 
-            bought_at = db_entry['bought_at'] if db_entry else None
+            bought_at = trade.get('bought_at')
             mins_held = 0
             if bought_at:
                 if bought_at.tzinfo is None:
