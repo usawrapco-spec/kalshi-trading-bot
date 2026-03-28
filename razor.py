@@ -32,7 +32,7 @@ CONTRACTS = 5
 MAX_POSITIONS = 999           # budget controlled
 MAX_BUYS_PER_WINDOW = 5       # 5 unique tickers per round
 ROUND_BUDGET_PCT = 0.50       # spend max 50% of cash, keep 50% reserve
-SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'cheapest')  # 'yes', 'no', or 'cheapest'
+SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'expensive')  # 'expensive' = buy the side market favors
 CUT_WHEN_MINS_LEFT = 5        # start cutting when 5 min left in window
 CUT_LOSS_THRESHOLD = -0.70
 TAKE_PROFIT_THRESHOLD = 0.30  # sell at +30% gain
@@ -243,11 +243,16 @@ def find_cheapest(markets):
         no_ask = sf(market.get('no_ask_dollars', '999'))
 
         if SIDE_STRATEGY == 'yes':
-            # Only buy YES when it's the cheap side (under 50c)
-            if BUY_MIN <= yes_ask <= BUY_MAX and yes_ask < no_ask:
+            if BUY_MIN <= yes_ask <= BUY_MAX:
                 candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
         elif SIDE_STRATEGY == 'no':
-            if BUY_MIN <= no_ask <= BUY_MAX and no_ask < yes_ask:
+            if BUY_MIN <= no_ask <= BUY_MAX:
+                candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'mins_left': mins_left})
+        elif SIDE_STRATEGY == 'expensive':
+            # Buy the EXPENSIVE side — the one the market thinks will win
+            if yes_ask >= no_ask and BUY_MIN <= yes_ask <= BUY_MAX:
+                candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
+            elif BUY_MIN <= no_ask <= BUY_MAX:
                 candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'mins_left': mins_left})
         elif SIDE_STRATEGY == 'cheapest':
             if BUY_MIN <= yes_ask <= BUY_MAX:
