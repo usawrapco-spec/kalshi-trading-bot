@@ -26,7 +26,7 @@ BUY_MIN = 0.01
 BUY_MAX = 0.99
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_BUY = 10          # only buy when 10-15 min left (first 5 min of window)
+MIN_MINS_TO_BUY = 0           # buy throughout entire window
 CYCLE_SECONDS = 2
 CONTRACTS = 1
 MAX_POSITIONS = 20
@@ -35,7 +35,7 @@ ROUND_BUDGET_PCT = 0.25       # spend max 25% of STARTING_BALANCE per round (har
 SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'cheapest')  # 'yes', 'no', or 'cheapest'
 CUT_WHEN_MINS_LEFT = 5        # start cutting when 5 min left in window
 CUT_LOSS_THRESHOLD = -0.70
-TAKE_PROFIT_THRESHOLD = 1.00  # sell at +100% gain
+TAKE_PROFIT_THRESHOLD = 0.30  # sell at +30% gain
 STARTING_BALANCE = 20.00      # paper mode starting balance
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M']  # dropped DOGE (19% win rate, -$9.59)
@@ -314,7 +314,21 @@ def check_sells():
             if current_bid <= 0:
                 continue
 
-            # === NO TAKE PROFIT, NO CUT — ride everything to settlement ===
+            # === TAKE PROFIT at +30% ===
+            gain = (current_bid - entry) / entry if entry > 0 else 0
+            if gain >= TAKE_PROFIT_THRESHOLD:
+                buy_fee = kalshi_fee(entry, count)
+                sell_fee = kalshi_fee(current_bid, count)
+                pnl = round((current_bid - entry) * count - buy_fee - sell_fee, 4)
+                if pnl > 0:
+                    logger.info(f"RAZOR TAKE PROFIT: {ticker} {side} x{count} @ ${current_bid:.2f} gain={gain*100:.0f}% pnl=${pnl:.4f}")
+                    result = place_order(ticker, side, 'sell', current_bid, count)
+                    if result:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE scraper_trades SET pnl=%s, fees=%s, status='closed', closed_at=NOW(), close_reason='take_profit', current_bid=%s WHERE id=%s",
+                                (float(pnl), float(buy_fee + sell_fee), float(current_bid), trade_id)
+                            )
     finally:
         conn.close()
 
