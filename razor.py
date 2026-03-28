@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.45
+BUY_MAX = 0.20
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 10          # only buy when 10-15 min left (first 5 min of window)
@@ -32,13 +32,13 @@ CONTRACTS = 3
 MAX_POSITIONS = 15
 MAX_BUYS_PER_WINDOW = 3       # max NEW positions per 15-min round
 ROUND_BUDGET_PCT = 0.25       # spend max 25% of pre-window cash per round
-SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'yes')  # 'yes', 'no', or 'cheapest'
+SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'cheapest')  # 'yes', 'no', or 'cheapest'
 CUT_WHEN_MINS_LEFT = 5        # start cutting when 5 min left in window
 CUT_LOSS_THRESHOLD = -0.70
 TAKE_PROFIT_THRESHOLD = 1.00  # sell at +100% gain
 STARTING_BALANCE = 50.00      # paper mode starting balance
 
-CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
+CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M']  # dropped DOGE (19% win rate, -$9.59)
 
 # === INIT ===
 auth = KalshiAuth()
