@@ -23,17 +23,17 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.99
+BUY_MAX = 0.20
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_BUY = 0           # buy entire window
+MIN_MINS_TO_BUY = 10          # only buy in first 5 min (>=10 min left)
 CYCLE_SECONDS = 2
 CONTRACTS = 1
 MAX_POSITIONS = 5
 MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
 SIDE_STRATEGY = 'cheapest'    # buy cheapest side, no filters
-TAKE_PROFIT_THRESHOLD = 0.30  # take profit at +30%
+TAKE_PROFIT_THRESHOLD = 999   # disabled — ride everything to settlement
 STARTING_BALANCE = 5.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
@@ -360,11 +360,6 @@ def buy_cheapest(markets):
         logger.info(f"RAZOR Max buys this window ({MAX_BUYS_PER_WINDOW}) reached")
         return
 
-    # Never have more in positions than 50% of cash balance
-    cash = _round['start_balance']
-    total_in_positions = sum(sf(t['price']) * (t.get('count') or 1) for t in open_positions)
-    max_invested = cash * 0.50
-
     candidates = find_cheapest(markets)
 
     if not candidates:
@@ -373,20 +368,11 @@ def buy_cheapest(markets):
 
     best = candidates[0]
     buy_cost = best['price'] * CONTRACTS
-    is_cheap = best['price'] < 0.20
-    in_first_5 = best.get('mins_left', 0) >= 10  # 15min window, >=10 left = first 5 min
 
-    # Cheap contracts (<$0.20) in first 5 min bypass position limits and budget caps
-    if not (is_cheap and in_first_5):
-        if len(open_positions) >= MAX_POSITIONS:
-            logger.info(f"RAZOR Max positions ({MAX_POSITIONS}) reached")
-            return
-        if total_in_positions >= max_invested:
-            logger.info(f"RAZOR 50% cash cap: ${total_in_positions:.2f} invested >= ${max_invested:.2f} (50% of ${cash:.2f})")
-            return
-        if _round['spent'] + buy_cost > max_spend:
-            logger.info(f"RAZOR Round budget: ${_round['spent'] + buy_cost:.2f} would exceed ${max_spend:.2f}")
-            return
+    # Check if this buy would exceed round budget
+    if _round['spent'] + buy_cost > max_spend:
+        logger.info(f"RAZOR Round budget: ${_round['spent'] + buy_cost:.2f} would exceed ${max_spend:.2f}")
+        return
 
     logger.info(f"RAZOR BEST: {best['ticker']} {best['side']} @ ${best['price']:.2f} ({best['mins_left']:.1f}min left) [strategy={SIDE_STRATEGY}]")
 
