@@ -32,7 +32,7 @@ CONTRACTS = 3
 MAX_POSITIONS = 999
 MAX_BUYS_PER_WINDOW = 999     # unlimited buys
 ROUND_BUDGET_PCT = 0.50       # 50% cash reserve (only deploy half)
-SIDE_STRATEGY = 'cheapest'    # buy cheapest side
+SIDE_STRATEGY = 'yes'         # always buy YES side
 TAKE_PROFIT_THRESHOLD = 0.30  # take profit at +30%
 STARTING_BALANCE = 50.00
 
