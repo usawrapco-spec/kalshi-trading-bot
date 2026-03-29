@@ -572,15 +572,13 @@ def run_cycle():
         cash = fetch_balance()
         _round['start_balance'] = cash
         _round['window_id'] = current_window
-        max_invest = cash * ROUND_BUDGET_PCT
-        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max positions=${max_invest:.2f} (25% of ${cash:.2f}), side={SIDE_STRATEGY}")
+        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max ${MAX_TOTAL_BET:.0f} in positions, side={SIDE_STRATEGY}")
         sync_positions()
 
     open_pos = get_open_positions()
     total_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_pos)
     total_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_pos)
-    max_invest = _round['start_balance'] * ROUND_BUDGET_PCT
-    logger.info(f"=== RAZOR [{mode}] === {len(open_pos)} pos | cost=${total_cost:.2f}/${max_invest:.2f} | value=${total_value:.2f}")
+    logger.info(f"=== RAZOR [{mode}] === {len(open_pos)} pos | cost=${total_cost:.2f}/${MAX_TOTAL_BET:.2f} | value=${total_value:.2f}")
     check_sells()
     markets = fetch_all_markets()
     for m in markets:
@@ -1185,7 +1183,7 @@ PORT = int(os.environ.get('PORT', 8080))
 def razor_loop():
     init_razor_db()
     mode = "LIVE" if ENABLE_TRADING else "PAPER"
-    logger.info(f"RAZOR starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, side={SIDE_STRATEGY}, {ROUND_BUDGET_PCT*100:.0f}% budget, {MAX_BUYS_PER_WINDOW} buys/window")
+    logger.info(f"RAZOR starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, side={SIDE_STRATEGY}, max ${MAX_TOTAL_BET:.0f} in positions, {MAX_BUYS_PER_WINDOW} buys/window")
     logger.info(f"RAZOR Series: {CRYPTO_SERIES}")
     sync_positions()
 
