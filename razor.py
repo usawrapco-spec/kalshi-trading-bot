@@ -379,34 +379,37 @@ def buy_cheapest(markets):
         logger.info("RAZOR No buy candidates")
         return
 
-    best = candidates[0]
-    buy_cost = best['price'] * CONTRACTS
+    bought = 0
+    for candidate in candidates[:10]:
+        buy_cost = candidate['price'] * CONTRACTS
 
-    if total_in_positions + buy_cost > max_invested:
-        logger.info(f"RAZOR Position cap: ${total_in_positions + buy_cost:.2f} would exceed ${max_invested:.2f} (25% of ${cash:.2f})")
-        return
+        if total_in_positions + buy_cost > max_invested:
+            logger.info(f"RAZOR Position cap: ${total_in_positions + buy_cost:.2f} would exceed ${max_invested:.2f}")
+            break
 
-    logger.info(f"RAZOR BEST: {best['ticker']} {best['side']} @ ${best['price']:.2f} ({best['mins_left']:.1f}min left) [strategy={SIDE_STRATEGY}]")
+        result = place_order(candidate['ticker'], candidate['side'], 'buy', candidate['price'], CONTRACTS)
+        if not result:
+            continue
 
-    result = place_order(best['ticker'], best['side'], 'buy', best['price'], CONTRACTS)
-    if not result:
-        return
+        order_id, filled, fill_price = result
+        if filled <= 0:
+            continue
 
-    order_id, filled, fill_price = result
-    if filled <= 0:
-        return
+        buy_fee = kalshi_fee(fill_price, filled)
+        conn = get_db()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO scraper_trades (ticker, side, price, count, current_bid, fees, order_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    (candidate['ticker'], candidate['side'], float(fill_price), filled, float(fill_price), float(buy_fee), order_id)
+                )
+            total_in_positions += fill_price * filled
+            bought += 1
+            logger.info(f"RAZOR BOUGHT: {candidate['ticker']} {candidate['side']} x{filled} @ ${fill_price:.2f} fee=${buy_fee:.4f} | positions=${total_in_positions:.2f}/${max_invested:.2f}")
+        finally:
+            conn.close()
 
-    buy_fee = kalshi_fee(fill_price, filled)
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO scraper_trades (ticker, side, price, count, current_bid, fees, order_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (best['ticker'], best['side'], float(fill_price), filled, float(fill_price), float(buy_fee), order_id)
-            )
-        logger.info(f"RAZOR BOUGHT: {best['ticker']} {best['side']} x{filled} @ ${fill_price:.2f} fee=${buy_fee:.4f} | positions=${total_in_positions + buy_cost:.2f}/${max_invested:.2f}")
-    finally:
-        conn.close()
+    logger.info(f"RAZOR Bought {bought} positions this cycle")
 
 
 # === MAIN CYCLE ===
