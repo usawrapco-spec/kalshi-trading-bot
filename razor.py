@@ -33,7 +33,7 @@ MAX_POSITIONS = 999
 MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
 SIDE_STRATEGY = 'yes'         # always buy YES side
-TAKE_PROFIT_THRESHOLD = 999   # disabled — ride everything to settlement
+TAKE_PROFIT_THRESHOLD = 1.00  # take profit at +100%
 STARTING_BALANCE = 30.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
@@ -329,7 +329,7 @@ def check_sells():
 
             # === TAKE PROFIT at +30% (skip for cheap contracts — ride to settlement) ===
             gain = (current_bid - entry) / entry if entry > 0 else 0
-            if gain >= TAKE_PROFIT_THRESHOLD and entry >= 0.20:
+            if gain >= TAKE_PROFIT_THRESHOLD:
                 buy_fee = kalshi_fee(entry, count)
                 sell_fee = kalshi_fee(current_bid, count)
                 pnl = round((current_bid - entry) * count - buy_fee - sell_fee, 4)
