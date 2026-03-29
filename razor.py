@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.20
+BUY_MAX = 0.30
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 10          # only buy in first 5 min (>=10 min left)
@@ -34,7 +34,7 @@ MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
 SIDE_STRATEGY = 'cheapest'    # buy cheapest side, no filters
 TAKE_PROFIT_THRESHOLD = 999   # disabled — ride everything to settlement
-STARTING_BALANCE = 5.00
+STARTING_BALANCE = 50.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
@@ -346,8 +346,9 @@ def buy_cheapest(markets):
     global _round
     open_positions = get_open_positions()
 
-    # Check round budget: 25% of total pool (STARTING_BALANCE)
-    max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
+    # Check round budget: 25% of cash at start of round
+    round_cash = _round['start_balance']
+    max_spend = round_cash * ROUND_BUDGET_PCT
     if max_spend <= 0:
         logger.info("RAZOR Waiting for round balance snapshot")
         return
@@ -536,14 +537,14 @@ def run_cycle():
         _round['spent'] = 0
         _round['buys'] = 0
         _round['window_id'] = current_window
-        max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
-        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max spend=${max_spend:.2f} (25% of ${STARTING_BALANCE:.0f} pool), side={SIDE_STRATEGY}")
+        max_spend = cash * ROUND_BUDGET_PCT
+        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max spend=${max_spend:.2f} (25% of ${cash:.2f}), side={SIDE_STRATEGY}")
         sync_positions()
 
     open_pos = get_open_positions()
     total_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_pos)
     total_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_pos)
-    max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
+    max_spend = _round['start_balance'] * ROUND_BUDGET_PCT
     logger.info(f"=== RAZOR [{mode}] === {len(open_pos)} pos | cost=${total_cost:.2f} | value=${total_value:.2f} | round: ${_round['spent']:.2f}/${max_spend:.2f} buys={_round['buys']}/{MAX_BUYS_PER_WINDOW}")
     check_sells()
     markets = fetch_all_markets()
