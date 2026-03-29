@@ -23,10 +23,10 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.20
+BUY_MAX = 0.99
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_BUY = 10          # only buy first 5 min (>=10 min left)
+MIN_MINS_TO_BUY = 0           # buy entire window
 CYCLE_SECONDS = 10
 CONTRACTS = 1
 MAX_POSITIONS = 100
@@ -34,7 +34,7 @@ MAX_BUYS_PER_WINDOW = 999     # unlimited buys
 MAX_TOTAL_BET = 10.00         # max $10 in positions at any time, never reinvest
 SIDE_STRATEGY = 'momentum'    # buy based on price direction
 TAKE_PROFIT_THRESHOLD = 0.50  # take profit at +50%
-STARTING_BALANCE = 50.00
+STARTING_BALANCE = 100.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
