@@ -892,7 +892,7 @@ tr:hover{background:#1a1a1a}
 
 <div class="header">
   <span class="live-dot" id="mode-dot"></span>
-  <span id="mode-label">RAZOR</span> &mdash; buy $0.01-$0.99, 100% settle, 25% budget cap
+  <span id="mode-label">RAZOR</span> &mdash; buy $0.01-$0.30, first 5 min, ride to settlement, 25% budget cap
   &mdash; <span id="last-update">--</span>
 </div>
 
@@ -907,7 +907,7 @@ tr:hover{background:#1a1a1a}
       <div class="phase-time" id="hold-time">--:--</div>
     </div>
     <div class="phase phase-settle" id="phase-settle">
-      <div class="phase-label">CUT CHECK</div>
+      <div class="phase-label">SETTLING</div>
       <div class="phase-time" id="settle-time">--:--</div>
     </div>
   </div>
@@ -1130,9 +1130,9 @@ function updateRoundTimer(){
   if(secsIntoWindow<buyEnd){
     $('round-status').innerHTML='<span class="green">BUYING</span> \u2014 '+fmt(buyLeft)+' left';
   }else if(secsIntoWindow<holdEnd){
-    $('round-status').innerHTML='<span class="orange">HOLDING</span> \u2014 '+fmt(holdLeft)+' to cut check';
+    $('round-status').innerHTML='<span class="orange">HOLDING</span> \u2014 '+fmt(holdLeft)+' to settle';
   }else{
-    $('round-status').innerHTML='<span class="red">CUT CHECK</span> \u2014 '+fmt(settleLeft)+' to settle';
+    $('round-status').innerHTML='<span class="orange">SETTLING</span> \u2014 '+fmt(settleLeft)+' to settle';
   }
 }
 updateRoundTimer();
