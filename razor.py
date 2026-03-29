@@ -29,7 +29,7 @@ MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 1           # stop buying with less than 1 min left
 CYCLE_SECONDS = 10
 CONTRACTS = 1
-MAX_POSITIONS = 999
+MAX_POSITIONS = 100
 MAX_BUYS_PER_WINDOW = 999     # unlimited buys
 ROUND_BUDGET_PCT = 0.50       # 50% cash reserve (only deploy half)
 SIDE_STRATEGY = 'both'        # buy both YES and NO on every market
@@ -367,6 +367,10 @@ def buy_cheapest(markets):
     max_invested = cash * ROUND_BUDGET_PCT
     if max_invested <= 0:
         logger.info("RAZOR Waiting for round balance snapshot")
+        return
+
+    if len(open_positions) >= MAX_POSITIONS:
+        logger.info(f"RAZOR Max positions ({MAX_POSITIONS}) reached")
         return
 
     # Don't buy same ticker+side+price twice
