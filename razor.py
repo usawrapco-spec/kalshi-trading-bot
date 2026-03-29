@@ -23,16 +23,16 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.99
+BUY_MAX = 0.20
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_BUY = 1           # stop buying with less than 1 min left
+MIN_MINS_TO_BUY = 10          # only buy first 5 min (>=10 min left)
 CYCLE_SECONDS = 10
 CONTRACTS = 1
 MAX_POSITIONS = 100
 MAX_BUYS_PER_WINDOW = 999     # unlimited buys
 MAX_TOTAL_BET = 10.00         # max $10 in positions at any time, never reinvest
-SIDE_STRATEGY = 'cheapest'    # buy cheapest side
+SIDE_STRATEGY = 'momentum'    # buy based on price direction
 TAKE_PROFIT_THRESHOLD = 0.50  # take profit at +50%
 STARTING_BALANCE = 50.00
 
@@ -59,6 +59,9 @@ _round = {
     'start_balance': 0,
     'window_id': -1,
 }
+
+# Momentum tracking — last known YES price per ticker
+_last_prices = {}
 
 
 def sf(val):
@@ -244,7 +247,20 @@ def find_cheapest(markets):
         yes_ask = sf(market.get('yes_ask_dollars', '999'))
         no_ask = sf(market.get('no_ask_dollars', '999'))
 
-        if SIDE_STRATEGY == 'yes':
+        if SIDE_STRATEGY == 'momentum':
+            # Buy based on price direction — YES if price going up, NO if going down
+            last_yes = _last_prices.get(ticker, 0)
+            _last_prices[ticker] = yes_ask
+            if last_yes > 0:
+                if yes_ask > last_yes and BUY_MIN <= yes_ask <= BUY_MAX:
+                    # Price going UP — buy YES
+                    candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
+                    logger.info(f"  MOMENTUM UP: {ticker} {last_yes:.2f} -> {yes_ask:.2f}, buying YES")
+                elif yes_ask < last_yes and BUY_MIN <= no_ask <= BUY_MAX:
+                    # Price going DOWN — buy NO
+                    candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'mins_left': mins_left})
+                    logger.info(f"  MOMENTUM DOWN: {ticker} {last_yes:.2f} -> {yes_ask:.2f}, buying NO")
+        elif SIDE_STRATEGY == 'yes':
             if BUY_MIN <= yes_ask <= BUY_MAX:
                 candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
         elif SIDE_STRATEGY == 'no':
