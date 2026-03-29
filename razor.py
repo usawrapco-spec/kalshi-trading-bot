@@ -28,7 +28,7 @@ TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 10          # only buy in first 5 min (>=10 min left)
 CYCLE_SECONDS = 2
-CONTRACTS = 1
+CONTRACTS = 2
 MAX_POSITIONS = 5
 MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
