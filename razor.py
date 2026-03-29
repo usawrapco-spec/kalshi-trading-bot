@@ -26,7 +26,7 @@ BUY_MIN = 0.01
 BUY_MAX = 0.30
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_BUY = 10          # only buy in first 5 min (>=10 min left)
+MIN_MINS_TO_BUY = 0           # buy entire window
 CYCLE_SECONDS = 2
 CONTRACTS = 2
 MAX_POSITIONS = 999
