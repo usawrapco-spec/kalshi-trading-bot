@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.20
+BUY_MAX = 0.99
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 5           # stop buying with less than 5 min left
@@ -32,7 +32,7 @@ CONTRACTS = 1
 MAX_POSITIONS = 999
 MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
-SIDE_STRATEGY = 'cheapest'    # buy cheapest side
+SIDE_STRATEGY = 'expensive'   # buy the side market thinks will win
 TAKE_PROFIT_THRESHOLD = 1.00  # take profit at +100%
 STARTING_BALANCE = 20.00
 
