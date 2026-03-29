@@ -29,16 +29,14 @@ MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 0           # buy entire window
 CYCLE_SECONDS = 2
 CONTRACTS = 1
-MAX_POSITIONS = 40
+MAX_POSITIONS = 20
 MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
 SIDE_STRATEGY = 'cheapest'    # buy cheapest side, no filters
-CUT_WHEN_MINS_LEFT = 5
-CUT_LOSS_THRESHOLD = -0.70
 TAKE_PROFIT_THRESHOLD = 0.30  # take profit at +30%
 STARTING_BALANCE = 20.00
 
-CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M']  # dropped DOGE (19% win rate, -$9.59)
+CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
 # === INIT ===
 auth = KalshiAuth()
@@ -265,7 +263,7 @@ def find_cheapest(markets):
 
 
 def check_sells():
-    """Update bids from Kalshi, handle settlements, cut 70%+ losers at 5min."""
+    """Update bids from Kalshi, handle settlements, take profit on expensive contracts."""
     open_positions = get_open_positions()
     if not open_positions:
         return
@@ -325,9 +323,9 @@ def check_sells():
             if current_bid <= 0:
                 continue
 
-            # === TAKE PROFIT at +30% ===
+            # === TAKE PROFIT at +30% (skip for cheap contracts — ride to settlement) ===
             gain = (current_bid - entry) / entry if entry > 0 else 0
-            if gain >= TAKE_PROFIT_THRESHOLD:
+            if gain >= TAKE_PROFIT_THRESHOLD and entry >= 0.20:
                 buy_fee = kalshi_fee(entry, count)
                 sell_fee = kalshi_fee(current_bid, count)
                 pnl = round((current_bid - entry) * count - buy_fee - sell_fee, 4)
@@ -362,17 +360,10 @@ def buy_cheapest(markets):
         logger.info(f"RAZOR Max buys this window ({MAX_BUYS_PER_WINDOW}) reached")
         return
 
-    if len(open_positions) >= MAX_POSITIONS:
-        logger.info(f"RAZOR Max positions ({MAX_POSITIONS}) reached")
-        return
-
     # Never have more in positions than 50% of cash balance
     cash = _round['start_balance']
     total_in_positions = sum(sf(t['price']) * (t.get('count') or 1) for t in open_positions)
     max_invested = cash * 0.50
-    if total_in_positions >= max_invested:
-        logger.info(f"RAZOR 50% cash cap: ${total_in_positions:.2f} invested >= ${max_invested:.2f} (50% of ${cash:.2f})")
-        return
 
     candidates = find_cheapest(markets)
 
@@ -382,11 +373,20 @@ def buy_cheapest(markets):
 
     best = candidates[0]
     buy_cost = best['price'] * CONTRACTS
+    is_cheap = best['price'] < 0.20
+    in_first_5 = best.get('mins_left', 0) >= 10  # 15min window, >=10 left = first 5 min
 
-    # Check if this buy would exceed round budget
-    if _round['spent'] + buy_cost > max_spend:
-        logger.info(f"RAZOR Round budget: ${_round['spent'] + buy_cost:.2f} would exceed ${max_spend:.2f}")
-        return
+    # Cheap contracts (<$0.20) in first 5 min bypass position limits and budget caps
+    if not (is_cheap and in_first_5):
+        if len(open_positions) >= MAX_POSITIONS:
+            logger.info(f"RAZOR Max positions ({MAX_POSITIONS}) reached")
+            return
+        if total_in_positions >= max_invested:
+            logger.info(f"RAZOR 50% cash cap: ${total_in_positions:.2f} invested >= ${max_invested:.2f} (50% of ${cash:.2f})")
+            return
+        if _round['spent'] + buy_cost > max_spend:
+            logger.info(f"RAZOR Round budget: ${_round['spent'] + buy_cost:.2f} would exceed ${max_spend:.2f}")
+            return
 
     logger.info(f"RAZOR BEST: {best['ticker']} {best['side']} @ ${best['price']:.2f} ({best['mins_left']:.1f}min left) [strategy={SIDE_STRATEGY}]")
 
@@ -696,7 +696,7 @@ def api_positions():
                 'gain_pct': round(gain_pct, 1),
                 'mins_held': round(mins_held, 1),
                 'window_mins_left': round(wml, 1),
-                'cut_eligible': wml <= CUT_WHEN_MINS_LEFT,
+                'cut_eligible': False,
             })
 
         results.sort(key=lambda x: x['gain_pct'], reverse=True)
@@ -723,7 +723,7 @@ def api_closed():
             pnl = sf(t.get('pnl', 0))
             fees = sf(t.get('fees', 0))
             cost = entry * count
-            gain_pct = (pnl / cost * 100) if cost > 0 else 0
+            gain_pct = max((pnl / cost * 100), -100) if cost > 0 else 0
             results.append({
                 'ticker': t['ticker'],
                 'side': t['side'],
