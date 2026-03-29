@@ -51,7 +51,8 @@ _cache = {
 }
 
 # Last known good balance — fallback when API fails
-_last_known_balance = 0
+_last_known_balance = STARTING_BALANCE
+_balance_verified = False
 
 # Round-start balance tracking — snapshot once per 15-min window
 _round = {
@@ -111,6 +112,11 @@ def init_razor_db():
             # Add fees column if missing
             try:
                 cur.execute("ALTER TABLE scraper_trades ADD COLUMN fees NUMERIC DEFAULT 0")
+            except:
+                pass
+            # Add order_id column if missing
+            try:
+                cur.execute("ALTER TABLE scraper_trades ADD COLUMN order_id TEXT")
             except:
                 pass
     finally:
@@ -346,6 +352,11 @@ def buy_cheapest(markets):
     global _round
     open_positions = get_open_positions()
 
+    # Don't buy in live mode until we've confirmed balance with Kalshi
+    if ENABLE_TRADING and not _balance_verified:
+        logger.warning("RAZOR Waiting for first successful balance fetch before buying")
+        return
+
     # Check round budget: 25% of cash at start of round
     round_cash = _round['start_balance']
     max_spend = round_cash * ROUND_BUDGET_PCT
@@ -359,6 +370,11 @@ def buy_cheapest(markets):
     # Check per-window buy cap
     if _round['buys'] >= MAX_BUYS_PER_WINDOW:
         logger.info(f"RAZOR Max buys this window ({MAX_BUYS_PER_WINDOW}) reached")
+        return
+
+    # Max open positions
+    if len(open_positions) >= MAX_POSITIONS:
+        logger.info(f"RAZOR Max positions ({MAX_POSITIONS}) reached")
         return
 
     candidates = find_cheapest(markets)
@@ -390,8 +406,8 @@ def buy_cheapest(markets):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO scraper_trades (ticker, side, price, count, current_bid, fees) VALUES (%s, %s, %s, %s, %s, %s)",
-                (best['ticker'], best['side'], float(fill_price), filled, float(fill_price), float(buy_fee))
+                "INSERT INTO scraper_trades (ticker, side, price, count, current_bid, fees, order_id) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (best['ticker'], best['side'], float(fill_price), filled, float(fill_price), float(buy_fee), order_id)
             )
         _round['spent'] += fill_price * filled
         _round['buys'] += 1
@@ -454,13 +470,14 @@ def get_paper_balance():
 
 def fetch_balance():
     """Get current cash balance — live from API or calculated for paper."""
-    global _last_known_balance
+    global _last_known_balance, _balance_verified
     if ENABLE_TRADING:
         for attempt in range(3):
             try:
                 resp = kalshi_get('/portfolio/balance')
                 cash = resp.get('balance', 0) / 100.0
                 _last_known_balance = cash
+                _balance_verified = True
                 return cash
             except Exception as e:
                 logger.warning(f"RAZOR Balance fetch attempt {attempt+1}/3 failed: {e}")
@@ -476,7 +493,7 @@ def fetch_balance():
 
 
 def sync_positions():
-    """Reconcile Kalshi API positions with local DB."""
+    """Reconcile Kalshi API positions with local DB — both directions."""
     if not ENABLE_TRADING:
         return
     try:
@@ -493,23 +510,34 @@ def sync_positions():
             if not cursor or not batch:
                 break
 
+        # Build Kalshi position map: (ticker, side) -> count
+        kalshi_positions = {}
+        for pos in all_pos:
+            ticker = pos.get('ticker', '')
+            position_fp = sf(pos.get('position_fp', '0'))
+            if position_fp == 0 or '15M' not in ticker:
+                continue
+            side = 'yes' if position_fp > 0 else 'no'
+            kalshi_positions[(ticker, side)] = {
+                'count': int(abs(position_fp)),
+                'cost': abs(sf(pos.get('total_traded_dollars', '0'))),
+            }
+
         conn = get_db()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT ticker FROM scraper_trades WHERE status = 'open'")
-                db_tickers = {row['ticker'] for row in cur.fetchall()}
+                cur.execute("SELECT id, ticker, side, count FROM scraper_trades WHERE status = 'open'")
+                db_rows = cur.fetchall()
+            db_positions = {}
+            for row in db_rows:
+                key = (row['ticker'], row['side'])
+                db_positions[key] = row
 
             # Import orphan Kalshi positions not in our DB
-            for pos in all_pos:
-                ticker = pos.get('ticker', '')
-                position_fp = sf(pos.get('position_fp', '0'))
-                if position_fp == 0 or '15M' not in ticker:
-                    continue
-                if ticker not in db_tickers:
-                    side = 'yes' if position_fp > 0 else 'no'
-                    count = int(abs(position_fp))
-                    cost = abs(sf(pos.get('total_traded_dollars', '0')))
-                    entry_per = cost / count if count > 0 else 0
+            for (ticker, side), kpos in kalshi_positions.items():
+                if (ticker, side) not in db_positions:
+                    count = kpos['count']
+                    entry_per = kpos['cost'] / count if count > 0 else 0
                     if entry_per > 0:
                         with conn.cursor() as cur2:
                             cur2.execute(
@@ -517,6 +545,16 @@ def sync_positions():
                                 (ticker, side, float(entry_per), count, float(entry_per))
                             )
                         logger.info(f"RAZOR SYNC: Imported orphan {ticker} {side} x{count} @ ${entry_per:.2f}")
+
+            # Reverse check: DB positions that Kalshi no longer has
+            for (ticker, side), db_row in db_positions.items():
+                if (ticker, side) not in kalshi_positions:
+                    logger.warning(f"RAZOR SYNC MISMATCH: DB has {ticker} {side} but Kalshi does not — marking closed")
+                    with conn.cursor() as cur2:
+                        cur2.execute(
+                            "UPDATE scraper_trades SET status='closed', closed_at=NOW(), close_reason='sync_mismatch' WHERE id=%s",
+                            (db_row['id'],)
+                        )
         finally:
             conn.close()
     except Exception as e:
