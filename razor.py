@@ -33,7 +33,7 @@ MAX_POSITIONS = 999
 MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
 SIDE_STRATEGY = 'cheapest'    # buy cheapest side, no filters
-TAKE_PROFIT_THRESHOLD = 1.50  # take profit at +150%
+TAKE_PROFIT_THRESHOLD = 999   # disabled — ride everything to settlement
 STARTING_BALANCE = 50.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
