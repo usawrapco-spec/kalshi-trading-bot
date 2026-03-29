@@ -239,6 +239,7 @@ def find_cheapest(markets):
 
         yes_ask = sf(market.get('yes_ask_dollars', '999'))
         no_ask = sf(market.get('no_ask_dollars', '999'))
+        logger.info(f"  SCAN: {ticker} yes=${yes_ask:.2f} no=${no_ask:.2f} mins_left={mins_left:.1f}")
 
         if SIDE_STRATEGY == 'yes':
             if BUY_MIN <= yes_ask <= BUY_MAX:
