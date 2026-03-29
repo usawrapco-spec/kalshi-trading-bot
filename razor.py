@@ -22,18 +22,18 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://kalshi:kalshi@localh
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '1', 'yes')
 
 # === STRATEGY ===
-BUY_MIN = 0.01
-BUY_MAX = 0.20
+BUY_MIN = 0.03
+BUY_MAX = 0.12
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_BUY = 5           # stop buying with less than 5 min left
-CYCLE_SECONDS = 2
-CONTRACTS = 1
+MIN_MINS_TO_BUY = 1           # stop buying with less than 1 min left
+CYCLE_SECONDS = 10
+CONTRACTS = 3
 MAX_POSITIONS = 999
-MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
-ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
+MAX_BUYS_PER_WINDOW = 999     # unlimited buys
+ROUND_BUDGET_PCT = 0.50       # 50% cash reserve (only deploy half)
 SIDE_STRATEGY = 'cheapest'    # buy cheapest side
-TAKE_PROFIT_THRESHOLD = 999   # disabled — ride everything to settlement
+TAKE_PROFIT_THRESHOLD = 0.30  # take profit at +30%
 STARTING_BALANCE = 50.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
