@@ -607,12 +607,16 @@ def api_status():
         except:
             pass
 
+        open_cost = sum(sf(t.get('price', 0)) * (t.get('count') or 1) for t in open_positions)
+        positions_pct = round((open_cost / portfolio) * 100, 1) if portfolio > 0 else 0
+
         mode = "LIVE" if ENABLE_TRADING else "PAPER"
         return jsonify({
             'cash': round(cash, 2),
             'positions_value': round(positions_value, 2),
             'portfolio': round(portfolio, 2),
             'open_count': len(open_positions),
+            'positions_pct': positions_pct,
             'realized_pnl': bot_pnl,
             'total_fees': round(total_fees, 4),
             'wins': wins,
@@ -927,6 +931,7 @@ tr:hover{background:#1a1a1a}
   <div class="stat-card">
     <div class="label">Open Positions</div>
     <div class="value orange" id="open-count">0</div>
+    <div class="label" style="font-size:11px;margin-top:4px" id="positions-pct">0% invested</div>
   </div>
   <div class="stat-card">
     <div class="label">Record</div>
@@ -999,6 +1004,7 @@ async function refresh(){
       $('positions-value').textContent='$'+(status.positions_value||0).toFixed(2);
 
       $('open-count').textContent=status.open_count||0;
+      $('positions-pct').textContent=(status.positions_pct||0).toFixed(1)+'% invested';
       $('wins').textContent=status.wins||0;
       $('losses').textContent=status.losses||0;
       var rp=status.realized_pnl||0;
