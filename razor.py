@@ -33,7 +33,7 @@ MAX_POSITIONS = 999
 MAX_BUYS_PER_WINDOW = 999     # unlimited buys
 ROUND_BUDGET_PCT = 0.50       # 50% cash reserve (only deploy half)
 SIDE_STRATEGY = 'both'        # buy both YES and NO on every market
-TAKE_PROFIT_THRESHOLD = 999   # disabled — ride everything to settlement
+TAKE_PROFIT_THRESHOLD = 0.30  # take profit at +30%
 STARTING_BALANCE = 50.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
