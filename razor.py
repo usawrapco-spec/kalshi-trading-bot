@@ -29,11 +29,11 @@ MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 10          # only buy in first 5 min (>=10 min left)
 CYCLE_SECONDS = 2
 CONTRACTS = 2
-MAX_POSITIONS = 5
+MAX_POSITIONS = 999
 MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
 SIDE_STRATEGY = 'cheapest'    # buy cheapest side, no filters
-TAKE_PROFIT_THRESHOLD = 999   # disabled — ride everything to settlement
+TAKE_PROFIT_THRESHOLD = 1.50  # take profit at +150%
 STARTING_BALANCE = 20.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
