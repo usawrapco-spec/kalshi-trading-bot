@@ -32,7 +32,7 @@ CONTRACTS = 2
 MAX_POSITIONS = 999
 MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
-SIDE_STRATEGY = 'yes'         # always buy YES side
+SIDE_STRATEGY = 'cheapest'    # buy cheapest side
 TAKE_PROFIT_THRESHOLD = 1.00  # take profit at +100%
 STARTING_BALANCE = 30.00
 
