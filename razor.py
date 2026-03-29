@@ -366,6 +366,14 @@ def buy_cheapest(markets):
         logger.info(f"RAZOR Max positions ({MAX_POSITIONS}) reached")
         return
 
+    # Never have more in positions than 50% of cash balance
+    cash = _round['start_balance']
+    total_in_positions = sum(sf(t['price']) * (t.get('count') or 1) for t in open_positions)
+    max_invested = cash * 0.50
+    if total_in_positions >= max_invested:
+        logger.info(f"RAZOR 50% cash cap: ${total_in_positions:.2f} invested >= ${max_invested:.2f} (50% of ${cash:.2f})")
+        return
+
     candidates = find_cheapest(markets)
 
     if not candidates:
