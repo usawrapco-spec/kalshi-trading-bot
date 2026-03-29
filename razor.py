@@ -23,16 +23,16 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.12
+BUY_MAX = 0.99
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 1           # stop buying with less than 1 min left
 CYCLE_SECONDS = 10
-CONTRACTS = 3
+CONTRACTS = 1
 MAX_POSITIONS = 999
 MAX_BUYS_PER_WINDOW = 999     # unlimited buys
 ROUND_BUDGET_PCT = 0.50       # 50% cash reserve (only deploy half)
-SIDE_STRATEGY = 'yes'         # always buy YES side
+SIDE_STRATEGY = 'both'        # buy both YES and NO on every market
 TAKE_PROFIT_THRESHOLD = 0.30  # take profit at +30%
 STARTING_BALANCE = 50.00
 
@@ -255,6 +255,12 @@ def find_cheapest(markets):
             if yes_ask >= no_ask and BUY_MIN <= yes_ask <= BUY_MAX:
                 candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
             elif BUY_MIN <= no_ask <= BUY_MAX:
+                candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'mins_left': mins_left})
+        elif SIDE_STRATEGY == 'both':
+            # Buy BOTH sides of every market
+            if BUY_MIN <= yes_ask <= BUY_MAX:
+                candidates.append({'ticker': ticker, 'side': 'yes', 'price': yes_ask, 'mins_left': mins_left})
+            if BUY_MIN <= no_ask <= BUY_MAX:
                 candidates.append({'ticker': ticker, 'side': 'no', 'price': no_ask, 'mins_left': mins_left})
         elif SIDE_STRATEGY == 'cheapest':
             if BUY_MIN <= yes_ask <= BUY_MAX:
