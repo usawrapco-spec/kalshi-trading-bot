@@ -357,24 +357,12 @@ def buy_cheapest(markets):
         logger.warning("RAZOR Waiting for first successful balance fetch before buying")
         return
 
-    # Check round budget: 25% of cash at start of round
-    round_cash = _round['start_balance']
-    max_spend = round_cash * ROUND_BUDGET_PCT
-    if max_spend <= 0:
+    # Total open position cost must not exceed 25% of cash
+    cash = _round['start_balance']
+    total_in_positions = sum(sf(t['price']) * (t.get('count') or 1) for t in open_positions)
+    max_invested = cash * ROUND_BUDGET_PCT
+    if max_invested <= 0:
         logger.info("RAZOR Waiting for round balance snapshot")
-        return
-    if _round['spent'] >= max_spend:
-        logger.info(f"RAZOR Round budget spent: ${_round['spent']:.2f} / ${max_spend:.2f}")
-        return
-
-    # Check per-window buy cap
-    if _round['buys'] >= MAX_BUYS_PER_WINDOW:
-        logger.info(f"RAZOR Max buys this window ({MAX_BUYS_PER_WINDOW}) reached")
-        return
-
-    # Max open positions
-    if len(open_positions) >= MAX_POSITIONS:
-        logger.info(f"RAZOR Max positions ({MAX_POSITIONS}) reached")
         return
 
     candidates = find_cheapest(markets)
@@ -386,9 +374,8 @@ def buy_cheapest(markets):
     best = candidates[0]
     buy_cost = best['price'] * CONTRACTS
 
-    # Check if this buy would exceed round budget
-    if _round['spent'] + buy_cost > max_spend:
-        logger.info(f"RAZOR Round budget: ${_round['spent'] + buy_cost:.2f} would exceed ${max_spend:.2f}")
+    if total_in_positions + buy_cost > max_invested:
+        logger.info(f"RAZOR Position cap: ${total_in_positions + buy_cost:.2f} would exceed ${max_invested:.2f} (25% of ${cash:.2f})")
         return
 
     logger.info(f"RAZOR BEST: {best['ticker']} {best['side']} @ ${best['price']:.2f} ({best['mins_left']:.1f}min left) [strategy={SIDE_STRATEGY}]")
