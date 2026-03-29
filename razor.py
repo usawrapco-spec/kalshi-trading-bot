@@ -363,11 +363,11 @@ def buy_cheapest(markets):
         logger.info("RAZOR Waiting for round balance snapshot")
         return
 
-    # Don't buy same ticker+side twice
-    held = {(t['ticker'], t['side']) for t in open_positions}
+    # Don't buy same ticker+side+price twice
+    held = {(t['ticker'], t['side'], float(sf(t['price']))) for t in open_positions}
 
     candidates = find_cheapest(markets)
-    candidates = [c for c in candidates if (c['ticker'], c['side']) not in held]
+    candidates = [c for c in candidates if (c['ticker'], c['side'], c['price']) not in held]
 
     if not candidates:
         logger.info("RAZOR No buy candidates")
