@@ -23,20 +23,20 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.35
+BUY_MAX = 0.99
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
-MIN_MINS_TO_BUY = 10          # buy when 10-15 min left (first 5 min of window)
+MIN_MINS_TO_BUY = 0           # buy entire window
 CYCLE_SECONDS = 2
-CONTRACTS = 5
-MAX_POSITIONS = 999           # budget controlled
-MAX_BUYS_PER_WINDOW = 5       # 5 unique tickers per round
-ROUND_BUDGET_PCT = 0.50       # spend max 50% of cash, keep 50% reserve
-SIDE_STRATEGY = os.environ.get('SIDE_STRATEGY', 'cheapest')  # 'cheapest' = buy lowest cost side
-CUT_WHEN_MINS_LEFT = 5        # start cutting when 5 min left in window
+CONTRACTS = 1
+MAX_POSITIONS = 999           # no cap
+MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
+ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
+SIDE_STRATEGY = 'cheapest'    # buy cheapest side, no filters
+CUT_WHEN_MINS_LEFT = 5
 CUT_LOSS_THRESHOLD = -0.70
-TAKE_PROFIT_THRESHOLD = 0.30  # sell at +30% gain
-STARTING_BALANCE = 20.00      # paper mode starting balance
+TAKE_PROFIT_THRESHOLD = 0.50  # take profit at +50%
+STARTING_BALANCE = 20.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M']  # dropped DOGE (19% win rate, -$9.59)
 
@@ -325,7 +325,21 @@ def check_sells():
             if current_bid <= 0:
                 continue
 
-            # === NO SELLING — ride everything to settlement ===
+            # === TAKE PROFIT at +50% ===
+            gain = (current_bid - entry) / entry if entry > 0 else 0
+            if gain >= TAKE_PROFIT_THRESHOLD:
+                buy_fee = kalshi_fee(entry, count)
+                sell_fee = kalshi_fee(current_bid, count)
+                pnl = round((current_bid - entry) * count - buy_fee - sell_fee, 4)
+                if pnl > 0:
+                    logger.info(f"RAZOR TAKE PROFIT: {ticker} {side} x{count} @ ${current_bid:.2f} gain={gain*100:.0f}% pnl=${pnl:.4f}")
+                    result = place_order(ticker, side, 'sell', current_bid, count)
+                    if result:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                "UPDATE scraper_trades SET pnl=%s, fees=%s, status='closed', closed_at=NOW(), close_reason='take_profit', current_bid=%s WHERE id=%s",
+                                (float(pnl), float(buy_fee + sell_fee), float(current_bid), trade_id)
+                            )
     finally:
         conn.close()
 
@@ -334,8 +348,8 @@ def buy_cheapest(markets):
     global _round
     open_positions = get_open_positions()
 
-    # Check round budget: 75% of round-start cash (keep 25% reserve)
-    max_spend = _round['start_balance'] * ROUND_BUDGET_PCT
+    # Check round budget: 25% of total pool (STARTING_BALANCE)
+    max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
     if max_spend <= 0:
         logger.info("RAZOR Waiting for round balance snapshot")
         return
@@ -531,14 +545,14 @@ def run_cycle():
         _round['spent'] = 0
         _round['buys'] = 0
         _round['window_id'] = current_window
-        max_spend = cash * ROUND_BUDGET_PCT
-        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max spend=${max_spend:.2f} (75%, 25% reserve), max buys={MAX_BUYS_PER_WINDOW}, side={SIDE_STRATEGY}")
+        max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
+        logger.info(f"RAZOR NEW ROUND [{mode}]: cash=${cash:.2f}, max spend=${max_spend:.2f} (25% of ${STARTING_BALANCE:.0f} pool), side={SIDE_STRATEGY}")
         sync_positions()
 
     open_pos = get_open_positions()
     total_cost = sum(sf(t['price']) * (t.get('count') or 1) for t in open_pos)
     total_value = sum(sf(t.get('current_bid', 0)) * (t.get('count') or 1) for t in open_pos)
-    max_spend = _round['start_balance'] * ROUND_BUDGET_PCT
+    max_spend = STARTING_BALANCE * ROUND_BUDGET_PCT
     logger.info(f"=== RAZOR [{mode}] === {len(open_pos)} pos | cost=${total_cost:.2f} | value=${total_value:.2f} | round: ${_round['spent']:.2f}/${max_spend:.2f} buys={_round['buys']}/{MAX_BUYS_PER_WINDOW}")
     check_sells()
     markets = fetch_all_markets()
