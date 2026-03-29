@@ -23,7 +23,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 
 # === STRATEGY ===
 BUY_MIN = 0.01
-BUY_MAX = 0.30
+BUY_MAX = 0.20
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 15
 MIN_MINS_TO_BUY = 0           # buy entire window
@@ -34,7 +34,7 @@ MAX_BUYS_PER_WINDOW = 999     # no cap — budget is the only limit
 ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
 SIDE_STRATEGY = 'cheapest'    # buy cheapest side, no filters
 TAKE_PROFIT_THRESHOLD = 1.50  # take profit at +150%
-STARTING_BALANCE = 20.00
+STARTING_BALANCE = 50.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
 
