@@ -325,21 +325,7 @@ def check_sells():
             if current_bid <= 0:
                 continue
 
-            # === TAKE PROFIT at +50% ===
-            gain = (current_bid - entry) / entry if entry > 0 else 0
-            if gain >= TAKE_PROFIT_THRESHOLD:
-                buy_fee = kalshi_fee(entry, count)
-                sell_fee = kalshi_fee(current_bid, count)
-                pnl = round((current_bid - entry) * count - buy_fee - sell_fee, 4)
-                if pnl > 0:
-                    logger.info(f"RAZOR TAKE PROFIT: {ticker} {side} x{count} @ ${current_bid:.2f} gain={gain*100:.0f}% pnl=${pnl:.4f}")
-                    result = place_order(ticker, side, 'sell', current_bid, count)
-                    if result:
-                        with conn.cursor() as cur:
-                            cur.execute(
-                                "UPDATE scraper_trades SET pnl=%s, fees=%s, status='closed', closed_at=NOW(), close_reason='take_profit', current_bid=%s WHERE id=%s",
-                                (float(pnl), float(buy_fee + sell_fee), float(current_bid), trade_id)
-                            )
+            # === RIDE TO SETTLEMENT ===
     finally:
         conn.close()
 
