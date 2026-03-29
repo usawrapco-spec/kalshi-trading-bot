@@ -35,7 +35,7 @@ ROUND_BUDGET_PCT = 0.25       # reinvest max 25% of total pool per round
 SIDE_STRATEGY = 'cheapest'    # buy cheapest side, no filters
 CUT_WHEN_MINS_LEFT = 5
 CUT_LOSS_THRESHOLD = -0.70
-TAKE_PROFIT_THRESHOLD = 1.50  # take profit at +150%
+TAKE_PROFIT_THRESHOLD = 0.30  # take profit at +30%
 STARTING_BALANCE = 20.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M']  # dropped DOGE (19% win rate, -$9.59)
@@ -325,7 +325,7 @@ def check_sells():
             if current_bid <= 0:
                 continue
 
-            # === TAKE PROFIT at +150% ===
+            # === TAKE PROFIT at +30% ===
             gain = (current_bid - entry) / entry if entry > 0 else 0
             if gain >= TAKE_PROFIT_THRESHOLD:
                 buy_fee = kalshi_fee(entry, count)
