@@ -33,7 +33,7 @@ MAX_POSITIONS = 100
 MAX_BUYS_PER_WINDOW = 999     # unlimited buys
 MAX_TOTAL_BET = 10.00         # max $10 in positions at any time, never reinvest
 SIDE_STRATEGY = 'momentum'    # buy based on price direction
-TAKE_PROFIT_THRESHOLD = 0.50  # take profit at +50%
+TAKE_PROFIT_THRESHOLD = 999   # disabled — ride everything to settlement
 STARTING_BALANCE = 100.00
 
 CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
