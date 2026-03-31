@@ -25,18 +25,20 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '
 BUY_MIN = 0.01
 BUY_MAX = 0.35
 TAKER_FEE_RATE = 0.07
-MAX_MINS_TO_EXPIRY = 15
+MAX_MINS_TO_EXPIRY = 1440     # 24 hours — daily events
 MIN_MINS_TO_BUY = 0           # buy entire window
 CYCLE_SECONDS = 10
 CONTRACTS = 1
 MAX_POSITIONS = 100
 MAX_BUYS_PER_WINDOW = 999     # unlimited buys
 MAX_TOTAL_BET = 10.00         # max $10 in positions at any time, never reinvest
-SIDE_STRATEGY = 'momentum'    # buy based on price direction
+SIDE_STRATEGY = 'both'        # buy both YES and NO on every market
 TAKE_PROFIT_THRESHOLD = 999   # disabled — ride everything to settlement
 STARTING_BALANCE = 100.00
 
-CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
+# Multi-strike daily/range events — way more contracts per coin
+CRYPTO_EVENT_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXDOGE', 'KXXRP',
+                       'KXBTCD', 'KXETHD', 'KXSOLD', 'KXDOGED', 'KXXRPD']
 
 # === INIT ===
 auth = KalshiAuth()
@@ -209,19 +211,24 @@ def get_open_positions():
 
 def fetch_all_markets():
     all_markets = []
-    for series in CRYPTO_SERIES:
+    for series in CRYPTO_EVENT_SERIES:
         try:
-            cursor = None
-            while True:
-                url = f'/markets?series_ticker={series}&status=open&limit=200'
-                if cursor:
-                    url += f'&cursor={cursor}'
-                resp = kalshi_get(url)
-                batch = resp.get('markets', [])
-                all_markets.extend(batch)
-                cursor = resp.get('cursor')
-                if not cursor or not batch:
-                    break
+            # Find active events for this series
+            events_resp = kalshi_get(f'/events?series_ticker={series}&status=open&limit=5')
+            events = events_resp.get('events', [])
+            for event in events:
+                event_ticker = event.get('event_ticker', '')
+                cursor = None
+                while True:
+                    url = f'/markets?event_ticker={event_ticker}&status=open&limit=200'
+                    if cursor:
+                        url += f'&cursor={cursor}'
+                    resp = kalshi_get(url)
+                    batch = resp.get('markets', [])
+                    all_markets.extend(batch)
+                    cursor = resp.get('cursor')
+                    if not cursor or not batch:
+                        break
         except Exception as e:
             logger.error(f"RAZOR Fetch {series} failed: {e}")
     return all_markets
@@ -530,7 +537,7 @@ def sync_positions():
         for pos in all_pos:
             ticker = pos.get('ticker', '')
             position_fp = sf(pos.get('position_fp', '0'))
-            if position_fp == 0 or '15M' not in ticker:
+            if position_fp == 0 or 'KX' not in ticker:
                 continue
             side = 'yes' if position_fp > 0 else 'no'
             kalshi_positions[(ticker, side)] = {
@@ -804,9 +811,8 @@ def api_analysis():
             return '$0.31-0.45'
 
         def coin_from_ticker(ticker):
-            for s in CRYPTO_SERIES:
-                prefix = s.replace('15M', '')
-                if ticker.startswith(prefix):
+            for s in CRYPTO_EVENT_SERIES:
+                if ticker.startswith(s):
                     return s
             return 'OTHER'
 
@@ -1200,7 +1206,7 @@ def razor_loop():
     init_razor_db()
     mode = "LIVE" if ENABLE_TRADING else "PAPER"
     logger.info(f"RAZOR starting [{mode}] -- buy ${BUY_MIN}-${BUY_MAX}, side={SIDE_STRATEGY}, max ${MAX_TOTAL_BET:.0f} in positions, {MAX_BUYS_PER_WINDOW} buys/window")
-    logger.info(f"RAZOR Series: {CRYPTO_SERIES}")
+    logger.info(f"RAZOR Series: {CRYPTO_EVENT_SERIES}")
     sync_positions()
 
     while True:
