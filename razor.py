@@ -22,7 +22,7 @@ DATABASE_URL = os.environ.get('DATABASE_URL', 'postgresql://kalshi:kalshi@localh
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', 'false').lower() in ('true', '1', 'yes')
 
 # === STRATEGY ===
-BUY_MIN = 0.01
+BUY_MIN = 0.03
 BUY_MAX = 0.99
 TAKER_FEE_RATE = 0.07
 MAX_MINS_TO_EXPIRY = 1440     # 24 hours — daily events
