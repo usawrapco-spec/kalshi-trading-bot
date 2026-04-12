@@ -31,15 +31,18 @@ MIN_EDGE = 0.03           # Require >= 3¢ profit per matched pair after fees (s
 CONTRACTS = 1
 TAKER_FEE_RATE = 0.07
 FEE_CAP = 0.02
-CYCLE_SECONDS = 3
-MIN_MINS_TO_EXPIRY = 2
-MAX_MINS_TO_EXPIRY = 15
+CYCLE_SECONDS = 5
+MIN_MINS_TO_EXPIRY = 5       # give orders time to fill before settle
+MAX_MINS_TO_EXPIRY = 1440    # cover hourly + daily events (up to 24h out)
 CASH_RESERVE = 0.30
 
-CRYPTO_SERIES = ['KXBTC15M', 'KXETH15M', 'KXSOL15M', 'KXXRP15M', 'KXDOGE15M']
+# Multi-strike hourly + daily events. Each event has 20+ strike markets
+# and every strike is an individual YES/NO binary — all bundle-arb targets.
+CRYPTO_SERIES = ['KXBTC', 'KXETH', 'KXSOL', 'KXXRP', 'KXDOGE',
+                 'KXBTCD', 'KXETHD', 'KXSOLD', 'KXXRPD', 'KXDOGED']
 SERIES_TO_COIN = {
-    'KXBTC15M': 'BTC', 'KXETH15M': 'ETH', 'KXSOL15M': 'SOL',
-    'KXXRP15M': 'XRP', 'KXDOGE15M': 'DOGE',
+    'KXBTC': 'BTC', 'KXETH': 'ETH', 'KXSOL': 'SOL', 'KXXRP': 'XRP', 'KXDOGE': 'DOGE',
+    'KXBTCD': 'BTC', 'KXETHD': 'ETH', 'KXSOLD': 'SOL', 'KXXRPD': 'XRP', 'KXDOGED': 'DOGE',
 }
 
 # === INIT ===
@@ -204,20 +207,28 @@ def get_balance():
 # === MARKET SCANNING ===
 
 def fetch_all_markets():
+    """Fetch via /events then /markets?event_ticker= — the list endpoint
+    with series_ticker returns markets with NULL quotes. Event endpoint
+    returns fully-populated order book fields."""
     all_markets = []
     for series in CRYPTO_SERIES:
-        cursor = None
         try:
-            while True:
-                url = f'/markets?series_ticker={series}&status=open&limit=200'
-                if cursor:
-                    url += f'&cursor={cursor}'
-                resp = kalshi_get(url)
-                batch = resp.get('markets', [])
-                all_markets.extend(batch)
-                cursor = resp.get('cursor')
-                if not cursor or not batch:
-                    break
+            events_resp = kalshi_get(f'/events?series_ticker={series}&status=open&limit=20')
+            for event in events_resp.get('events', []):
+                event_ticker = event.get('event_ticker', '')
+                if not event_ticker:
+                    continue
+                cursor = None
+                while True:
+                    url = f'/markets?event_ticker={event_ticker}&status=open&limit=200'
+                    if cursor:
+                        url += f'&cursor={cursor}'
+                    resp = kalshi_get(url)
+                    batch = resp.get('markets', [])
+                    all_markets.extend(batch)
+                    cursor = resp.get('cursor')
+                    if not cursor or not batch:
+                        break
         except Exception as e:
             logger.error(f"Fetch {series} failed: {e}")
     logger.info(f"Fetched {len(all_markets)} markets from {len(CRYPTO_SERIES)} series")
@@ -279,14 +290,9 @@ def run_matcher_cycle():
             except:
                 continue
 
-            yes_ask = sf(market.get('yes_ask', 0)) / 100 if sf(market.get('yes_ask', 0)) > 1 else sf(market.get('yes_ask', 0))
-            no_ask = sf(market.get('no_ask', 0)) / 100 if sf(market.get('no_ask', 0)) > 1 else sf(market.get('no_ask', 0))
-
-            # Normalize — Kalshi returns cents
-            if yes_ask > 1:
-                yes_ask = yes_ask / 100
-            if no_ask > 1:
-                no_ask = no_ask / 100
+            # Kalshi API returns _dollars variants as decimal strings ('0.47')
+            yes_ask = sf(market.get('yes_ask_dollars'))
+            no_ask = sf(market.get('no_ask_dollars'))
 
             existing_pair = pairs_by_ticker.get(ticker)
 
@@ -421,11 +427,9 @@ def update_open_trades(conn):
             if not market:
                 continue
             if side == 'yes':
-                bid = sf(market.get('yes_bid', 0))
+                bid = sf(market.get('yes_bid_dollars'))
             else:
-                bid = sf(market.get('no_bid', 0))
-            if bid > 1:
-                bid = bid / 100
+                bid = sf(market.get('no_bid_dollars'))
             with conn.cursor() as cur:
                 cur.execute("UPDATE matcher_trades SET current_bid = %s WHERE id = %s", (bid, trade['id']))
         except Exception as e:
@@ -556,11 +560,9 @@ def api_sell():
                 return jsonify({'success': False, 'error': 'Could not fetch market data'}), 500
 
             if side == 'yes':
-                bid = sf(market.get('yes_bid', 0))
+                bid = sf(market.get('yes_bid_dollars'))
             else:
-                bid = sf(market.get('no_bid', 0))
-            if bid > 1:
-                bid = bid / 100
+                bid = sf(market.get('no_bid_dollars'))
 
             if bid <= 0:
                 return jsonify({'success': False, 'error': f'No bid available for {side} side (bid=0)'}), 400
