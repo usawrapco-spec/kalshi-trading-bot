@@ -37,10 +37,10 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://kalshi:kalshi@localh
 PORT = int(os.environ.get("ARB_PORT", 8083))
 
 CYCLE_SECONDS = 30
-SETTLEMENT_WINDOW_MINUTES = 60   # Pair events whose close_time is within this window
-STRIKE_TOLERANCE_PCT = 0.5       # "same strike" if within 0.5% of each other
-MIN_EDGE = 0.02                  # 2¢ minimum profit for "arb hit" (after fees)
-NEAR_EDGE = 0.00                 # Log combined <= 1.00 as "near arb"
+SETTLEMENT_WINDOW_MINUTES = 360  # Pair events up to 6h apart to generate data
+STRIKE_TOLERANCE_PCT = 2.0       # Match strikes within 2% to capture more pairs
+MIN_EDGE = -0.05                 # Paper mode: log everything, even negative edge
+NEAR_EDGE = -0.05                # Log all near misses for analysis
 
 # Kalshi crypto daily series (multi-strike events)
 KALSHI_SERIES = ["KXBTCD", "KXETHD", "KXSOLD", "KXXRPD"]
@@ -234,47 +234,22 @@ def check_arb(k_strike: dict, p_strike: dict) -> list[dict]:
     Returns list of opportunities (may be 0, 1, or 2).
     """
     opps = []
-    # Kalshi taker fee eats up to $0.02/contract; Poly has ~0 explicit fee (cost in spread).
     conservative_fee = FEE_CAP
 
-    # Direction A: Kalshi YES + Poly NO
-    cost_a = k_strike["yes_ask"] + p_strike["no_ask"] + conservative_fee
-    if cost_a < 1.00 - MIN_EDGE + conservative_fee:  # normalize
-        profit_a = 1.00 - (k_strike["yes_ask"] + p_strike["no_ask"]) - conservative_fee
+    # Log BOTH directions always — we're collecting data, not filtering
+    for name, k_price, p_price in [
+        ("kalshi_yes+poly_no", k_strike["yes_ask"], p_strike["no_ask"]),
+        ("kalshi_no+poly_yes", k_strike["no_ask"], p_strike["yes_ask"]),
+    ]:
+        combined = k_price + p_price
+        profit = 1.00 - combined - conservative_fee
         opps.append({
-            "direction": "kalshi_yes+poly_no",
-            "combined_before_fees": round(k_strike["yes_ask"] + p_strike["no_ask"], 4),
-            "combined_after_fees": round(k_strike["yes_ask"] + p_strike["no_ask"] + conservative_fee, 4),
-            "profit": round(profit_a, 4),
-            "is_true_arb": profit_a >= MIN_EDGE,
+            "direction": name,
+            "combined_before_fees": round(combined, 4),
+            "combined_after_fees": round(combined + conservative_fee, 4),
+            "profit": round(profit, 4),
+            "is_true_arb": profit >= 0.02,  # flag genuinely profitable ones
         })
-
-    # Direction B: Kalshi NO + Poly YES
-    cost_b = k_strike["no_ask"] + p_strike["yes_ask"] + conservative_fee
-    if cost_b < 1.00 - MIN_EDGE + conservative_fee:
-        profit_b = 1.00 - (k_strike["no_ask"] + p_strike["yes_ask"]) - conservative_fee
-        opps.append({
-            "direction": "kalshi_no+poly_yes",
-            "combined_before_fees": round(k_strike["no_ask"] + p_strike["yes_ask"], 4),
-            "combined_after_fees": round(k_strike["no_ask"] + p_strike["yes_ask"] + conservative_fee, 4),
-            "profit": round(profit_b, 4),
-            "is_true_arb": profit_b >= MIN_EDGE,
-        })
-
-    # Also log "near misses" where combined (no fees) < 1.00
-    if not opps:
-        for name, combined in [
-            ("kalshi_yes+poly_no", k_strike["yes_ask"] + p_strike["no_ask"]),
-            ("kalshi_no+poly_yes", k_strike["no_ask"] + p_strike["yes_ask"]),
-        ]:
-            if combined <= 1.01:  # within 1¢ of par
-                opps.append({
-                    "direction": name,
-                    "combined_before_fees": round(combined, 4),
-                    "combined_after_fees": round(combined + conservative_fee, 4),
-                    "profit": round(1.00 - combined - conservative_fee, 4),
-                    "is_true_arb": False,
-                })
     return opps
 
 
