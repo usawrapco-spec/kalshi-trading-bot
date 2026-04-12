@@ -23,7 +23,7 @@ Live mode: places real resting limit orders via Kalshi REST API.
 import os, time, logging, traceback, math
 from datetime import datetime, timezone
 from threading import Thread
-from flask import Flask, jsonify, render_template_string
+from flask import Flask, jsonify, render_template_string, request
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from kalshi_auth import KalshiAuth
@@ -639,52 +639,191 @@ def bot_loop():
 
 # === FLASK ===
 
-@app.route("/")
-def index():
+@app.route("/api/data")
+def api_data():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT COUNT(*) AS n FROM compounder_orders WHERE status='resting'")
+            n_resting = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM compounder_orders WHERE status='filled'")
+            n_filled = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM compounder_orders WHERE status='settled'")
+            n_settled = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM compounder_orders WHERE status='cancelled'")
+            n_cancelled = cur.fetchone()["n"]
+            cur.execute("SELECT COALESCE(SUM(pnl),0) AS p FROM compounder_orders WHERE status='settled'")
+            total_pnl = float(cur.fetchone()["p"])
+            cur.execute("SELECT COUNT(*) AS n FROM compounder_orders WHERE status='settled' AND pnl > 0")
+            wins = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM compounder_orders WHERE status='settled' AND pnl <= 0")
+            losses = cur.fetchone()["n"]
+            cur.execute("SELECT COALESCE(SUM(vip_rebate),0) AS r FROM compounder_orders WHERE status='settled'")
+            total_rebates = float(cur.fetchone()["r"])
+
+            # Distinct pairs completed
             cur.execute("""
-                SELECT status, COUNT(*) AS n,
-                       COALESCE(SUM(pnl), 0) AS pnl,
-                       COALESCE(SUM(vip_rebate), 0) AS rebates
-                FROM compounder_orders GROUP BY status
+                SELECT COUNT(DISTINCT pair_key) AS n FROM (
+                    SELECT pair_key FROM compounder_orders
+                    WHERE status='filled' GROUP BY pair_key HAVING COUNT(*)=2
+                ) sub
             """)
-            by_status = {r["status"]: r for r in cur.fetchall()}
+            bundles = cur.fetchone()["n"]
 
             cur.execute("""
                 SELECT * FROM compounder_orders
-                WHERE status IN ('resting', 'filled')
-                ORDER BY placed_at DESC LIMIT 30
+                WHERE status IN ('resting','filled')
+                ORDER BY placed_at DESC LIMIT 40
             """)
             active = cur.fetchall()
 
             cur.execute("""
                 SELECT * FROM compounder_orders
-                WHERE status = 'settled'
-                ORDER BY settled_at DESC LIMIT 20
+                WHERE status='settled'
+                ORDER BY settled_at DESC LIMIT 30
             """)
-            recent_settled = cur.fetchall()
+            settled = cur.fetchall()
     finally:
         conn.close()
 
     return jsonify({
         "mode": "LIVE" if ENABLE_TRADING else "PAPER",
-        "by_status": {k: {"count": v["n"], "pnl": float(v["pnl"]), "rebates": float(v["rebates"])}
-                      for k, v in by_status.items()},
-        "active_orders": [
-            {k: str(v) for k, v in r.items()} for r in active
-        ],
-        "recent_settled": [
-            {k: str(v) for k, v in r.items()} for r in recent_settled
-        ],
-        "state": {
-            "cycles": _state["cycles"],
-            "fills": _state["fills"],
-            "pairs_completed": _state["pairs_completed"],
-            "last_cycle": _state["last_cycle"],
-        },
+        "resting": n_resting, "filled": n_filled, "settled": n_settled,
+        "cancelled": n_cancelled, "bundles": bundles,
+        "wins": wins, "losses": losses,
+        "pnl": round(total_pnl, 4), "rebates": round(total_rebates, 4),
+        "active": [{k: str(v) for k, v in r.items()} for r in active],
+        "settled_list": [{k: str(v) for k, v in r.items()} for r in settled],
     })
+
+
+DASHBOARD_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compounder — Market Maker</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#06080d;color:#e0e0e0;font-family:'JetBrains Mono',monospace;min-height:100vh;padding:20px}
+.header{text-align:center;margin-bottom:24px;padding:20px;background:linear-gradient(135deg,#0a0f1a,#111827);border:1px solid #1e293b;border-radius:12px}
+.header h1{font-size:28px;font-weight:700;background:linear-gradient(90deg,#fbbf24,#f59e0b,#d97706);-webkit-background-clip:text;-webkit-text-fill-color:transparent;margin-bottom:8px}
+.header .subtitle{color:#64748b;font-size:13px}
+.mode-badge{display:inline-block;padding:4px 12px;border-radius:20px;font-size:11px;font-weight:600;margin-top:8px}
+.mode-paper{background:#1e1b4b;color:#818cf8;border:1px solid #4338ca}
+.mode-live{background:#14532d;color:#4ade80;border:1px solid #16a34a;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.7}}
+
+.stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px}
+.stats-row-2{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
+.stat-card{background:#0d1117;border:1px solid #1e293b;border-radius:10px;padding:16px;text-align:center}
+.stat-card .label{color:#64748b;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px}
+.stat-card .value{font-size:24px;font-weight:700}
+.green{color:#4ade80} .red{color:#f87171} .blue{color:#60a5fa} .purple{color:#a78bfa} .yellow{color:#fbbf24} .white{color:#f8fafc}
+
+.section-title{font-size:16px;font-weight:600;color:#94a3b8;margin:24px 0 12px;display:flex;align-items:center;gap:8px}
+
+table{width:100%;border-collapse:collapse;margin-bottom:24px}
+th{text-align:left;padding:10px 12px;font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #1e293b}
+td{padding:8px 12px;font-size:12px;border-bottom:1px solid #111827;color:#94a3b8}
+tr:hover{background:#0d1117}
+
+.ticker{color:#e2e8f0;font-weight:500}
+.side-yes{color:#4ade80;font-weight:600}
+.side-no{color:#f87171;font-weight:600}
+.status-resting{color:#818cf8}
+.status-filled{color:#fbbf24}
+.status-settled{color:#64748b}
+.pnl-pos{color:#4ade80;font-weight:600}
+.pnl-neg{color:#f87171;font-weight:600}
+.pnl-zero{color:#64748b}
+
+.dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px}
+.dot-live{background:#4ade80;animation:blink 1.5s infinite}
+.dot-paper{background:#818cf8;animation:blink 2s infinite}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+
+.empty{text-align:center;padding:40px;color:#475569;font-size:14px}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>COMPOUNDER</h1>
+  <div class="subtitle">Resting-Order Market Maker + VIP Rebate Collector</div>
+  <div id="mode" class="mode-badge mode-paper">PAPER</div>
+</div>
+
+<div class="stats-row">
+  <div class="stat-card"><div class="label">Resting Orders</div><div id="resting" class="value blue">-</div></div>
+  <div class="stat-card"><div class="label">Filled (Awaiting)</div><div id="filled" class="value yellow">-</div></div>
+  <div class="stat-card"><div class="label">Bundles Complete</div><div id="bundles" class="value purple">-</div></div>
+  <div class="stat-card"><div class="label">Settled</div><div id="settled" class="value white">-</div></div>
+</div>
+<div class="stats-row-2">
+  <div class="stat-card"><div class="label">Total PnL</div><div id="pnl" class="value green">-</div></div>
+  <div class="stat-card"><div class="label">VIP Rebates</div><div id="rebates" class="value yellow">-</div></div>
+  <div class="stat-card"><div class="label">Win / Loss</div><div id="wl" class="value white">-</div></div>
+  <div class="stat-card"><div class="label">Win Rate</div><div id="winrate" class="value green">-</div></div>
+</div>
+
+<div class="section-title"><span class="dot dot-paper"></span>ACTIVE ORDERS</div>
+<table>
+<thead><tr><th>Ticker</th><th>Side</th><th>Price</th><th>Status</th><th>Placed</th></tr></thead>
+<tbody id="active-body"><tr><td colspan="5" class="empty">Loading...</td></tr></tbody>
+</table>
+
+<div class="section-title">SETTLEMENT HISTORY</div>
+<table>
+<thead><tr><th>Ticker</th><th>Side</th><th>Price</th><th>Result</th><th>PnL</th><th>Settled</th></tr></thead>
+<tbody id="settled-body"><tr><td colspan="6" class="empty">Loading...</td></tr></tbody>
+</table>
+
+<script>
+function fmt(v){return v===null||v==='None'?'-':v}
+function fmtPrice(v){let n=parseFloat(v);return isNaN(n)?'-':'$'+n.toFixed(2)}
+function fmtPnl(v){let n=parseFloat(v);if(isNaN(n))return'-';let c=n>0?'pnl-pos':n<0?'pnl-neg':'pnl-zero';return'<span class="'+c+'">$'+n.toFixed(4)+'</span>'}
+function fmtSide(s){return s==='yes'?'<span class="side-yes">YES</span>':'<span class="side-no">NO</span>'}
+function fmtStatus(s){return'<span class="status-'+s+'">'+s.toUpperCase()+'</span>'}
+function ago(ts){if(!ts||ts==='None')return'-';let d=new Date(ts),now=new Date(),m=Math.floor((now-d)/60000);if(m<1)return'just now';if(m<60)return m+'m ago';let h=Math.floor(m/60);return h+'h '+m%60+'m ago'}
+function shortTicker(t){let p=t.split('-');if(p.length>=3)return p[0]+' '+p.slice(2).join('-');return t}
+
+function refresh(){
+  fetch('/api/data').then(r=>r.json()).then(d=>{
+    document.getElementById('mode').className='mode-badge mode-'+(d.mode==='LIVE'?'live':'paper');
+    document.getElementById('mode').textContent=d.mode;
+    document.getElementById('resting').textContent=d.resting;
+    document.getElementById('filled').textContent=d.filled;
+    document.getElementById('bundles').textContent=d.bundles;
+    document.getElementById('settled').textContent=d.settled;
+    document.getElementById('pnl').textContent='$'+d.pnl.toFixed(4);
+    document.getElementById('pnl').className='value '+(d.pnl>=0?'green':'red');
+    document.getElementById('rebates').textContent='$'+d.rebates.toFixed(4);
+    document.getElementById('wl').textContent=d.wins+'W / '+d.losses+'L';
+    let wr=d.wins+d.losses>0?Math.round(d.wins/(d.wins+d.losses)*100):0;
+    document.getElementById('winrate').textContent=wr+'%';
+    document.getElementById('winrate').className='value '+(wr>=50?'green':'red');
+
+    let ab=document.getElementById('active-body');
+    if(d.active.length===0){ab.innerHTML='<tr><td colspan="5" class="empty">No active orders</td></tr>';}
+    else{ab.innerHTML=d.active.map(o=>'<tr><td class="ticker">'+shortTicker(o.ticker)+'</td><td>'+fmtSide(o.side)+'</td><td>'+fmtPrice(o.price)+'</td><td>'+fmtStatus(o.status)+'</td><td>'+ago(o.placed_at)+'</td></tr>').join('');}
+
+    let sb=document.getElementById('settled-body');
+    if(d.settled_list.length===0){sb.innerHTML='<tr><td colspan="6" class="empty">No settlements yet</td></tr>';}
+    else{sb.innerHTML=d.settled_list.map(o=>'<tr><td class="ticker">'+shortTicker(o.ticker)+'</td><td>'+fmtSide(o.side)+'</td><td>'+fmtPrice(o.price)+'</td><td>'+(o.settle_result||'-')+'</td><td>'+fmtPnl(o.pnl)+'</td><td>'+ago(o.settled_at)+'</td></tr>').join('');}
+  }).catch(e=>console.error('refresh error',e));
+}
+
+refresh();
+setInterval(refresh,5000);
+</script>
+</body>
+</html>"""
+
+
+@app.route("/")
+def index():
+    return render_template_string(DASHBOARD_HTML)
 
 
 if __name__ == "__main__":
