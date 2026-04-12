@@ -27,7 +27,7 @@ ENABLE_TRADING = os.environ.get('ENABLE_TRADING', '').lower() in ('1', 'true', '
 # === STRATEGY ===
 STARTING_BALANCE = 100.00
 BUY_MAX = 0.97            # Per-leg sanity cap only — bundle profit is gated by combined+fees
-MIN_EDGE = -0.02          # Paper mode: accept up to 2¢ loss to generate settlement data
+MIN_EDGE = -0.05          # Paper mode: accept up to 5¢ loss to generate settlement data
 CONTRACTS = 1
 TAKER_FEE_RATE = 0.07
 FEE_CAP = 0.02
