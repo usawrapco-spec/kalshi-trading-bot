@@ -25,13 +25,14 @@ PORT = int(os.environ.get('MATCHER_PORT', 8082))
 ENABLE_TRADING = os.environ.get('ENABLE_TRADING', '').lower() in ('1', 'true', 'yes')
 
 # === STRATEGY ===
-STARTING_BALANCE = 10.00
-BUY_MAX = 0.40
+STARTING_BALANCE = 100.00
+BUY_MAX = 0.97            # Per-leg sanity cap only — bundle profit is gated by combined+fees
+MIN_EDGE = 0.03           # Require >= 3¢ profit per matched pair after fees (slippage buffer)
 CONTRACTS = 1
 TAKER_FEE_RATE = 0.07
 FEE_CAP = 0.02
-CYCLE_SECONDS = 2
-MIN_MINS_TO_EXPIRY = 10
+CYCLE_SECONDS = 3
+MIN_MINS_TO_EXPIRY = 2
 MAX_MINS_TO_EXPIRY = 15
 CASH_RESERVE = 0.30
 
@@ -318,37 +319,23 @@ def run_matcher_cycle():
                 if 0 < no_ask <= BUY_MAX:
                     sides_to_try.append(('no', no_ask))
 
-                # If both sides are cheap enough, buy both immediately
+                # BUNDLE ARB ONLY: both legs must exist AND combined price + fees <= 1.00 - MIN_EDGE.
+                # Never open a one-sided position — that's speculation, not arb.
                 if len(sides_to_try) == 2:
-                    total_cost = sum(p * CONTRACTS + kalshi_fee(p, CONTRACTS) for _, p in sides_to_try)
-                    combined_price = sides_to_try[0][1] + sides_to_try[1][1]
-                    # Only buy both if there's guaranteed profit
-                    yes_fee = kalshi_fee(sides_to_try[0][1] if sides_to_try[0][0] == 'yes' else sides_to_try[1][1], CONTRACTS)
-                    no_fee = kalshi_fee(sides_to_try[1][1] if sides_to_try[1][0] == 'no' else sides_to_try[0][1], CONTRACTS)
-                    profit = 1.00 * CONTRACTS - combined_price * CONTRACTS - yes_fee - no_fee
-                    if profit > 0 and total_cost <= deployable:
+                    yp = next(p for s, p in sides_to_try if s == 'yes')
+                    np_ = next(p for s, p in sides_to_try if s == 'no')
+                    yes_fee = kalshi_fee(yp, CONTRACTS)
+                    no_fee = kalshi_fee(np_, CONTRACTS)
+                    total_cost = (yp + np_) * CONTRACTS + yes_fee + no_fee
+                    profit = 1.00 * CONTRACTS - (yp + np_) * CONTRACTS - yes_fee - no_fee
+                    if profit >= MIN_EDGE and total_cost <= deployable:
+                        logger.info(f"EDGE FOUND {ticker}: yes={yp:.2f} no={np_:.2f} profit=${profit:.4f}")
                         pair_id = create_pair(conn, ticker, coin)
                         for side, price in sides_to_try:
                             trade_id = execute_buy(conn, ticker, side, price, CONTRACTS, pair_id)
                             if trade_id:
                                 complete_pair(conn, pair_id, side, trade_id, price)
                                 deployable -= price * CONTRACTS + kalshi_fee(price, CONTRACTS)
-
-                elif len(sides_to_try) == 1:
-                    side, price = sides_to_try[0]
-                    cost = price * CONTRACTS + kalshi_fee(price, CONTRACTS)
-                    # Only start a pair if the other side could still be profitable
-                    max_other = 1.00 - price  # theoretical max for other side
-                    if max_other > BUY_MAX:
-                        # Other side would need to be under BUY_MAX for profit, which means
-                        # total < price + BUY_MAX, guaranteed profit > 1 - price - BUY_MAX - fees
-                        potential = 1.00 - price - BUY_MAX - kalshi_fee(price) - kalshi_fee(BUY_MAX)
-                        if potential > 0 and cost <= deployable:
-                            pair_id = create_pair(conn, ticker, coin)
-                            trade_id = execute_buy(conn, ticker, side, price, CONTRACTS, pair_id)
-                            if trade_id:
-                                complete_pair(conn, pair_id, side, trade_id, price)
-                                deployable -= cost
 
         update_open_trades(conn)
         check_settlements(conn)

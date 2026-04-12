@@ -1,10 +1,11 @@
-"""Entry point — runs RAZOR scalper bot."""
+"""Entry point — runs MATCHER bundle-arb bot (Kalshi YES+NO lock-in)."""
+import os
 from threading import Thread
-from razor import razor_loop, app, init_razor_db
+from matcher import bot_loop, app, init_db
 
-PORT = __import__('os').environ.get('PORT', 8080)
+PORT = int(os.environ.get('PORT', 8080))
 
 if __name__ == '__main__':
-    init_razor_db()
-    Thread(target=razor_loop, daemon=True).start()
-    app.run(host='0.0.0.0', port=int(PORT))
+    init_db()
+    Thread(target=bot_loop, daemon=True).start()
+    app.run(host='0.0.0.0', port=PORT)
