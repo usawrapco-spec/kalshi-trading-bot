@@ -451,7 +451,7 @@ def check_settlements(conn):
             status = market.get('status', '')
             result = market.get('result', '')
 
-            if status in ('settled', 'closed', 'finalized') or result:
+            if status in ('settled', 'closed', 'finalized') and result in ('yes', 'no'):
                 yp = sf(pair['yes_price'])
                 np = sf(pair['no_price'])
                 yes_fee = kalshi_fee(yp, CONTRACTS)
@@ -498,7 +498,7 @@ def check_settlements(conn):
                 continue
             status = market.get('status', '')
             result = market.get('result', '')
-            if status in ('settled', 'closed', 'finalized') or result:
+            if status in ('settled', 'closed', 'finalized') and result in ('yes', 'no'):
                 # Unmatched pair settled — only one side was bought
                 with conn.cursor() as cur:
                     cur.execute("UPDATE matcher_pairs SET status = 'settled', settled_at = NOW() WHERE id = %s", (pair['id'],))

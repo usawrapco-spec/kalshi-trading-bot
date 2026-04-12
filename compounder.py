@@ -47,7 +47,7 @@ CONTRACTS = 1              # 1 contract per order (small size)
 MAX_OPEN_ORDERS = 20       # Max simultaneous resting orders
 MAX_POSITIONS = 30         # Max positions held (filled, awaiting settlement)
 CYCLE_SECONDS = 15         # How often to scan + refresh orders
-CANCEL_IF_FILLED = True    # Cancel the other side if one side fills (don't go naked)
+CANCEL_IF_FILLED = False   # Keep both sides live — goal is bundle completion, not singles
 TAKER_FEE_RATE = 0.07
 FEE_CAP = 0.02
 MAKER_FEE = 0.00           # Makers pay $0 on Kalshi
@@ -426,7 +426,7 @@ def check_settlements(conn):
             status = market.get("status", "")
             result = market.get("result", "")
 
-            if status in ("settled", "closed", "finalized") or result:
+            if status in ("settled", "closed", "finalized") and result in ("yes", "no"):
                 price = float(order["price"])
                 side = order["side"]
                 if result == side:
